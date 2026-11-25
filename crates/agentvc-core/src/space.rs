@@ -521,6 +521,23 @@ impl Space {
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
 
+    /// Whether attempt `id` was forked, directly or through other attempts,
+    /// from attempt `ancestor`.
+    pub fn descends_from(&self, id: i64, ancestor: i64) -> Result<bool> {
+        let mut next = self.attempt(id)?.parent_attempt;
+        let mut seen = std::collections::HashSet::new();
+        while let Some(p) = next {
+            if p == ancestor {
+                return Ok(true);
+            }
+            if !seen.insert(p) {
+                break;
+            }
+            next = self.attempt(p)?.parent_attempt;
+        }
+        Ok(false)
+    }
+
     /// The attempt whose view contains `path` (the deepest match wins, so a
     /// path inside `.agentvc/views/a3` resolves to a3, not the root attempt).
     pub fn attempt_for_path(&self, path: &Path) -> Result<Attempt> {
@@ -908,15 +925,7 @@ impl Space {
                 status: attempt.status.to_string(),
             });
         }
-        // Never capture an unmounted overlay view: it would look empty.
-        self.ensure_view(&attempt)?;
-        let index = self
-            .workdir
-            .join(SPACE_DIR)
-            .join("index")
-            .join(format!("a{attempt_id}"));
-        let tree =
-            snapshot::capture_indexed(&self.objects, &attempt.view_path, Some(&index))?.to_hex();
+        let tree = self.capture_view(&attempt)?.to_hex();
         if !always {
             // A fresh fork compares against the snapshot it was forked from.
             if let Ok(last) = self.head_snapshot(attempt_id) {
@@ -944,6 +953,20 @@ impl Space {
             snapshot: snap,
             unchanged: false,
         })
+    }
+
+    /// Write the current state of an attempt's view into the object store and
+    /// return its tree, without recording a snapshot (for `diff` and
+    /// `status` on the working state).
+    pub fn capture_view(&self, attempt: &Attempt) -> Result<Oid> {
+        // Never capture an unmounted overlay view: it would look empty.
+        self.ensure_view(attempt)?;
+        let index = self
+            .workdir
+            .join(SPACE_DIR)
+            .join("index")
+            .join(format!("a{}", attempt.id));
+        snapshot::capture_indexed(&self.objects, &attempt.view_path, Some(&index))
     }
 
     /// Resolve a reference to a stored snapshot.

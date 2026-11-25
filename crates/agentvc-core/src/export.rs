@@ -35,8 +35,11 @@ pub struct ExportOptions {
     pub base: Option<String>,
     /// Commit message. Defaults to the task goal.
     pub message: Option<String>,
-    /// Move the branch if it already exists.
+    /// Move the branch if it already exists. Not needed when the new commit
+    /// fast-forwards the branch.
     pub force: bool,
+    /// Extra `Key: value` trailers for the commit message, after agentvc's.
+    pub trailers: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -48,8 +51,11 @@ pub struct ExportResult {
     pub commit: String,
     pub parent: Option<String>,
     pub tree: String,
-    /// The commit the branch pointed to before, when `force` moved it.
+    /// The commit the branch pointed to before, when the export moved it.
     pub replaced: Option<String>,
+    /// True when the branch was checked out in the host repo, so its index
+    /// and working tree were moved to the new commit too.
+    pub checkout_updated: bool,
     pub objects_copied: usize,
 }
 
@@ -149,6 +155,20 @@ impl HostRepo {
         .filter(|s| !s.is_empty())
     }
 
+    /// Whether commit `a` is an ancestor of (or equal to) commit `b`.
+    pub fn is_ancestor(&self, a: &str, b: &str) -> bool {
+        self.git(&["merge-base", "--is-ancestor", a, b], None)
+            .is_ok()
+    }
+
+    /// The branch checked out in the host repo, if any (`None` when HEAD is
+    /// detached).
+    pub fn checked_out_branch(&self) -> Option<String> {
+        self.git(&["symbolic-ref", "--quiet", "HEAD"], None)
+            .ok()
+            .and_then(|r| r.strip_prefix("refs/heads/").map(str::to_string))
+    }
+
     pub(crate) fn objects_dir(&self) -> Result<PathBuf> {
         let p = self.git(
             &[
@@ -214,6 +234,7 @@ pub fn commit_message(
     attempt: &Attempt,
     snapshot: &Snapshot,
     message: Option<&str>,
+    trailers: &[String],
 ) -> Result<String> {
     let task = attempt.task_id.map(|t| space.task(t)).transpose()?;
     let mut msg = match (message, &task) {
@@ -248,6 +269,13 @@ pub fn commit_message(
     if let Some(m) = &attempt.model {
         msg += &format!("Agentvc-Model: {m}\n");
     }
+    for t in trailers {
+        let t = t.trim();
+        if !t.is_empty() {
+            msg += t;
+            msg.push('\n');
+        }
+    }
     Ok(msg)
 }
 
@@ -266,10 +294,9 @@ pub fn export(space: &Space, attempt_id: i64, opts: &ExportOptions) -> Result<Ex
     }
     let refname = format!("refs/heads/{}", opts.branch);
     let existing = repo.rev(&refname);
-    if existing.is_some() && !opts.force {
-        return Err(Error::BranchExists(opts.branch.clone()));
-    }
-    if repo.git(&["symbolic-ref", "--quiet", "HEAD"], None).ok() == Some(refname.clone()) {
+    let checked_out = repo.checked_out_branch().as_deref() == Some(opts.branch.as_str());
+    if checked_out && existing.is_none() {
+        // An unborn branch: there is no commit to move the checkout from.
         return Err(Error::BranchCheckedOut(opts.branch.clone()));
     }
 
@@ -298,7 +325,13 @@ pub fn export(space: &Space, attempt_id: i64, opts: &ExportOptions) -> Result<Ex
     let tree = Oid::from_hex(&snapshot.tree)?;
     let objects_copied = copy_tree_objects(space, &tree, &repo.objects_dir()?)?;
 
-    let message = commit_message(space, &attempt, &snapshot, opts.message.as_deref())?;
+    let message = commit_message(
+        space,
+        &attempt,
+        &snapshot,
+        opts.message.as_deref(),
+        &opts.trailers,
+    )?;
     let mut args = vec!["commit-tree", snapshot.tree.as_str()];
     if let Some(p) = &parent {
         args.extend(["-p", p.as_str()]);
@@ -317,14 +350,43 @@ pub fn export(space: &Space, attempt_id: i64, opts: &ExportOptions) -> Result<Ex
     }
     let commit = repo.git_env(&args, Some(&message), &env)?;
 
+    // An existing branch moves without --force only when the new commit
+    // builds on it, as `git push` would allow.
+    if let Some(old) = &existing {
+        if !opts.force && !repo.is_ancestor(old, &commit) {
+            return Err(Error::BranchExists(opts.branch.clone()));
+        }
+    }
+    // A checked-out branch (a cloud thread's own branch) carries its index
+    // and working tree along, so the checkout does not look dirty. The
+    // two-tree read-tree refuses, changing nothing, when local edits would
+    // be overwritten.
+    if checked_out {
+        let old = existing.as_deref().expect("checked out branch exists");
+        repo.git(&["read-tree", "-m", "-u", old, &commit], None)
+            .map_err(|e| match e {
+                Error::Git { stderr, .. } => Error::CheckoutDirty {
+                    branch: opts.branch.clone(),
+                    stderr,
+                },
+                other => other,
+            })?;
+    }
+
     // Compare-and-swap: creation fails if the branch appeared meanwhile, and a
-    // forced move fails if it changed since we looked.
+    // move fails if it changed since we looked.
     let old = existing.clone().unwrap_or_else(|| ZERO_OID.to_string());
     let reflog = format!("agentvc export a{attempt_id}");
-    repo.git(
+    if let Err(e) = repo.git(
         &["update-ref", "-m", &reflog, &refname, &commit, &old],
         None,
-    )?;
+    ) {
+        if checked_out {
+            // Put the checkout back where the branch still is.
+            let _ = repo.git(&["read-tree", "-m", "-u", &commit, &old], None);
+        }
+        return Err(e);
+    }
 
     space.db.execute(
         "INSERT INTO exports (attempt_id, snapshot_id, branch, commit_id, parent, created_at)
@@ -349,6 +411,7 @@ pub fn export(space: &Space, attempt_id: i64, opts: &ExportOptions) -> Result<Ex
         commit,
         parent,
         replaced: existing,
+        checkout_updated: checked_out,
         objects_copied,
     })
 }
@@ -549,24 +612,98 @@ mod tests {
                 &space,
                 a.id,
                 &ExportOptions {
-                    branch: "main".into(),
-                    force: true,
-                    ..Default::default()
-                }
-            ),
-            Err(Error::BranchCheckedOut(_))
-        ));
-        assert!(matches!(
-            export(
-                &space,
-                a.id,
-                &ExportOptions {
                     branch: "bad..name".into(),
                     ..Default::default()
                 }
             ),
             Err(Error::BadBranch(_))
         ));
+    }
+
+    #[test]
+    fn checked_out_branch_fast_forwards_with_its_checkout() {
+        let (tmp, space, head) = repo();
+        let w = tmp.path();
+        let task = space.create_task("t", None).unwrap();
+        let a = fork(&space, task.id, "agent");
+        fs::write(a.view_path.join("src/lib.rs"), "pub fn f() -> u32 { 2 }\n").unwrap();
+        let opts = ExportOptions {
+            branch: "main".into(),
+            trailers: vec!["Co-Authored-By: Bot <bot@example.com>".into(), " ".into()],
+            ..Default::default()
+        };
+        // main is checked out at the commit the attempt is based on: no
+        // --force needed, and the checkout moves along cleanly.
+        let r = export(&space, a.id, &opts).unwrap();
+        assert!(r.checkout_updated);
+        assert_eq!(r.replaced.as_deref(), Some(head.as_str()));
+        assert_eq!(git(w, &["rev-parse", "HEAD"]), r.commit);
+        assert_eq!(
+            git(w, &["status", "--porcelain", "--untracked-files=no"]),
+            ""
+        );
+        assert_eq!(
+            fs::read_to_string(w.join("src/lib.rs")).unwrap(),
+            "pub fn f() -> u32 { 2 }\n"
+        );
+        let msg = git(w, &["log", "-1", "--format=%B"]);
+        assert!(
+            msg.ends_with("Agentvc-Model: model-x\nCo-Authored-By: Bot <bot@example.com>"),
+            "{msg}"
+        );
+        let co = git(
+            w,
+            &[
+                "log",
+                "-1",
+                "--format=%(trailers:key=Co-Authored-By,valueonly)",
+            ],
+        );
+        assert_eq!(co, "Bot <bot@example.com>");
+
+        // A second export of the attempt parents on the same base again, so
+        // it no longer fast-forwards: that needs --force.
+        fs::write(a.view_path.join("x"), "x\n").unwrap();
+        fs::write(a.view_path.join("src/lib.rs"), "pub fn f() -> u32 { 3 }\n").unwrap();
+        assert!(matches!(
+            export(&space, a.id, &opts),
+            Err(Error::BranchExists(_))
+        ));
+        // Local edits the export would overwrite: refused, nothing moves.
+        fs::write(w.join("src/lib.rs"), "local edit\n").unwrap();
+        let err = export(
+            &space,
+            a.id,
+            &ExportOptions {
+                force: true,
+                ..opts.clone()
+            },
+        )
+        .unwrap_err();
+        assert_eq!(err.code(), "checkout_dirty", "{err}");
+        assert_eq!(git(w, &["rev-parse", "HEAD"]), r.commit);
+        assert_eq!(
+            fs::read_to_string(w.join("src/lib.rs")).unwrap(),
+            "local edit\n"
+        );
+
+        // Without the edit, --force moves the branch and the checkout.
+        git(w, &["checkout", "--", "src/lib.rs"]);
+        let r2 = export(
+            &space,
+            a.id,
+            &ExportOptions {
+                force: true,
+                ..opts.clone()
+            },
+        )
+        .unwrap();
+        assert_eq!(git(w, &["rev-parse", "HEAD"]), r2.commit);
+        assert_eq!(fs::read_to_string(w.join("x")).unwrap(), "x\n");
+        assert_eq!(
+            git(w, &["status", "--porcelain", "--untracked-files=no"]),
+            ""
+        );
     }
 
     #[test]

@@ -126,6 +126,12 @@ enum Cmd {
     },
     /// Pick an attempt as the winner; its open siblings are abandoned.
     Promote { attempt: String },
+    /// Where am I and what is going on. Inside an attempt's view (or with
+    /// aN): its task, status, head snapshot, files changed since it, active
+    /// runs, PR, and whether main has moved since its base (`behind`). In the
+    /// host checkout: open tasks with their attempts, what needs review and
+    /// what is running. Takes no snapshot and fetches nothing.
+    Status { attempt: Option<String> },
     /// Show attempts as a tree.
     Log {
         #[arg(long)]
@@ -133,8 +139,23 @@ enum Cmd {
     },
     /// Show one attempt and its snapshots.
     Show { attempt: String },
-    /// List files that differ between two refs (default: from the parent snapshot).
-    Diff { a: String, b: Option<String> },
+    /// Compare two refs (aN or sN). With one attempt, compares it with the
+    /// snapshot it was forked from (or the commit it was rebased onto). With
+    /// no refs, inside a view, compares the view's working state with that
+    /// base, without taking a snapshot first.
+    Diff {
+        a: Option<String>,
+        b: Option<String>,
+        /// Print a unified diff; `--json` adds per-file hunks.
+        #[arg(long, short = 'p')]
+        patch: bool,
+        /// Print changed lines per file, like `git diff --stat`.
+        #[arg(long)]
+        stat: bool,
+        /// Lines of context around changes in --patch.
+        #[arg(long, short = 'U', default_value_t = agentvc_core::patch::DEFAULT_CONTEXT, value_name = "N")]
+        unified: usize,
+    },
     /// Print the view directory of an attempt, mounting an overlay view first
     /// if it is not mounted (for example after a reboot).
     Path { attempt: String },
@@ -158,9 +179,13 @@ enum Cmd {
         /// Commit to parent on. Defaults to the HEAD recorded at init.
         #[arg(long)]
         base: Option<String>,
-        /// Move the branch if it already exists.
+        /// Move the branch if it already exists and the new commit does not
+        /// build on it.
         #[arg(long)]
         force: bool,
+        /// Extra commit trailer, as "Key: value". Repeatable.
+        #[arg(long = "trailer", value_name = "KEY: VALUE")]
+        trailers: Vec<String>,
     },
     /// Rebase an attempt onto a newer commit of the host repo, so `export`
     /// and `pr` carry only its own changes. Three-way merges the attempt's
@@ -190,7 +215,9 @@ enum Cmd {
         /// Branch the PR merges into. Defaults to the repo's default branch.
         #[arg(long)]
         base: Option<String>,
-        /// Branch to push. Defaults to agentvc/aN.
+        /// Branch to push. Defaults to `agentvc config pr.branch`,
+        /// $AGENTVC_PR_BRANCH, then agentvc/aN. If it is the branch checked
+        /// out here, the checkout moves along with it.
         #[arg(long)]
         branch: Option<String>,
         #[arg(long)]
@@ -206,9 +233,33 @@ enum Cmd {
         /// Move the branch even if another attempt exported to it.
         #[arg(long)]
         force: bool,
+        /// File (or - for stdin) whose text goes above the generated body,
+        /// for example attribution lines. Kept on later updates; defaults to
+        /// the file in `agentvc config pr.body-prefix`.
+        #[arg(long, value_name = "FILE")]
+        body_prefix: Option<PathBuf>,
+        /// Extra trailer for the exported commit, as "Key: value".
+        /// Repeatable; added to those in `agentvc config pr.trailer`.
+        #[arg(long = "trailer", value_name = "KEY: VALUE")]
+        trailers: Vec<String>,
         /// Do not sync the space to the remote afterwards.
         #[arg(long)]
         no_sync: bool,
+    },
+    /// Read or change this space's settings. With no key, lists them all.
+    ///
+    /// Keys: pr.branch (also $AGENTVC_PR_BRANCH), pr.base ($AGENTVC_PR_BASE),
+    /// pr.trailer (a list: use --add), pr.body-prefix (a file, relative to
+    /// the space; $AGENTVC_PR_BODY_PREFIX).
+    Config {
+        key: Option<String>,
+        value: Option<String>,
+        /// Append the value to a list setting (pr.trailer).
+        #[arg(long)]
+        add: bool,
+        /// Remove the setting.
+        #[arg(long, conflicts_with = "value")]
+        unset: bool,
     },
     /// Fork a new attempt and run a command (usually an agent) inside its view.
     ///
@@ -372,22 +423,30 @@ fn main() -> ExitCode {
     }
 }
 
-fn diff_out(from: String, to: Ref, changes: &[agentvc_core::snapshot::FileChange]) -> Out {
+/// What `diff aN` compares an attempt with: the commit it was last rebased
+/// onto (so main's newer changes are not listed), else the snapshot it was
+/// forked from. `None` for the root attempt. Returns the label and the tree.
+fn attempt_base(space: &Space, id: i64) -> anyhow::Result<Option<(String, String)>> {
+    if let Some(base) = space.own_git_base(id)? {
+        return Ok(Some((format!("git:{}", base.commit), base.tree)));
+    }
+    Ok(match space.attempt(id)?.parent_snapshot {
+        Some(p) => Some((format!("s{p}"), space.snapshot_by_id(p)?.tree)),
+        None => None,
+    })
+}
+
+fn diff_out(from: String, to: String, changes: &[agentvc_core::snapshot::FileChange]) -> Out {
     let mut text = String::new();
     for c in changes {
-        let mark = match c.kind {
-            ChangeKind::Added => 'A',
-            ChangeKind::Modified => 'M',
-            ChangeKind::Removed => 'D',
-        };
-        text += &format!("{mark}  {}\n", c.path);
+        text += &format!("{}  {}\n", change_mark(c.kind), c.path);
     }
     if changes.is_empty() {
         text = "no differences".into();
     }
     Out {
         text,
-        json: json!({ "from": from, "to": to.to_string(), "changes": changes }),
+        json: json!({ "from": from, "to": to, "changes": changes }),
     }
 }
 
@@ -739,6 +798,19 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
             add_sync(&mut out, agentvc_core::sync::auto_sync(&space));
             out
         }
+        Cmd::Status { attempt } => {
+            let id = match attempt {
+                Some(a) => Some(attempt_id(&a)?),
+                None => match space.attempt_for_path(&cwd) {
+                    Ok(a) if a.id != agentvc_core::space::ROOT_ATTEMPT => Some(a.id),
+                    _ => None,
+                },
+            };
+            match id {
+                Some(id) => attempt_status_out(space.attempt_status(id)?),
+                None => space_status_out(space.space_status()?),
+            }
+        }
         Cmd::Overview { out } => overview_out(&space, out.as_deref(), cli.json)?,
         Cmd::Log { task } => {
             let task = task.map(|t| parse_id(&t, 't', "task")).transpose()?;
@@ -786,29 +858,83 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
                 json: json!({ "attempt": a, "snapshots": snaps }),
             }
         }
-        Cmd::Diff { a, b } => {
-            let ra = parse_ref(&a)?;
-            let (from, to) = match b {
-                Some(b) => (ra, parse_ref(&b)?),
-                None => {
-                    let Ref::Attempt(id) = ra else {
+        Cmd::Diff {
+            a,
+            b,
+            patch,
+            stat,
+            unified,
+        } => {
+            let (from, from_tree, to, to_tree) = match (a, b) {
+                (Some(a), Some(b)) => {
+                    let (ra, rb) = (parse_ref(&a)?, parse_ref(&b)?);
+                    let ta = space.resolve(ra)?.tree;
+                    let tb = space.resolve(rb)?.tree;
+                    (ra.to_string(), ta, rb.to_string(), tb)
+                }
+                (Some(a), None) => {
+                    let Ref::Attempt(id) = parse_ref(&a)? else {
                         anyhow::bail!("diff with one argument needs an attempt (aN)");
                     };
-                    // A rebased attempt is compared with the commit it was
-                    // rebased onto, so main's newer changes are not listed.
-                    if let Some(base) = space.own_git_base(id)? {
-                        let changes = space.own_changes(id)?;
-                        return Ok(diff_out(format!("git:{}", base.commit), ra, &changes));
-                    }
-                    let parent = space
-                        .attempt(id)?
-                        .parent_snapshot
+                    let (from, from_tree) = attempt_base(&space, id)?
                         .ok_or_else(|| anyhow::anyhow!("a{id} has no parent; pass two refs"))?;
-                    (Ref::Snapshot(parent), ra)
+                    let to_tree = space.head_snapshot(id)?.tree;
+                    (from, from_tree, format!("a{id}"), to_tree)
+                }
+                (None, _) => {
+                    // The working state of the current view, like `git diff`.
+                    let a = space.attempt(current()?)?;
+                    if !a.status.is_open() {
+                        anyhow::bail!(
+                            "a{} is {}; pass refs to compare its history",
+                            a.id,
+                            a.status
+                        );
+                    }
+                    let to_tree = space.capture_view(&a)?.to_hex();
+                    let (from, from_tree) = match attempt_base(&space, a.id)? {
+                        Some(b) => b,
+                        // The root attempt: changes since its last snapshot.
+                        None => {
+                            let h = space.head_snapshot(a.id)?;
+                            (format!("s{}", h.id), h.tree)
+                        }
+                    };
+                    (from, from_tree, format!("a{} (working)", a.id), to_tree)
                 }
             };
-            let changes = space.diff(from, to)?;
-            diff_out(from.to_string(), to, &changes)
+            let (ta, tb) = (
+                agentvc_core::objects::Oid::from_hex(&from_tree)?,
+                agentvc_core::objects::Oid::from_hex(&to_tree)?,
+            );
+            if patch || stat {
+                let mut files =
+                    agentvc_core::patch::diff_trees(space.objects(), &ta, &tb, unified)?;
+                let mut text = String::new();
+                if stat {
+                    text += &agentvc_core::patch::render_stat(&files);
+                }
+                if patch {
+                    if stat {
+                        text.push('\n');
+                    }
+                    text += &agentvc_core::patch::render(&files);
+                } else {
+                    for f in &mut files {
+                        f.hunks.clear();
+                    }
+                }
+                if files.is_empty() {
+                    text = "no differences".into();
+                }
+                Out {
+                    text,
+                    json: json!({ "from": from, "to": to, "changes": files }),
+                }
+            } else {
+                let changes = agentvc_core::snapshot::diff(space.objects(), &ta, &tb)?;
+                diff_out(from, to, &changes)
+            }
         }
         Cmd::Run {
             task,
@@ -885,7 +1011,11 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
                         log.display()
                     ),
                     json: json!({
-                        "attempt": fork.attempt, "run": run, "pid": child.id(), "hooks": hooks,
+                        "attempt": fork.attempt,
+                        "run": run,
+                        "pid": child.id(),
+                        "hooks": hooks,
+                        "fork": fork_json(&fork),
                     }),
                 }
             } else {
@@ -916,6 +1046,7 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
                         "hooks": hooks,
                         "hook_snapshots": out.hook_snapshots,
                         "warnings": out.warnings,
+                        "fork": fork_json(&fork),
                     }),
                 };
                 add_sync(&mut res, agentvc_core::sync::auto_sync(&space));
@@ -996,12 +1127,14 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
             message,
             base,
             force,
+            trailers,
         } => {
             let opts = ExportOptions {
                 branch,
                 base,
                 message,
                 force,
+                trailers,
             };
             let r = agentvc_core::export::export(&space, attempt_id(&attempt)?, &opts)?;
             Out {
@@ -1071,6 +1204,12 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
                 json: json!({ "rebase": r }),
             }
         }
+        Cmd::Config {
+            key,
+            value,
+            add,
+            unset,
+        } => config_cmd(&space, key, value, add, unset)?,
         Cmd::Pr {
             attempt,
             base,
@@ -1080,8 +1219,22 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
             remote,
             repo,
             force,
+            body_prefix,
+            trailers,
             no_sync,
         } => {
+            let body_prefix = match body_prefix {
+                Some(p) if p.as_os_str() == "-" => {
+                    let mut s = String::new();
+                    std::io::Read::read_to_string(&mut std::io::stdin(), &mut s)?;
+                    Some(s)
+                }
+                Some(p) => Some(
+                    std::fs::read_to_string(cwd.join(&p))
+                        .map_err(|e| anyhow::anyhow!("--body-prefix {}: {e}", p.display()))?,
+                ),
+                None => None,
+            };
             let opts = PrOptions {
                 branch,
                 base,
@@ -1090,6 +1243,8 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
                 repo,
                 title,
                 force,
+                body_prefix,
+                trailers,
             };
             let r = agentvc_core::github::open_pr(&space, attempt_id(&attempt)?, &opts)?;
             // The PR shows only the winner; the attempts behind it go to the
@@ -1105,13 +1260,18 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
             });
             let mut out = Out {
                 text: format!(
-                    "{} PR #{}: {}\n{} -> {} ({})",
+                    "{} PR #{}: {}\n{} -> {} ({}){}",
                     if r.updated { "Updated" } else { "Opened" },
                     r.number,
                     r.url,
                     r.export.branch,
                     r.base,
-                    &r.export.commit[..12]
+                    &r.export.commit[..12],
+                    if r.export.checkout_updated {
+                        "\n(the branch is checked out here; the checkout moved to the new commit)"
+                    } else {
+                        ""
+                    }
                 ),
                 json: json!({ "pr": r }),
             };
@@ -1119,6 +1279,261 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
             out
         }
     })
+}
+
+fn config_cmd(
+    space: &Space,
+    key: Option<String>,
+    value: Option<String>,
+    add: bool,
+    unset: bool,
+) -> anyhow::Result<Out> {
+    use agentvc_core::config;
+    let show = |k: &config::Key| -> anyhow::Result<Value> {
+        let stored = space.config_values(k.name)?;
+        let env = k
+            .env
+            .and_then(|v| std::env::var(v).ok().filter(|s| !s.trim().is_empty()));
+        Ok(json!({
+            "key": k.name,
+            "values": stored,
+            "env": k.env,
+            "env_value": env,
+            "about": k.about,
+        }))
+    };
+    let line = |v: &Value| -> String {
+        let vals: Vec<String> = v["values"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str())
+                    .map(String::from)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut l = format!(
+            "{} = {}",
+            v["key"].as_str().unwrap_or(""),
+            if vals.is_empty() {
+                "(unset)".to_string()
+            } else {
+                vals.join(" | ")
+            }
+        );
+        if let (Some(e), Some(val)) = (v["env"].as_str(), v["env_value"].as_str()) {
+            l += &format!("  (overridden by ${e}={val})");
+        }
+        l
+    };
+    let Some(name) = key else {
+        let all: Vec<Value> = config::KEYS
+            .iter()
+            .map(show)
+            .collect::<anyhow::Result<_>>()?;
+        let text = all.iter().map(line).collect::<Vec<_>>().join("\n");
+        return Ok(Out {
+            text,
+            json: json!({ "config": all }),
+        });
+    };
+    let k = config::key(&name)?;
+    if unset {
+        space.set_config(k.name, &[])?;
+    } else if let Some(v) = value {
+        if add && !k.multi {
+            anyhow::bail!("{} holds one value; set it without --add", k.name);
+        }
+        let mut vals = if add {
+            space.config_values(k.name)?
+        } else {
+            Vec::new()
+        };
+        vals.push(v);
+        space.set_config(k.name, &vals)?;
+    }
+    let v = show(k)?;
+    Ok(Out {
+        text: line(&v),
+        json: json!({ "config": v }),
+    })
+}
+
+/// Fork stats for `run --json`, the same numbers `fork --json` reports.
+fn fork_json(f: &agentvc_core::ForkResult) -> Value {
+    let mut v = json!({
+        "backend": f.backend.as_str(),
+        "backend_reason": f.backend_reason,
+        "parent_snapshot": f.parent_snapshot.id,
+        "millis": f.stats.as_ref().map(|s| s.millis),
+        "bytes_copied": f.stats.as_ref().map(|s| s.bytes_copied),
+        "files": f.stats.as_ref().map(|s| s.files),
+        "stats": f.stats,
+    });
+    #[cfg(target_os = "linux")]
+    {
+        v["overlay"] = json!(f.overlay);
+    }
+    v
+}
+
+fn ago(t: i64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(t);
+    match (now - t).max(0) {
+        s if s < 60 => format!("{s}s ago"),
+        s if s < 3600 => format!("{} min ago", s / 60),
+        s if s < 86400 => format!("{} h ago", s / 3600),
+        s => format!("{} days ago", s / 86400),
+    }
+}
+
+fn change_mark(k: ChangeKind) -> char {
+    match k {
+        ChangeKind::Added => 'A',
+        ChangeKind::Modified => 'M',
+        ChangeKind::Removed => 'D',
+    }
+}
+
+fn attempt_status_out(st: agentvc_core::status::AttemptStatus) -> Out {
+    let a = &st.attempt;
+    let mut t = format!(
+        "a{}  {}{}  {}{}\n",
+        a.id,
+        a.status,
+        a.reason
+            .as_ref()
+            .map(|r| format!(" ({r})"))
+            .unwrap_or_default(),
+        a.actor,
+        a.model
+            .as_ref()
+            .map(|m| format!(" ({m})"))
+            .unwrap_or_default(),
+    );
+    t += &format!(
+        "task     {}\n",
+        st.task
+            .as_ref()
+            .map(|t| format!("t{}  {}", t.id, t.goal))
+            .unwrap_or_else(|| "-".into())
+    );
+    t += &format!(
+        "head     s{}  {}  {}\n",
+        st.head.id,
+        st.head.trigger,
+        ago(st.head.created_at)
+    );
+    t += &format!("view     {}\n", a.view_path.display());
+    match &st.changes {
+        Some(c) if c.is_empty() => t += &format!("changes  none since s{}\n", st.head.id),
+        Some(c) => {
+            t += &format!(
+                "changes  {} file{} since s{} (`agentvc snapshot a{}` to record):\n",
+                c.len(),
+                if c.len() == 1 { "" } else { "s" },
+                st.head.id,
+                a.id
+            );
+            for f in c {
+                t += &format!("  {}  {}\n", change_mark(f.kind), f.path);
+            }
+        }
+        None => {}
+    }
+    for r in &st.runs {
+        t += &format!(
+            "run      r{}  {}  pid {}\n",
+            r.id,
+            if r.alive == Some(true) {
+                "running"
+            } else {
+                "lost"
+            },
+            r.pid.map(|p| p.to_string()).unwrap_or("-".into())
+        );
+    }
+    if let Some(u) = &st.upstream {
+        let base = &u.base[..12.min(u.base.len())];
+        t += &if u.behind == 0 {
+            format!("base     {base}, up to date with {}\n", u.upstream)
+        } else {
+            format!(
+                "base     {base}, behind: {} commit{} of {} (run `agentvc rebase a{}` before `pr`)\n",
+                u.behind,
+                if u.behind == 1 { "" } else { "s" },
+                u.upstream,
+                a.id
+            )
+        };
+    }
+    if let Some(u) = &st.pr_url {
+        t += &format!("pr       {u}\n");
+    }
+    Out {
+        text: t,
+        json: json!({ "status": st }),
+    }
+}
+
+fn space_status_out(st: agentvc_core::status::SpaceStatus) -> Out {
+    let mut t = format!("space {}\n", st.workdir.display());
+    if st.open_tasks.is_empty() {
+        t += "no open tasks";
+        if st.done_tasks > 0 {
+            t += &format!(" ({} done)", st.done_tasks);
+        }
+        t += "\n";
+    }
+    for ts in &st.open_tasks {
+        t += &format!("\nt{}  {}\n", ts.task.id, ts.task.goal);
+        if ts.attempts.is_empty() {
+            t += "  no attempts yet\n";
+        }
+        for a in &ts.attempts {
+            t += &format!(
+                "  a{}  {}{}  {}{}{}\n",
+                a.id,
+                a.status,
+                a.reason
+                    .as_ref()
+                    .map(|r| format!(" ({r})"))
+                    .unwrap_or_default(),
+                a.actor,
+                a.model
+                    .as_ref()
+                    .map(|m| format!(" ({m})"))
+                    .unwrap_or_default(),
+                if a.needs_review {
+                    "  <- needs review"
+                } else {
+                    ""
+                },
+            );
+        }
+    }
+    if !st.needs_review.is_empty() {
+        let list: Vec<_> = st.needs_review.iter().map(|i| format!("a{i}")).collect();
+        t += &format!(
+            "\nneeds review: {} (passed, not promoted; `agentvc diff --stat` them, then `agentvc promote`)\n",
+            list.join(", ")
+        );
+    }
+    for r in &st.runs {
+        t += &format!(
+            "running: r{}  a{}  pid {}\n",
+            r.id,
+            r.attempt_id,
+            r.pid.map(|p| p.to_string()).unwrap_or("-".into())
+        );
+    }
+    Out {
+        text: t,
+        json: json!({ "status": st }),
+    }
 }
 
 /// Report a sync that ran after a command: a line of text and `sync` in the

@@ -1,6 +1,7 @@
 //! Core of agentvc: the store, the task/attempt/snapshot model and
 //! copy-on-write views. See `docs/design.md`.
 
+pub mod config;
 pub mod cursor;
 pub mod error;
 pub mod export;
@@ -11,10 +12,12 @@ pub mod objects;
 #[cfg(target_os = "linux")]
 pub mod overlay;
 pub mod overview;
+pub mod patch;
 pub mod rebase;
 pub mod run;
 pub mod snapshot;
 pub mod space;
+pub mod status;
 pub mod sync;
 pub mod view;
 

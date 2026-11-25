@@ -168,6 +168,10 @@ fn run_records_outcome_and_check() {
     assert_eq!(v["run"]["exit_code"], 0);
     assert_eq!(v["run"]["check_exit_code"], 0);
     assert_eq!(v["snapshot"]["trigger"], "run-exit");
+    // The same fork stats `fork --json` reports.
+    assert!(v["fork"]["backend"].is_string(), "{v}");
+    assert!(v["fork"]["millis"].is_u64(), "{v}");
+    assert!(v["fork"]["bytes_copied"].is_u64(), "{v}");
     let log = fs::read_to_string(v["run"]["log_path"].as_str().unwrap()).unwrap();
     assert!(log.contains("working"));
 
@@ -336,6 +340,9 @@ fn export_writes_branch_without_touching_worktree() {
     assert_eq!(fs::read_to_string(w.join("lib.rs")).unwrap(), "1\n");
     assert_eq!(git(w, &["status", "--porcelain"]), "");
 
+    // A new state of the attempt parents on the same base, so it does not
+    // build on the branch: moving it needs --force.
+    fs::write(Path::new(&view).join("lib.rs"), "3\n").unwrap();
     let v = agentvc(w, &["export", "a2", "--branch", "bump"]);
     assert_eq!(v["error"]["code"], "branch_exists");
     let v = agentvc(w, &["export", "a2", "--branch", "bump", "--force"]);
@@ -383,9 +390,17 @@ fn fake_github() -> (String, RequestLog) {
             let mut log = seen.lock().unwrap();
             let created = log.iter().any(|(m, _, _)| m == "POST");
             log.push((method.clone(), path.clone(), body));
+            // The open PR carries the body it was last sent, like GitHub.
+            let last_body = log
+                .iter()
+                .rev()
+                .find(|(m, _, _)| m == "POST" || m == "PATCH")
+                .map(|(_, _, b)| b["body"].clone())
+                .unwrap_or(Value::Null);
             drop(log);
             let pr = serde_json::json!({
-                "number": 7, "html_url": "https://github.com/acme/widget/pull/7"
+                "number": 7, "html_url": "https://github.com/acme/widget/pull/7",
+                "body": last_body,
             });
             let reply = match (method.as_str(), path.as_str()) {
                 ("GET", "/repos/acme/widget") => serde_json::json!({ "default_branch": "main" }),
@@ -743,4 +758,349 @@ fn rebase_onto_moved_main_then_pr_has_only_own_changes() {
         git(&remote, &["diff", "--name-only", "main", "agentvc/a2"]),
         "README.md\nlib.rs"
     );
+}
+
+fn agentvc_text(dir: &Path, args: &[&str]) -> String {
+    let out = Command::cargo_bin("agentvc")
+        .unwrap()
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8(out.stdout).unwrap()
+}
+
+#[test]
+fn diff_patch_covers_modified_added_deleted_binary_and_working_state() {
+    let tmp = tempdir();
+    let w = tmp.path();
+    fs::write(w.join("lib.rs"), "fn a() {}\nfn b() {}\nfn c() {}\n").unwrap();
+    fs::write(w.join("gone.txt"), "bye\n").unwrap();
+    fs::write(w.join("logo.png"), b"\x89PNG\x00\x00old").unwrap();
+    agentvc(w, &["init", "--no-prepare"]);
+    let v = agentvc(w, &["fork", "--from", "a1"]);
+    let view = Path::new(v["fork"]["attempt"]["view_path"].as_str().unwrap()).to_path_buf();
+    fs::write(view.join("lib.rs"), "fn a() {}\nfn b2() {}\nfn c() {}\n").unwrap();
+    fs::remove_file(view.join("gone.txt")).unwrap();
+    fs::write(view.join("new.txt"), "hello\n").unwrap();
+    fs::write(view.join("logo.png"), b"\x89PNG\x00\x00new").unwrap();
+
+    // No refs inside the view: the working state, with no snapshot taken.
+    let text = agentvc_text(&view, &["diff", "--patch"]);
+    assert!(
+        text.contains(
+            "--- a/lib.rs\n+++ b/lib.rs\n@@ -1,3 +1,3 @@\n fn a() {}\n-fn b() {}\n+fn b2() {}\n"
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains(
+            "deleted file mode 100644\n--- a/gone.txt\n+++ /dev/null\n@@ -1 +0,0 @@\n-bye\n"
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains(
+            "new file mode 100644\n--- /dev/null\n+++ b/new.txt\n@@ -0,0 +1 @@\n+hello\n"
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains("Binary files a/logo.png and b/logo.png differ\n"),
+        "{text}"
+    );
+    assert!(
+        !text.contains("PNG"),
+        "binary content must not be dumped: {text}"
+    );
+    assert_eq!(
+        agentvc(w, &["show", "a2"])["snapshots"]
+            .as_array()
+            .unwrap()
+            .len(),
+        0
+    );
+
+    let stat = agentvc_text(&view, &["diff", "--stat"]);
+    assert!(stat.contains(" logo.png | Bin"), "{stat}");
+    assert!(
+        stat.contains("4 files changed, 2 insertions(+), 2 deletions(-)"),
+        "{stat}"
+    );
+
+    // Between refs, with hunks in JSON.
+    agentvc(w, &["snapshot", "a2"]);
+    let v = agentvc(w, &["diff", "a1", "a2", "--patch"]);
+    let changes = v["changes"].as_array().unwrap();
+    let by = |p: &str| changes.iter().find(|c| c["path"] == p).unwrap().clone();
+    assert_eq!(by("lib.rs")["kind"], "modified");
+    assert_eq!(by("lib.rs")["hunks"][0]["lines"][1], "-fn b() {}");
+    assert_eq!(by("lib.rs")["hunks"][0]["old_start"], 1);
+    assert_eq!(by("gone.txt")["kind"], "removed");
+    assert_eq!(by("new.txt")["kind"], "added");
+    assert_eq!(by("logo.png")["binary"], true);
+    assert_eq!(by("logo.png")["hunks"].as_array().unwrap().len(), 0);
+
+    // --stat in JSON keeps counts and drops hunks; plain diff is unchanged.
+    let v = agentvc(w, &["diff", "a2", "--stat"]);
+    assert_eq!(v["from"], "s1");
+    assert_eq!(v["changes"][0]["hunks"].as_array().unwrap().len(), 0);
+    let v = agentvc(w, &["diff", "a2"]);
+    assert!(v["changes"][0].get("hunks").is_none());
+}
+
+/// `agentvc` with `--json -C dir`, talking to the fake GitHub at `api`.
+fn agentvc_gh(dir: &Path, api: &str, env: &[(&str, &str)], args: &[&str]) -> Value {
+    let mut cmd = Command::cargo_bin("agentvc").unwrap();
+    cmd.arg("--json")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .env("GITHUB_TOKEN", "test-token")
+        .env("AGENTVC_GITHUB_API", api)
+        .env_remove("AGENTVC_PR_BRANCH")
+        .env_remove("AGENTVC_PR_BASE")
+        .env_remove("AGENTVC_PR_BODY_PREFIX");
+    for v in [
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+    ] {
+        cmd.env_remove(v);
+    }
+    cmd.envs(env.iter().copied());
+    let out = cmd.output().unwrap();
+    serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
+        panic!(
+            "bad json: {e}\n{}\n{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        )
+    })
+}
+
+#[test]
+fn pr_from_a_thread_branch_keeps_prefix_trailers_and_checkout() {
+    let tmp = tempdir();
+    let w = tmp.path().join("work");
+    let remote = tmp.path().join("remotes/acme/widget.git");
+    fs::create_dir_all(&w).unwrap();
+    fs::create_dir_all(&remote).unwrap();
+    git(&remote, &["init", "-q", "--bare"]);
+    git(&w, &["init", "-q", "-b", "main"]);
+    fs::write(w.join("lib.rs"), "1\n").unwrap();
+    git(&w, &["add", "-A"]);
+    git(&w, &["commit", "-q", "-m", "base"]);
+    git(&w, &["remote", "add", "origin", remote.to_str().unwrap()]);
+    // A cloud thread: its own branch is checked out and is the only one it
+    // may push to.
+    git(&w, &["checkout", "-q", "-b", "claude/thread"]);
+    agentvc(&w, &["init", "--no-prepare"]);
+
+    let v = agentvc(&w, &["config", "pr.branch", "claude/thread"]);
+    assert_eq!(v["config"]["values"][0], "claude/thread", "{v}");
+    agentvc(
+        &w,
+        &[
+            "config",
+            "pr.trailer",
+            "Co-Authored-By: Bot <bot@example.com>",
+            "--add",
+        ],
+    );
+    let v = agentvc(&w, &["config", "nope", "x"]);
+    assert_eq!(v["error"]["code"], "bad_config_key", "{v}");
+    let v = agentvc(&w, &["config"]);
+    assert_eq!(v["config"].as_array().unwrap().len(), 4, "{v}");
+
+    agentvc(&w, &["task", "new", "make f return 2"]);
+    let v = agentvc(&w, &["fork", "--task", "t1", "--from", "a1"]);
+    let view = v["fork"]["attempt"]["view_path"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    fs::write(Path::new(&view).join("lib.rs"), "2\n").unwrap();
+    agentvc(&w, &["promote", "a2"]);
+    fs::write(tmp.path().join("prefix.md"), "_Requested by **Yury**_\n").unwrap();
+
+    let (api, log) = fake_github();
+    let prefix = tmp.path().join("prefix.md");
+    let v = agentvc_gh(
+        &w,
+        &api,
+        &[],
+        &[
+            "pr",
+            "a2",
+            "--body-prefix",
+            prefix.to_str().unwrap(),
+            "--trailer",
+            "Claude-Session: https://example.com/s/1",
+        ],
+    );
+    assert_eq!(v["ok"], true, "{v}");
+    let commit = v["pr"]["export"]["commit"].as_str().unwrap().to_string();
+    assert_eq!(v["pr"]["export"]["branch"], "claude/thread");
+    assert_eq!(v["pr"]["export"]["checkout_updated"], true);
+    // No --force, no detach: the checked-out branch and its checkout moved.
+    assert_eq!(git(&w, &["rev-parse", "HEAD"]), commit);
+    assert_eq!(
+        git(&w, &["symbolic-ref", "--short", "HEAD"]),
+        "claude/thread"
+    );
+    assert_eq!(
+        git(&w, &["status", "--porcelain", "--untracked-files=no"]),
+        ""
+    );
+    assert_eq!(fs::read_to_string(w.join("lib.rs")).unwrap(), "2\n");
+    assert_eq!(git(&remote, &["rev-parse", "claude/thread"]), commit);
+    let msg = git(&w, &["log", "-1", "--format=%B"]);
+    assert!(
+        msg.ends_with(
+            "Co-Authored-By: Bot <bot@example.com>\nClaude-Session: https://example.com/s/1"
+        ),
+        "{msg}"
+    );
+    {
+        let log = log.lock().unwrap();
+        let (_, _, body) = log.iter().find(|(m, _, _)| m == "POST").unwrap();
+        assert_eq!(body["head"], "claude/thread");
+        let text = body["body"].as_str().unwrap();
+        assert!(
+            text.starts_with("_Requested by **Yury**_\n\n<!-- agentvc:begin"),
+            "{text}"
+        );
+        assert!(text.trim_end().ends_with("<!-- agentvc:end -->"), "{text}");
+    }
+
+    // A review fix continued from a2: same branch, no flags, prefix kept.
+    let v = agentvc(&w, &["fork", "--from", "a2"]);
+    let view = v["fork"]["attempt"]["view_path"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    fs::write(Path::new(&view).join("lib.rs"), "2 // reviewed\n").unwrap();
+    agentvc(&w, &["promote", "a3"]);
+    let v = agentvc_gh(&w, &api, &[], &["pr", "a3"]);
+    assert_eq!(v["ok"], true, "{v}");
+    assert_eq!(v["pr"]["updated"], true);
+    assert_eq!(
+        git(&w, &["rev-parse", "HEAD"]),
+        v["pr"]["export"]["commit"].as_str().unwrap()
+    );
+    assert_eq!(
+        fs::read_to_string(w.join("lib.rs")).unwrap(),
+        "2 // reviewed\n"
+    );
+    assert_eq!(
+        git(&w, &["status", "--porcelain", "--untracked-files=no"]),
+        ""
+    );
+    {
+        let log = log.lock().unwrap();
+        let (_, _, body) = log.iter().rfind(|(m, _, _)| m == "PATCH").unwrap();
+        let text = body["body"].as_str().unwrap();
+        assert!(
+            text.starts_with("_Requested by **Yury**_\n\n<!-- agentvc:begin"),
+            "{text}"
+        );
+        assert!(text.contains("a3"), "{text}");
+    }
+
+    // A push the remote refuses (as the cloud git proxy does with 403) has
+    // its own code.
+    let hook = remote.join("hooks/pre-receive");
+    fs::write(
+        &hook,
+        "#!/bin/sh\necho 'The requested URL returned error: 403' >&2\nexit 1\n",
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    let v = agentvc_gh(
+        &w,
+        &api,
+        &[("AGENTVC_PR_BRANCH", "not-mine")],
+        &["pr", "a3"],
+    );
+    assert_eq!(v["error"]["code"], "push_not_allowed", "{v}");
+}
+
+#[test]
+fn status_shows_attempt_in_a_view_and_space_outside() {
+    let tmp = tempdir();
+    let w = tmp.path();
+    fs::write(w.join("a.txt"), "a\n").unwrap();
+    agentvc(w, &["init", "--no-prepare"]);
+    agentvc(w, &["task", "new", "add b"]);
+    let v = agentvc(
+        w,
+        &[
+            "fork",
+            "--task",
+            "t1",
+            "--from",
+            "a1",
+            "--actor",
+            "agent:one",
+        ],
+    );
+    let view = Path::new(v["fork"]["attempt"]["view_path"].as_str().unwrap()).to_path_buf();
+    agentvc(
+        w,
+        &[
+            "fork",
+            "--task",
+            "t1",
+            "--from",
+            "a1",
+            "--actor",
+            "agent:two",
+        ],
+    );
+    fs::write(view.join("b.txt"), "b\n").unwrap();
+
+    // Inside a view: that attempt, with what changed since its head.
+    let v = agentvc(&view, &["status"]);
+    assert_eq!(v["status"]["attempt"]["id"], 2, "{v}");
+    assert_eq!(v["status"]["task"]["goal"], "add b");
+    assert_eq!(v["status"]["head"]["id"], 1);
+    assert_eq!(v["status"]["changes"][0]["path"], "b.txt");
+    assert_eq!(v["status"]["changes"][0]["kind"], "added");
+    assert!(v["status"]["runs"].as_array().unwrap().is_empty());
+    let text = agentvc_text(&view, &["status"]);
+    assert!(text.contains("task     t1  add b"), "{text}");
+    assert!(text.contains("  A  b.txt"), "{text}");
+    // Not a git repo: no upstream to be behind.
+    assert!(v["status"]["upstream"].is_null());
+
+    // In the host checkout: the space.
+    agentvc(w, &["mark", "a3", "passed"]);
+    let v = agentvc(w, &["status"]);
+    assert_eq!(v["status"]["needs_review"], serde_json::json!([3]), "{v}");
+    assert_eq!(
+        v["status"]["open_tasks"][0]["attempts"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    let text = agentvc_text(w, &["status"]);
+    assert!(
+        text.contains("a3  passed  agent:two  <- needs review"),
+        "{text}"
+    );
+    assert!(text.contains("needs review: a3"), "{text}");
+
+    // An explicit attempt works anywhere.
+    assert_eq!(agentvc(w, &["status", "a2"])["status"]["attempt"]["id"], 2);
 }

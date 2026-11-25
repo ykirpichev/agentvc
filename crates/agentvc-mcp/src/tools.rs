@@ -384,6 +384,16 @@ pub static TOOLS: &[Tool] = &[
         argv: |a| Ok(Argv::new(&["promote"]).pos(Some(a.req("attempt")?)).done()),
     },
     Tool {
+        name: "status",
+        title: "Status",
+        description: "Where am I and what is going on. With `attempt`, or when the server runs inside an attempt's view: the attempt, its task, head snapshot, files changed in the view since it (`changes`), active runs, PR URL and `upstream` ({base, upstream, behind}: behind > 0 means rebase before pr). Otherwise the space: open tasks with their attempts, `needs_review` (passed, not promoted) and active runs. Returns {status}.",
+        read_only: true,
+        destructive: false,
+        open_world: false,
+        params: || vec![("attempt", s("Attempt id, for example \"a3\". Defaults to the server's view."), false)],
+        argv: |a| Ok(Argv::new(&["status"]).pos(a.str("attempt")?).done()),
+    },
+    Tool {
         name: "log",
         title: "Attempt log",
         description: "List attempts (the attempt tree via parent_attempt), optionally for one task. Returns {attempts}.",
@@ -406,19 +416,27 @@ pub static TOOLS: &[Tool] = &[
     Tool {
         name: "diff",
         title: "Diff",
-        description: "List files that differ between two refs (aN or sN). With only `a`, diffs attempt a against the snapshot it was forked from. Returns {from, to, changes}.",
+        description: "Compare two refs (aN or sN). With only `a`, diffs attempt a against the snapshot it was forked from (or the commit it was rebased onto). With neither, diffs the working state of the current view against that base, without taking a snapshot. With `patch`, each change carries `hunks` (unified diff lines) plus `added`/`removed` counts and `binary`; `stat` gives the counts without hunks. Returns {from, to, changes}.",
         read_only: true,
         destructive: false,
         open_world: false,
         params: || {
             vec![
-                ("a", s("First ref: aN or sN."), true),
+                ("a", s("First ref: aN or sN. Omit to diff the current view's working state."), false),
                 ("b", s("Second ref: aN or sN."), false),
+                ("patch", b("Include unified-diff hunks per file."), false),
+                ("stat", b("Include added/removed line counts per file, without hunks."), false),
             ]
         },
         argv: |a| {
+            let first = a.str("a")?;
+            if first.is_none() && a.str("b")?.is_some() {
+                return Err(BadArgs("`b` needs `a`".into()));
+            }
             Ok(Argv::new(&["diff"])
-                .pos(Some(a.req("a")?))
+                .flag("patch", a.bool("patch")?)
+                .flag("stat", a.bool("stat")?)
+                .pos(first)
                 .pos(a.str("b")?)
                 .done())
         },
@@ -519,16 +537,22 @@ pub static TOOLS: &[Tool] = &[
             vec![
                 ("attempt", s(ATTEMPT), true),
                 ("base", s("Branch the PR merges into. Defaults to the repository's default branch."), false),
-                ("branch", s("Branch to push. Defaults to agentvc/aN."), false),
+                ("branch", s("Branch to push. Defaults to `agentvc config pr.branch`, $AGENTVC_PR_BRANCH, then agentvc/aN. If it is checked out in the host repo, the checkout moves along."), false),
                 ("draft", b("Open as a draft."), false),
                 ("title", s("PR title and commit subject. Defaults to the task goal."), false),
                 ("remote", s("Git remote to push to. Defaults to \"origin\"."), false),
                 ("repo", s("GitHub repository as owner/name. Defaults to the remote's."), false),
                 ("force", b("Move the branch even if another attempt exported to it."), false),
+                ("body_prefix", s("File whose text goes above the generated PR body (for example attribution lines). Kept on later updates."), false),
+                ("trailers", json!({ "type": "array", "items": { "type": "string" }, "description": "Extra \"Key: value\" trailers for the exported commit." }), false),
             ]
         },
         argv: |a| {
-            Ok(Argv::new(&["pr"])
+            let mut argv = Argv::new(&["pr"]);
+            for t in a.strings("trailers")? {
+                argv.opt("trailer", Some(t));
+            }
+            Ok(argv
                 .opt("base", a.str("base")?)
                 .opt("branch", a.str("branch")?)
                 .flag("draft", a.bool("draft")?)
@@ -536,6 +560,7 @@ pub static TOOLS: &[Tool] = &[
                 .opt("remote", a.str("remote")?)
                 .opt("repo", a.str("repo")?)
                 .flag("force", a.bool("force")?)
+                .opt("body-prefix", a.str("body_prefix")?)
                 .pos(Some(a.req("attempt")?))
                 .done())
         },

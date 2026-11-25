@@ -53,7 +53,7 @@ pub enum Mode {
 }
 
 impl Mode {
-    fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Mode::File => "100644",
             Mode::Executable => "100755",

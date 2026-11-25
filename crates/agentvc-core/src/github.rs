@@ -13,6 +13,7 @@ use std::time::Duration;
 use serde::Serialize;
 use serde_json::{json, Value};
 
+use crate::config;
 use crate::error::{Error, Result};
 use crate::export::{export, ExportOptions, ExportResult, HostRepo};
 use crate::space::{Attempt, Space, Status};
@@ -35,6 +36,65 @@ pub struct PrOptions {
     pub title: Option<String>,
     /// Move the branch even if another attempt exported to it.
     pub force: bool,
+    /// Text put above the generated body (attribution lines, notes). Kept on
+    /// later updates that pass none.
+    pub body_prefix: Option<String>,
+    /// Extra `Key: value` trailers for the exported commit, added to those
+    /// in `agentvc config pr.trailer`.
+    pub trailers: Vec<String>,
+}
+
+/// Start and end of the part of a PR body that `agentvc pr` writes. Text
+/// outside the markers (a prefix, a human-written section) is kept when the
+/// PR is updated.
+pub const BODY_BEGIN: &str =
+    "<!-- agentvc:begin (written by agentvc pr; text outside these markers is kept on update) -->";
+pub const BODY_END: &str = "<!-- agentvc:end -->";
+
+/// The PR body to send: `generated` between agentvc's markers, with the
+/// text around the markers of `existing` kept. `prefix` replaces the text
+/// above the markers; without one, an existing prefix stays. An existing
+/// body without markers (from before markers, or written by hand) is
+/// replaced.
+pub fn compose_body(existing: Option<&str>, prefix: Option<&str>, generated: &str) -> String {
+    let (mut before, after) = match existing.and_then(split_body) {
+        Some((b, a)) => (b.to_string(), a.to_string()),
+        None => (String::new(), String::new()),
+    };
+    if let Some(p) = prefix {
+        before = if p.trim().is_empty() {
+            String::new()
+        } else {
+            format!("{}\n\n", p.trim_end())
+        };
+    }
+    format!(
+        "{before}{BODY_BEGIN}\n{}\n{BODY_END}{after}",
+        generated.trim_end()
+    )
+}
+
+/// Text before and after agentvc's markers, if the body has both.
+///
+/// Markers count only as whole lines, so a body that mentions them in prose
+/// (like this project's own PRs) is not cut there.
+fn split_body(body: &str) -> Option<(&str, &str)> {
+    let line_at = |from: usize, marker: &str| -> Option<usize> {
+        let mut pos = from;
+        loop {
+            let i = pos + body[pos..].find(marker)?;
+            let starts = i == 0 || body.as_bytes()[i - 1] == b'\n';
+            let rest = &body[i + marker.len()..];
+            let ends = rest.is_empty() || rest.starts_with('\n') || rest.starts_with("\r\n");
+            if starts && ends {
+                return Some(i);
+            }
+            pos = i + marker.len();
+        }
+    };
+    let begin = line_at(0, BODY_BEGIN)?;
+    let end = line_at(begin + BODY_BEGIN.len(), BODY_END)?;
+    Some((&body[..begin], &body[end + BODY_END.len()..]))
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -387,22 +447,34 @@ pub fn open_pr(space: &Space, attempt_id: i64, opts: &PrOptions) -> Result<PrRes
         None => parse_remote(&remote_url).ok_or_else(|| Error::BadRemote(remote_url.clone()))?,
     };
     let api = Api::new(token()?);
-    let base = match &opts.base {
-        Some(b) => b.clone(),
+    let base = match opts.base.clone().or(space.config(config::PR_BASE)?) {
+        Some(b) => b,
         None => api.call("GET", &format!("/repos/{repo}"), None)?["default_branch"]
             .as_str()
             .unwrap_or("main")
             .to_string(),
     };
 
-    let branch = opts
-        .branch
-        .clone()
-        .unwrap_or_else(|| format!("agentvc/a{attempt_id}"));
-    // Re-running `pr` for the same attempt refreshes its branch.
-    let ours = space
-        .last_export_to(&branch)?
-        .is_some_and(|e| e.attempt_id == attempt_id);
+    let branch = match opts.branch.clone().or(space.config(config::PR_BRANCH)?) {
+        Some(b) => b,
+        None => format!("agentvc/a{attempt_id}"),
+    };
+    // Re-running `pr` for the same attempt, or for one continued from it
+    // (`fork --from aN`, review fixes), refreshes its branch.
+    let ours = match space.last_export_to(&branch)? {
+        Some(e) => {
+            e.attempt_id == attempt_id
+                || (e.attempt_id != crate::space::ROOT_ATTEMPT
+                    && space.descends_from(attempt_id, e.attempt_id)?)
+        }
+        None => false,
+    };
+    let mut trailers = space.config_values(config::PR_TRAILER)?;
+    for t in &opts.trailers {
+        if !trailers.contains(t) {
+            trailers.push(t.clone());
+        }
+    }
     let exp = export(
         space,
         attempt_id,
@@ -411,6 +483,7 @@ pub fn open_pr(space: &Space, attempt_id: i64, opts: &PrOptions) -> Result<PrRes
             base: None,
             message: opts.title.clone(),
             force: opts.force || ours,
+            trailers,
         },
     )?;
 
@@ -420,7 +493,8 @@ pub fn open_pr(space: &Space, attempt_id: i64, opts: &PrOptions) -> Result<PrRes
     } else {
         &refspec[1..]
     };
-    host.git(&["push", "--quiet", &remote, push_spec], None)?;
+    host.git(&["push", "--quiet", &remote, push_spec], None)
+        .map_err(|e| push_error(e, &remote, &branch))?;
 
     let title = opts.title.clone().unwrap_or_else(|| {
         attempt
@@ -430,7 +504,17 @@ pub fn open_pr(space: &Space, attempt_id: i64, opts: &PrOptions) -> Result<PrRes
             .unwrap_or_else(|| format!("agentvc attempt a{attempt_id}"))
     });
     let title = title.lines().next().unwrap_or("").trim().to_string();
-    let body = pr_body(space, &attempt, &exp)?;
+    let generated = pr_body(space, &attempt, &exp)?;
+    let prefix = match &opts.body_prefix {
+        Some(p) => Some(p.clone()),
+        None => match space.config(config::PR_BODY_PREFIX)? {
+            Some(path) => {
+                let p = space.workdir().join(path);
+                Some(std::fs::read_to_string(&p).map_err(|source| Error::Io { path: p, source })?)
+            }
+            None => None,
+        },
+    };
 
     let owner = repo.split('/').next().unwrap_or("");
     let open = api.call(
@@ -441,6 +525,7 @@ pub fn open_pr(space: &Space, attempt_id: i64, opts: &PrOptions) -> Result<PrRes
     let (pr, updated) = match open.as_array().and_then(|a| a.first()) {
         Some(existing) => {
             let n = existing["number"].as_u64().unwrap_or(0);
+            let body = compose_body(existing["body"].as_str(), prefix.as_deref(), &generated);
             let v = api.call(
                 "PATCH",
                 &format!("/repos/{repo}/pulls/{n}"),
@@ -449,6 +534,7 @@ pub fn open_pr(space: &Space, attempt_id: i64, opts: &PrOptions) -> Result<PrRes
             (v, true)
         }
         None => {
+            let body = compose_body(None, prefix.as_deref(), &generated);
             let v = api.call(
                 "POST",
                 &format!("/repos/{repo}/pulls"),
@@ -478,6 +564,28 @@ pub fn open_pr(space: &Space, attempt_id: i64, opts: &PrOptions) -> Result<PrRes
     })
 }
 
+/// A refused push says so: git proxies answer 403 for branches the
+/// credentials may not write, which otherwise reads as a generic git error.
+fn push_error(e: Error, remote: &str, branch: &str) -> Error {
+    match e {
+        Error::Git { stderr, .. } if push_refused(&stderr) => Error::PushNotAllowed {
+            remote: remote.to_string(),
+            branch: branch.to_string(),
+            stderr,
+        },
+        other => other,
+    }
+}
+
+fn push_refused(stderr: &str) -> bool {
+    let s = stderr.to_ascii_lowercase();
+    s.contains("403")
+        || s.contains("permission to")
+        || s.contains("permission denied")
+        || s.contains("not allowed")
+        || s.contains("protected branch")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -499,6 +607,73 @@ mod tests {
             );
         }
         assert_eq!(parse_remote("agentvc"), None);
+    }
+
+    #[test]
+    fn body_keeps_prefix_and_human_sections_across_updates() {
+        let first = compose_body(None, Some("Requested by Yury\n"), "## Task\nold");
+        assert!(
+            first.starts_with("Requested by Yury\n\n<!-- agentvc:begin"),
+            "{first}"
+        );
+        assert!(
+            first.ends_with("## Task\nold\n<!-- agentvc:end -->"),
+            "{first}"
+        );
+
+        // A reviewer adds notes below; an update without a prefix keeps both.
+        let edited = format!("{first}\n\n## Notes from review\nkeep me\n");
+        let second = compose_body(Some(&edited), None, "## Task\nnew");
+        assert!(second.starts_with("Requested by Yury\n\n"), "{second}");
+        assert!(
+            second.contains("## Task\nnew\n<!-- agentvc:end -->"),
+            "{second}"
+        );
+        assert!(!second.contains("old"), "{second}");
+        assert!(
+            second.ends_with("\n\n## Notes from review\nkeep me\n"),
+            "{second}"
+        );
+
+        // A new prefix replaces the old one, still keeping the section.
+        let third = compose_body(Some(&second), Some("Requested by Ann"), "## Task\nnew");
+        assert!(
+            third.starts_with("Requested by Ann\n\n<!-- agentvc:begin"),
+            "{third}"
+        );
+        assert!(third.contains("keep me"));
+
+        // Markers mentioned in prose, inside the prefix, are not markers.
+        let prose = "Our part sits between `<!-- agentvc:begin -->` and `<!-- agentvc:end -->`.";
+        let with_prose = compose_body(None, Some(prose), "## Task\nv1");
+        let updated = compose_body(Some(&with_prose), None, "## Task\nv2");
+        assert_eq!(updated, compose_body(None, Some(prose), "## Task\nv2"));
+
+        // A body from before markers is replaced.
+        let legacy = compose_body(Some("old generated body"), None, "gen");
+        assert_eq!(legacy, format!("{BODY_BEGIN}\ngen\n{BODY_END}"));
+    }
+
+    #[test]
+    fn refused_pushes_are_recognised() {
+        let e = push_error(
+            Error::Git {
+                cmd: "push".into(),
+                stderr: "remote: Permission to o/r.git denied.\nfatal: unable to access: The requested URL returned error: 403".into(),
+            },
+            "origin",
+            "main",
+        );
+        assert_eq!(e.code(), "push_not_allowed");
+        let e = push_error(
+            Error::Git {
+                cmd: "push".into(),
+                stderr: "fatal: could not read from remote".into(),
+            },
+            "origin",
+            "main",
+        );
+        assert_eq!(e.code(), "git");
     }
 
     #[test]
@@ -561,6 +736,7 @@ mod tests {
             parent: None,
             tree: snap.tree.clone(),
             replaced: None,
+            checkout_updated: false,
             objects_copied: 0,
         };
         let body = pr_body(&space, &winner, &exp).unwrap();

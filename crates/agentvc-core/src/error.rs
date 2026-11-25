@@ -28,8 +28,18 @@ pub enum Error {
     BranchExists(String),
     #[error("branch {0} is checked out in the host repository; export to another branch")]
     BranchCheckedOut(String),
+    #[error("branch {branch} is checked out and its working tree has changes that the export would overwrite; commit or stash them first: {stderr}")]
+    CheckoutDirty { branch: String, stderr: String },
+    #[error("the remote {remote} refused the push of branch {branch}: this branch is not allowed for these credentials (push to the branch you may write to, e.g. with --branch or `agentvc config pr.branch`): {stderr}")]
+    PushNotAllowed {
+        remote: String,
+        branch: String,
+        stderr: String,
+    },
     #[error("git {cmd} failed: {stderr}")]
     Git { cmd: String, stderr: String },
+    #[error("unknown config key {0:?}; known keys: {keys}", keys = crate::config::KEYS.iter().map(|k| k.name).collect::<Vec<_>>().join(", "))]
+    BadConfigKey(String),
     #[error("cannot tell the GitHub repository from remote URL {0:?}; pass --repo owner/name")]
     BadRemote(String),
     #[error("no GitHub token: set GITHUB_TOKEN or GH_TOKEN, or sign in with `gh auth login`")]
@@ -102,7 +112,10 @@ impl Error {
             Error::BadBranch(_) => "bad_branch",
             Error::BranchExists(_) => "branch_exists",
             Error::BranchCheckedOut(_) => "branch_checked_out",
+            Error::CheckoutDirty { .. } => "checkout_dirty",
+            Error::PushNotAllowed { .. } => "push_not_allowed",
             Error::Git { .. } => "git",
+            Error::BadConfigKey(_) => "bad_config_key",
             Error::BadRemote(_) => "bad_remote",
             Error::NoToken => "no_token",
             Error::GitHub { .. } => "github",

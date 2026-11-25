@@ -29,6 +29,9 @@ agentvc fork --task t1 --actor agent:codex    # -> a3, a sibling attempt
 cd "$(agentvc path a2)" && ...                # let an agent work there
 agentvc snapshot a2 --meta tests=pass         # record state with metadata
 agentvc diff a2 a3                            # files that differ between two attempts
+agentvc diff a2 a3 --patch                    # the unified diff (--stat for a summary)
+agentvc status                                # in a view: this attempt, its changes, runs, `behind`;
+                                              # in the checkout: open tasks and what needs review
 agentvc run --task t1 --actor agent:claude --check "cargo test" -- claude -p "make the parser faster"
                                               # fork + run an agent in the view; check decides passed/failed
 agentvc run --detach --task t1 -- <agent cmd> # same, in the background; see `agentvc ps`
@@ -44,6 +47,12 @@ agentvc init --from-remote                    # elsewhere: rebuild that space, s
 ```
 
 `agentvc pr` reads a token from `GITHUB_TOKEN`, `GH_TOKEN` or `gh auth token`.
+It writes its part of the PR body between `<!-- agentvc:begin -->` and
+`<!-- agentvc:end -->` markers and keeps any text around them when it updates
+the PR; `--body-prefix FILE` puts text above it, and `--trailer "Key: value"`
+adds commit trailers. Settings that every `pr` should use go in
+`agentvc config` (`pr.branch`, `pr.base`, `pr.trailer --add`, `pr.body-prefix`).
+Exporting to the branch that is checked out moves the checkout along with it.
 Record `tests` and `cost` with `snapshot --meta` and they show up in the PR body.
 
 Every command takes `--json` and returns one JSON object; errors carry a
