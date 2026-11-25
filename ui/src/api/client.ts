@@ -4,6 +4,8 @@ import type {
   AttemptStats,
   CompareResponse,
   InboxItem,
+  LiveAttempt,
+  StopResponse,
   Attempt,
   AttemptDetail,
   DiffResponse,
@@ -72,6 +74,8 @@ export const api = {
   inbox: () => get<InboxItem[]>('/inbox'),
   compare: (attempts: number[]) =>
     get<CompareResponse>('/compare', { attempts: attempts.map((a) => `a${a}`).join(',') }),
+  live: () => get<LiveAttempt[]>('/live'),
+  stop: (id: number) => post<StopResponse>(`/attempts/${id}/stop`),
   promote: (id: number) => post<ActionResponse>(`/attempts/${id}/promote`),
   abandon: (id: number, reason: string) => post<ActionResponse>(`/attempts/${id}/abandon`, { reason }),
   mark: (id: number, status: 'passed' | 'failed' | 'exploring') =>

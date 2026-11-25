@@ -13,6 +13,7 @@ name = "agentvc-cli"
 version = "0.0.1"
 dependencies = [
  "agentvc-core",
+ "agentvc-mcp",
  "anyhow",
  "assert_cmd",
  "clap",
@@ -39,6 +40,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "agentvc-mcp"
+version = "0.0.1"
+dependencies = [
+ "agentvc-core",
+ "serde_json",
+]
+
+[[package]]
 name = "agentvcd"
 version = "0.0.1"
 dependencies = [
@@ -49,6 +58,7 @@ dependencies = [
  "futures-util",
  "http-body-util",
  "mime_guess",
+ "rusqlite",
  "rust-embed",
  "serde",
  "serde_json",

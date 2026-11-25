@@ -1,0 +1,11 @@
+[package]
+name = "agentvc-mcp"
+description = "MCP server for agentvc: attempts, snapshots and runs as tools for coding agents"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+agentvc-core.workspace = true
+serde_json = "1.0.154"

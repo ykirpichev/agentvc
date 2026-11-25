@@ -31,6 +31,26 @@ struct Cli {
     /// Print machine-readable JSON instead of text.
     #[arg(long)]
     json: bool,
+    /// Reviewer name recorded on actions taken in the UI, as `human:<name>`.
+    /// Defaults to `git config user.name`, then `$USER`.
+    #[arg(long, value_name = "NAME")]
+    user: Option<String>,
+}
+
+/// The reviewer's name: `--user`, else git's `user.name`, else `$USER`.
+fn reviewer_name(dir: &std::path::Path, flag: Option<String>) -> Option<String> {
+    flag.or_else(|| {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["config", "user.name"])
+            .stderr(std::process::Stdio::null())
+            .output()
+            .ok()?;
+        let name = String::from_utf8(out.stdout).ok()?.trim().to_string();
+        (out.status.success() && !name.is_empty()).then_some(name)
+    })
+    .or_else(|| std::env::var("USER").ok())
 }
 
 fn fail(json: bool, code: &str, message: String) -> ExitCode {
@@ -50,6 +70,7 @@ async fn main() -> ExitCode {
     let cli = Cli::parse();
     let mut config = Config::new(&cli.dir);
     config.poll_interval = Duration::from_millis(cli.poll_ms.max(50));
+    config.actor = agentvcd::human_actor(reviewer_name(&cli.dir, cli.user).as_deref());
 
     let state = match AppState::start(&config) {
         Ok(s) => s,
@@ -65,10 +86,14 @@ async fn main() -> ExitCode {
     if cli.json {
         println!(
             "{}",
-            json!({ "ok": true, "url": url, "workdir": state.workdir() })
+            json!({ "ok": true, "url": url, "workdir": state.workdir(), "actor": state.actor() })
         );
     } else {
-        println!("agentvcd serving {} at {url}", state.workdir().display());
+        println!(
+            "agentvcd serving {} at {url} (actions recorded as {})",
+            state.workdir().display(),
+            state.actor()
+        );
     }
 
     let app = agentvcd::router(state);

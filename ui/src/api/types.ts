@@ -188,3 +188,32 @@ export interface ActionResponse {
   attempt: Attempt
   closed_siblings: number[]
 }
+
+// ---- live board (crates/agentvcd/src/live.rs) -----------------------------
+
+export interface LiveRun {
+  id: number
+  command: string[]
+  check_command: string | null
+  started_at: Timestamp
+  alive: boolean
+  log_tail: string[]
+}
+
+export interface LiveAttempt {
+  attempt: Attempt
+  task_goal: string | null
+  head: Snapshot | null
+  stats: AttemptStats
+  files_changed: number
+  files: FileChange[]
+  /** Path → other running attempts that changed it too. */
+  overlaps: Record<string, number[]>
+  run: LiveRun | null
+}
+
+export interface StopResponse {
+  run: number
+  pid: number
+  signal: string
+}

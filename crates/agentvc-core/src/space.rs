@@ -726,7 +726,19 @@ impl Space {
 
     /// Change an attempt's outcome. Promoting an attempt that belongs to a
     /// task also closes its open siblings as `abandoned(lost to aN)`.
+    /// Recorded in the operation log as done by `human`.
     pub fn set_status(&self, id: i64, status: Status, reason: Option<&str>) -> Result<Attempt> {
+        self.set_status_as("human", id, status, reason)
+    }
+
+    /// [`Space::set_status`], recorded as done by `actor` (e.g. `human:ana`).
+    pub fn set_status_as(
+        &self,
+        actor: &str,
+        id: i64,
+        status: Status,
+        reason: Option<&str>,
+    ) -> Result<Attempt> {
         let attempt = self.attempt(id)?;
         if !attempt.status.is_open() {
             return Err(Error::AttemptClosed {
@@ -774,7 +786,7 @@ impl Space {
             }
         }
         self.record(
-            "human",
+            actor,
             &format!("attempt.{}", status.as_str()),
             serde_json::json!({ "attempt": id, "reason": reason, "closed_siblings": losers }),
         )?;
@@ -1052,6 +1064,38 @@ mod tests {
             space.set_status(b, Status::Passed, None),
             Err(Error::AttemptClosed { .. })
         ));
+    }
+
+    #[test]
+    fn status_changes_record_the_actor() {
+        let (_tmp, space) = repo();
+        let a = space
+            .fork(&ForkRequest {
+                actor: "agent".into(),
+                ..Default::default()
+            })
+            .unwrap()
+            .attempt
+            .id;
+        space.set_status(a, Status::Passed, None).unwrap();
+        space
+            .set_status_as("human:ana", a, Status::Abandoned, Some("no"))
+            .unwrap();
+        let actors: Vec<(String, String)> = space
+            .db
+            .prepare("SELECT actor, kind FROM operations WHERE kind LIKE 'attempt.%' AND kind != 'attempt.fork' ORDER BY id")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(
+            actors,
+            [
+                ("human".into(), "attempt.passed".into()),
+                ("human:ana".into(), "attempt.abandoned".into())
+            ]
+        );
     }
 
     #[test]
