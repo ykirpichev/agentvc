@@ -10,6 +10,7 @@ use std::process::{ExitCode, Stdio};
 use std::sync::atomic::{AtomicI32, Ordering};
 
 use agentvc_core::snapshot::ChangeKind;
+use agentvc_core::view::BackendChoice;
 use agentvc_core::{Attempt, Error, ExportOptions, ForkRequest, PrOptions, Ref, Space, Status};
 use clap::{Parser, Subcommand};
 use serde_json::{json, Value};
@@ -54,6 +55,10 @@ enum Cmd {
         model: Option<String>,
         #[arg(long)]
         prompt: Option<String>,
+        /// View backend: auto (reflink, else overlay, else copy), reflink,
+        /// overlay or copy.
+        #[arg(long, default_value = "auto", value_name = "BACKEND")]
+        backend: BackendChoice,
     },
     /// Record the current state of an attempt's view.
     Snapshot {
@@ -88,7 +93,8 @@ enum Cmd {
     Show { attempt: String },
     /// List files that differ between two refs (default: from the parent snapshot).
     Diff { a: String, b: Option<String> },
-    /// Print the view directory of an attempt.
+    /// Print the view directory of an attempt, mounting an overlay view first
+    /// if it is not mounted (for example after a reboot).
     Path { attempt: String },
     /// Write an attempt's latest state as a commit on a branch of the host git
     /// repo, without touching the working tree, index or checked-out branch.
@@ -149,6 +155,9 @@ enum Cmd {
         model: Option<String>,
         #[arg(long)]
         prompt: Option<String>,
+        /// View backend: auto, reflink, overlay or copy (see `fork`).
+        #[arg(long, default_value = "auto", value_name = "BACKEND")]
+        backend: BackendChoice,
         /// Shell command run in the view afterwards to judge the attempt.
         #[arg(long)]
         check: Option<String>,
@@ -316,6 +325,7 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
             actor,
             model,
             prompt,
+            backend,
         } => {
             let from = match from {
                 Some(f) => parse_ref(&f)?,
@@ -327,22 +337,48 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
                 actor,
                 model,
                 prompt,
+                backend,
             };
             let r = space.fork(&req)?;
-            let timing = r
+            #[allow(unused_mut)]
+            let mut timing = r
                 .stats
                 .as_ref()
                 .map(|s| format!(", {} files in {} ms", s.files, s.millis))
                 .unwrap_or_default();
+            #[cfg(target_os = "linux")]
+            if let (Some(o), Some(s)) = (&r.overlay, &r.stats) {
+                timing = if o.reused {
+                    format!(
+                        ", parent unchanged, layer L{} shared, {} ms",
+                        o.layer, s.millis
+                    )
+                } else {
+                    format!(
+                        ", {} changed files frozen into L{} ({} layers), {} ms",
+                        s.files, o.layer, o.layers, s.millis
+                    )
+                };
+            }
+            let mut notes = String::new();
+            if let Some(why) = &r.backend_reason {
+                notes += &format!("\n({why})");
+            }
+            #[cfg(target_os = "linux")]
+            if r.overlay.as_ref().is_some_and(|o| !o.global) {
+                notes += "\nThe view is mounted in a user namespace: only agentvc commands \
+                          (agentvc run) see its contents.";
+            }
             Out {
                 text: format!(
-                    "a{} forked from {} (s{}) via {}{}\n{}",
+                    "a{} forked from {} (s{}) via {}{}\n{}{}",
                     r.attempt.id,
                     from,
                     r.parent_snapshot.id,
                     r.backend.as_str(),
                     timing,
-                    r.attempt.view_path.display()
+                    r.attempt.view_path.display(),
+                    notes
                 ),
                 json: json!({ "fork": r }),
             }
@@ -489,6 +525,7 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
             actor,
             model,
             prompt,
+            backend,
             check,
             detach,
             command,
@@ -503,6 +540,7 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
                 actor,
                 model,
                 prompt,
+                backend,
             })?;
             let a = fork.attempt.id;
             // Child output would corrupt --json, and a detached run has no terminal.
@@ -605,6 +643,8 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
         }
         Cmd::Path { attempt } => {
             let a = space.attempt(attempt_id(&attempt)?)?;
+            // Mount an overlay view that is not mounted, e.g. after a reboot.
+            space.ensure_view(&a)?;
             Out {
                 text: a.view_path.display().to_string(),
                 json: json!({ "attempt": a.id, "path": a.view_path }),

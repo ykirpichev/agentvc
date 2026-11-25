@@ -4,6 +4,28 @@ use std::path::Path;
 use assert_cmd::Command;
 use serde_json::Value;
 
+/// A temporary directory that unmounts overlay views under it before it is
+/// deleted (forks use overlayfs when the tests run as root).
+struct TestDir(tempfile::TempDir);
+
+impl std::ops::Deref for TestDir {
+    type Target = tempfile::TempDir;
+    fn deref(&self) -> &tempfile::TempDir {
+        &self.0
+    }
+}
+
+impl Drop for TestDir {
+    fn drop(&mut self) {
+        #[cfg(target_os = "linux")]
+        agentvc_core::overlay::unmount_under(self.0.path());
+    }
+}
+
+fn tempdir() -> TestDir {
+    TestDir(tempfile::tempdir().unwrap())
+}
+
 fn agentvc(dir: &Path, args: &[&str]) -> Value {
     let out = Command::cargo_bin("agentvc")
         .unwrap()
@@ -24,7 +46,7 @@ fn agentvc(dir: &Path, args: &[&str]) -> Value {
 
 #[test]
 fn full_attempt_flow() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = tempdir();
     let w = tmp.path();
     fs::write(w.join("lib.rs"), "pub fn f() -> u32 { 1 }\n").unwrap();
 
@@ -94,7 +116,7 @@ fn full_attempt_flow() {
 
 #[test]
 fn errors_have_stable_codes() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = tempdir();
     let v = agentvc(tmp.path(), &["log"]);
     assert_eq!(v["ok"], false);
     assert_eq!(v["error"]["code"], "no_space");
@@ -108,7 +130,7 @@ fn errors_have_stable_codes() {
 
 #[test]
 fn run_records_outcome_and_check() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = tempdir();
     let w = tmp.path();
     fs::write(w.join("answer.txt"), "41\n").unwrap();
     agentvc(w, &["init"]);
@@ -149,7 +171,7 @@ fn run_records_outcome_and_check() {
 
 #[test]
 fn detached_run_finishes_in_background() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = tempdir();
     let w = tmp.path();
     fs::write(w.join("f"), "x\n").unwrap();
     agentvc(w, &["init"]);
@@ -190,7 +212,7 @@ fn detached_run_finishes_in_background() {
 #[test]
 fn hooks_install_and_snapshot_per_tool_call() {
     use std::io::Write;
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = tempdir();
     let w = tmp.path();
     fs::write(w.join("f"), "1\n").unwrap();
     agentvc(w, &["init"]);
@@ -252,7 +274,7 @@ fn hooks_install_and_snapshot_per_tool_call() {
     assert_eq!(paths, vec![Value::from("f")]);
 
     // Outside a space the hook is a silent no-op.
-    let other = tempfile::tempdir().unwrap();
+    let other = tempdir();
     let status = std::process::Command::new(assert_cmd::cargo::cargo_bin("agentvc"))
         .args(["hook", "stop"])
         .current_dir(other.path())
@@ -279,7 +301,7 @@ fn git(dir: &Path, args: &[&str]) -> String {
 
 #[test]
 fn export_writes_branch_without_touching_worktree() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = tempdir();
     let w = tmp.path();
     git(w, &["init", "-q", "-b", "main"]);
     fs::write(w.join("lib.rs"), "1\n").unwrap();
@@ -380,7 +402,7 @@ fn fake_github() -> (String, RequestLog) {
 
 #[test]
 fn pr_pushes_branch_and_opens_pr_with_rejected_attempts() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = tempdir();
     let w = tmp.path().join("work");
     let remote = tmp.path().join("remotes/acme/widget.git");
     fs::create_dir_all(&w).unwrap();
@@ -532,4 +554,28 @@ fn pr_pushes_branch_and_opens_pr_with_rejected_attempts() {
         .unwrap();
     let v: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(v["error"]["code"], "no_token", "{v}");
+}
+
+#[test]
+fn fork_backend_can_be_forced() {
+    let tmp = tempdir();
+    let w = tmp.path();
+    fs::write(w.join("f"), "1\n").unwrap();
+    agentvc(w, &["init"]);
+    let v = agentvc(w, &["fork", "--from", "a1", "--backend", "copy"]);
+    assert_eq!(v["fork"]["backend"], "copy", "{v}");
+    assert_eq!(v["fork"]["attempt"]["backend"], "copy");
+
+    // Auto always reports a backend, and explains anything but reflink.
+    let v = agentvc(w, &["fork", "--from", "a1"]);
+    let backend = v["fork"]["backend"].as_str().unwrap();
+    assert!(["reflink", "overlay", "copy"].contains(&backend), "{v}");
+    if backend != "reflink" {
+        assert!(v["fork"]["backend_reason"].is_string(), "{v}");
+    }
+    let view = v["fork"]["attempt"]["view_path"].as_str().unwrap();
+    assert_eq!(
+        fs::read_to_string(Path::new(view).join("f")).unwrap(),
+        "1\n"
+    );
 }

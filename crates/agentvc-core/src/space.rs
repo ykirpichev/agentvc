@@ -8,6 +8,8 @@
 //!     meta.db        SQLite: tasks, attempts, snapshots, operations
 //!     objects/       git loose objects (blobs and trees)
 //!     views/aN/      one directory per forked attempt
+//!     layers/LN/     frozen read-only layers under overlay views
+//!     overlay/aN/    an overlay view's private upper and work dirs
 //! ```
 //!
 //! The working directory itself is the view of the root attempt `a1`.
@@ -22,7 +24,7 @@ use serde::Serialize;
 use crate::error::{Error, IoContext, Result};
 use crate::objects::{ObjectStore, Oid};
 use crate::snapshot::{self, FileChange};
-use crate::view::{self, Backend, ForkStats};
+use crate::view::{self, Backend, BackendChoice, ForkStats};
 
 pub const SPACE_DIR: &str = ".agentvc";
 pub const ROOT_ATTEMPT: i64 = 1;
@@ -86,6 +88,20 @@ CREATE TABLE IF NOT EXISTS runs (
     exit_code INTEGER,
     check_exit_code INTEGER,
     duration_ms INTEGER
+);
+CREATE TABLE IF NOT EXISTS layers (
+    id INTEGER PRIMARY KEY,
+    parent INTEGER REFERENCES layers(id),
+    source_attempt INTEGER NOT NULL REFERENCES attempts(id),
+    files INTEGER NOT NULL DEFAULT 0,
+    bytes INTEGER NOT NULL DEFAULT 0,
+    complete INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS overlays (
+    attempt_id INTEGER PRIMARY KEY REFERENCES attempts(id),
+    top_layer INTEGER NOT NULL REFERENCES layers(id),
+    mounter TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS attempts_task ON attempts(task_id);
 CREATE INDEX IF NOT EXISTS snapshots_attempt ON snapshots(attempt_id);
@@ -207,6 +223,8 @@ pub struct ForkRequest {
     pub actor: String,
     pub model: Option<String>,
     pub prompt: Option<String>,
+    /// View backend; `Auto` picks reflink, then overlayfs, then copy.
+    pub backend: BackendChoice,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -214,7 +232,13 @@ pub struct ForkResult {
     pub attempt: Attempt,
     pub parent_snapshot: Snapshot,
     pub backend: Backend,
+    /// Why this backend was used when it is not the first choice, for
+    /// example why overlayfs was unavailable and the view was copied.
+    pub backend_reason: Option<String>,
     pub stats: Option<ForkStats>,
+    /// Set for overlay views.
+    #[cfg(target_os = "linux")]
+    pub overlay: Option<crate::overlay::OverlayInfo>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -223,6 +247,45 @@ pub struct SnapshotResult {
     /// True when the tree matched the attempt's previous snapshot, so no new
     /// snapshot was recorded.
     pub unchanged: bool,
+}
+
+/// How a view was made, before it is recorded.
+struct WarmFork {
+    backend: Backend,
+    reason: Option<String>,
+    stats: Option<ForkStats>,
+    #[cfg(target_os = "linux")]
+    overlay: Option<crate::overlay::OverlayInfo>,
+}
+
+/// Filesystem name for messages, like `stat -f -c %T`.
+fn fs_type(path: &Path) -> String {
+    #[cfg(target_os = "linux")]
+    {
+        let Ok(c) = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()) else {
+            return "this filesystem".into();
+        };
+        // SAFETY: c is a valid C string and buf is a plain struct.
+        let mut buf: libc::statfs = unsafe { std::mem::zeroed() };
+        if unsafe { libc::statfs(c.as_ptr(), &mut buf) } != 0 {
+            return "this filesystem".into();
+        }
+        match buf.f_type {
+            0xEF53 => "ext4".into(),
+            0x794c7630 => "overlayfs".into(),
+            0x01021994 => "tmpfs".into(),
+            0x9123683E => "btrfs".into(),
+            0x58465342 => "xfs".into(),
+            0x6969 => "nfs".into(),
+            0x65735546 => "fuse".into(),
+            t => format!("filesystem type {t:#x}"),
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = path;
+        "this filesystem".into()
+    }
 }
 
 pub struct Space {
@@ -469,7 +532,7 @@ impl Space {
         let (parent_attempt, parent_snapshot) = match from {
             Ref::Attempt(id) => {
                 let parent = self.attempt(id)?;
-                let snap = if parent.status.is_open() && parent.view_path.exists() {
+                let snap = if parent.status.is_open() && self.ensure_view(&parent)? {
                     self.snapshot(id, "fork", None)?.snapshot
                 } else {
                     self.head_snapshot(id)?
@@ -500,15 +563,31 @@ impl Space {
         let id = self.db.last_insert_rowid();
         let view_path = self.views_dir().join(format!("a{id}"));
 
-        let warm = matches!(from, Ref::Attempt(_)) && parent_attempt.view_path.exists();
-        let (backend, stats) = if warm {
-            let stats = view::fork_dir(&parent_attempt.view_path, &view_path)?;
-            (stats.backend(), Some(stats))
+        let warm = matches!(from, Ref::Attempt(_)) && self.ensure_view(&parent_attempt)?;
+        let made = if warm {
+            self.fork_view(&parent_attempt, id, &view_path, req.backend)
         } else {
             let tree = Oid::from_hex(&parent_snapshot.tree)?;
-            snapshot::materialize(&self.objects, &tree, &view_path)?;
-            (Backend::Materialize, None)
+            snapshot::materialize(&self.objects, &tree, &view_path).map(|()| WarmFork {
+                backend: Backend::Materialize,
+                reason: (req.backend != BackendChoice::Auto)
+                    .then(|| "forking from a stored snapshot writes its tree out".into()),
+                stats: None,
+                #[cfg(target_os = "linux")]
+                overlay: None,
+            })
         };
+        let made = match made {
+            Ok(m) => m,
+            Err(e) => {
+                // Leave no half-made attempt behind.
+                self.db
+                    .execute("DELETE FROM attempts WHERE id = ?1", params![id])?;
+                let _ = fs::remove_dir_all(&view_path);
+                return Err(e);
+            }
+        };
+        let backend = made.backend;
 
         self.db.execute(
             "UPDATE attempts SET view_path = ?1, backend = ?2 WHERE id = ?3",
@@ -523,8 +602,126 @@ impl Space {
             attempt: self.attempt(id)?,
             parent_snapshot,
             backend,
-            stats,
+            backend_reason: made.reason,
+            stats: made.stats,
+            #[cfg(target_os = "linux")]
+            overlay: made.overlay,
         })
+    }
+
+    /// Clone a live parent view: reflink, else overlayfs, else copy, or the
+    /// backend the caller forced.
+    fn fork_view(
+        &self,
+        parent: &Attempt,
+        id: i64,
+        view_path: &Path,
+        choice: BackendChoice,
+    ) -> Result<WarmFork> {
+        let copy = |reason: Option<String>| -> Result<WarmFork> {
+            let stats = view::fork_dir(&parent.view_path, view_path, true)?;
+            Ok(WarmFork {
+                backend: Backend::Copy,
+                reason,
+                stats: Some(stats),
+                #[cfg(target_os = "linux")]
+                overlay: None,
+            })
+        };
+        let views = self.views_dir();
+        let reflink = match choice {
+            BackendChoice::Auto | BackendChoice::Reflink => view::reflinks_supported(&views),
+            _ => Err(String::new()),
+        };
+        match (choice, reflink) {
+            (BackendChoice::Copy, _) => return copy(None),
+            (BackendChoice::Reflink, Err(why)) => {
+                return Err(Error::BackendUnavailable {
+                    backend: "reflink",
+                    reason: why,
+                })
+            }
+            (_, Ok(())) => {
+                let stats = view::fork_dir(&parent.view_path, view_path, false)?;
+                return Ok(WarmFork {
+                    backend: stats.backend(),
+                    reason: None,
+                    stats: Some(stats),
+                    #[cfg(target_os = "linux")]
+                    overlay: None,
+                });
+            }
+            _ => {}
+        }
+        let no_reflink = match choice {
+            BackendChoice::Auto => self.reflink_reason(),
+            _ => String::new(),
+        };
+        #[cfg(target_os = "linux")]
+        {
+            let start = std::time::Instant::now();
+            match self.overlay_fork(parent, id, view_path)? {
+                Ok(info) => {
+                    let stats = ForkStats {
+                        files: info.freeze.files,
+                        copied: info.freeze.files,
+                        bytes_copied: info.freeze.bytes,
+                        dirs: info.freeze.dirs,
+                        symlinks: info.freeze.symlinks,
+                        millis: start.elapsed().as_millis(),
+                        ..Default::default()
+                    };
+                    let reason = (choice == BackendChoice::Auto)
+                        .then(|| format!("{no_reflink}; overlayfs via {}", info.mounter.as_str()));
+                    Ok(WarmFork {
+                        backend: Backend::Overlay,
+                        reason,
+                        stats: Some(stats),
+                        overlay: Some(info),
+                    })
+                }
+                Err(why) if choice == BackendChoice::Auto => {
+                    copy(Some(format!("{no_reflink}; overlayfs unavailable ({why})")))
+                }
+                Err(why) => Err(Error::BackendUnavailable {
+                    backend: "overlay",
+                    reason: why,
+                }),
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = id;
+            let why = "overlayfs needs Linux".to_string();
+            match choice {
+                BackendChoice::Auto => copy(Some(format!("{no_reflink}; {why}"))),
+                _ => Err(Error::BackendUnavailable {
+                    backend: "overlay",
+                    reason: why,
+                }),
+            }
+        }
+    }
+
+    /// Make sure an attempt's view can be read, mounting an overlay view
+    /// that is not mounted (after a reboot, or in a new process for views
+    /// mounted in a user namespace). False when the view directory is gone.
+    pub fn ensure_view(&self, attempt: &Attempt) -> Result<bool> {
+        if attempt.backend != Backend::Overlay.as_str() {
+            return Ok(attempt.view_path.exists());
+        }
+        #[cfg(target_os = "linux")]
+        return self.mount_overlay_view(attempt);
+        #[cfg(not(target_os = "linux"))]
+        Err(Error::ViewUnmounted {
+            id: attempt.id,
+            reason: "overlayfs needs Linux".into(),
+        })
+    }
+
+    fn reflink_reason(&self) -> String {
+        let fs = fs_type(&self.views_dir());
+        format!("no reflinks on {fs}")
     }
 
     /// Change an attempt's outcome. Promoting an attempt that belongs to a
@@ -537,7 +734,7 @@ impl Space {
                 status: attempt.status.to_string(),
             });
         }
-        if status != Status::Abandoned && attempt.view_path.exists() {
+        if status != Status::Abandoned && self.ensure_view(&attempt)? {
             self.snapshot(id, status.as_str(), None)?;
         }
         self.db.execute(
@@ -581,6 +778,8 @@ impl Space {
             &format!("attempt.{}", status.as_str()),
             serde_json::json!({ "attempt": id, "reason": reason, "closed_siblings": losers }),
         )?;
+        #[cfg(target_os = "linux")]
+        self.release_views(&[&[id][..], &losers].concat());
         self.attempt(id)
     }
 
@@ -681,6 +880,8 @@ impl Space {
                 status: attempt.status.to_string(),
             });
         }
+        // Never capture an unmounted overlay view: it would look empty.
+        self.ensure_view(&attempt)?;
         let index = self
             .workdir
             .join(SPACE_DIR)
@@ -737,8 +938,8 @@ impl Space {
 mod tests {
     use super::*;
 
-    fn repo() -> (tempfile::TempDir, Space) {
-        let tmp = tempfile::tempdir().unwrap();
+    fn repo() -> (crate::testutil::TestDir, Space) {
+        let tmp = crate::testutil::tempdir();
         let w = tmp.path();
         fs::write(w.join("main.rs"), "fn main() {}\n").unwrap();
         fs::write(w.join(".gitignore"), "target/\n").unwrap();

@@ -207,6 +207,8 @@ pub fn execute(space: &Space, run_id: i64) -> Result<RunOutcome> {
     let run = space.run(run_id)?;
     let attempt = space.attempt(run.attempt_id)?;
     let view = attempt.view_path.clone();
+    // A detached worker is a new process: mount an overlay view again here.
+    space.ensure_view(&attempt)?;
     let stdio = || -> Result<(Stdio, Stdio)> {
         match &run.log_path {
             Some(p) => {
@@ -263,8 +265,6 @@ pub fn execute(space: &Space, run_id: i64) -> Result<RunOutcome> {
         _ => None,
     };
     let duration_ms = start.elapsed().as_millis() as i64;
-    space.finish_run(run_id, exit_code, check_exit_code, duration_ms)?;
-
     let meta = serde_json::json!({
         "run": run_id,
         "command": run.command,
@@ -275,6 +275,9 @@ pub fn execute(space: &Space, run_id: i64) -> Result<RunOutcome> {
     let snapshot = space
         .snapshot(attempt.id, "run-exit", Some(meta.clone()))?
         .snapshot;
+    // Finish only after the final snapshot, so a run that `ps` no longer
+    // lists always has its run-exit snapshot.
+    space.finish_run(run_id, exit_code, check_exit_code, duration_ms)?;
     space.record(&attempt.actor, "run.finish", meta)?;
 
     let verdict = match (check_exit_code, exit_code) {
@@ -306,8 +309,8 @@ mod tests {
     use super::*;
     use crate::space::ForkRequest;
 
-    fn space_with_attempt() -> (tempfile::TempDir, Space, i64) {
-        let tmp = tempfile::tempdir().unwrap();
+    fn space_with_attempt() -> (crate::testutil::TestDir, Space, i64) {
+        let tmp = crate::testutil::tempdir();
         fs::write(tmp.path().join("a.txt"), "one\n").unwrap();
         let space = Space::init(tmp.path()).unwrap();
         let a = space

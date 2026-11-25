@@ -2,6 +2,7 @@ use std::fs;
 use std::path::Path;
 use std::time::Duration;
 
+use agentvc_core::view::BackendChoice;
 use agentvc_core::{ForkRequest, Ref, Space, Status};
 use agentvcd::{AppState, Config};
 use axum::body::Body;
@@ -32,6 +33,8 @@ fn fixture() -> tempfile::TempDir {
                 actor: actor.into(),
                 model: Some("model-x".into()),
                 prompt: Some("do it".into()),
+                // Plain directories: overlay mounts would outlive the tempdir.
+                backend: BackendChoice::Copy,
             })
             .unwrap()
             .attempt
