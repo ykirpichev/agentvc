@@ -733,9 +733,12 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
             let runs = space.runs(!all)?;
             let mut text = String::new();
             for r in &runs {
-                let state = match (r.exit_code, r.alive) {
-                    (Some(c), _) => format!("exit {c}"),
-                    (None, Some(true)) => "running".to_string(),
+                let state = match (r.exit_code, r.alive, r.pid) {
+                    (Some(c), _, _) => format!("exit {c}"),
+                    (None, Some(true), _) => "running".to_string(),
+                    // The worker records the pid just after it spawns the
+                    // command; until then the run is starting, not lost.
+                    (None, _, None) => "starting".to_string(),
                     _ => "lost".to_string(),
                 };
                 text += &format!(
@@ -744,7 +747,7 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
                     r.attempt_id,
                     state,
                     r.pid.map(|p| p.to_string()).unwrap_or("-".into()),
-                    r.command.join(" ")
+                    short_command(&r.command)
                 );
             }
             if runs.is_empty() {
@@ -1115,5 +1118,29 @@ fn prepare_in_background(space: &Space) -> Value {
     {
         let _ = space;
         json!({ "skipped": "overlayfs needs Linux" })
+    }
+}
+
+/// A run's command for one line of `ps`: agents get long prompts, so cut it
+/// at 80 characters. `--json` keeps the full command.
+fn short_command(cmd: &[String]) -> String {
+    let full = cmd.join(" ");
+    match full.char_indices().nth(80) {
+        Some((i, _)) => format!("{}…", &full[..i]),
+        None => full,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::short_command;
+
+    #[test]
+    fn short_command_cuts_long_prompts() {
+        let cmd = |s: &str| s.split(' ').map(String::from).collect::<Vec<_>>();
+        assert_eq!(short_command(&cmd("claude -p hi")), "claude -p hi");
+        let long = short_command(&cmd(&format!("claude -p {}", "é".repeat(200))));
+        assert_eq!(long.chars().count(), 81);
+        assert!(long.ends_with('…'));
     }
 }
