@@ -225,10 +225,11 @@ The MVP is "many agents on one machine, one repo, reviewed in our UI, shipped as
 3. **M3 Review UI v1.** Daemon with HTTP API; web app with Inbox, Task view with attempt tree, Compare for 2 to 4 attempts, and Pick winner.
 4. **M4 Ship to GitHub.** Export the winner as clean commits and a PR, with a link back to the attempt tree.
 5. **M5 Dogfood.** Build agentvc with agentvc for two weeks; measure fork time, disk, review time; fix what hurts.
+6. **M6 Editor and agent integrations** (first post-MVP milestone). An MCP server (`agentvc mcp`, #33) that every integration builds on; a Claude Code plugin bundling hooks, MCP and slash commands, with Claude Desktop through MCP (#34); Cursor setup with MCP, rules and snapshot capture (#35); and a VS Code extension, which also runs in Cursor, with the attempt tree, native diff compare and pick winner (#36).
 
 **After the MVP**
 
-- **Phase 2, steer and explain:** Story mode stacks, Live board with pause, hint and fork-a-variant, MCP server, leases and write-time conflict warnings, per-agent blame, GitHub comment round-trip.
+- **Phase 2, steer and explain:** Story mode stacks, Live board with pause, hint and fork-a-variant, leases and write-time conflict warnings, per-agent blame, GitHub comment round-trip.
 - **Phase 3, scale out:** multi-project spaces with atomic cross-project changes, cached test results per tree, team mode with a shared review server, then multi-machine sync.
 
 **Deferred:** semantic merge, multi-tenant hosting, our own build system.
