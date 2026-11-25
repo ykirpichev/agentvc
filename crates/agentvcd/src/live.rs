@@ -7,7 +7,7 @@ use std::path::Path;
 
 use agentvc_core::run::Run;
 use agentvc_core::snapshot::FileChange;
-use agentvc_core::{Attempt, Ref, Snapshot, Space, Status};
+use agentvc_core::{Attempt, Snapshot, Space, Status};
 use axum::extract::{Path as UrlPath, State};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
@@ -98,7 +98,9 @@ fn build(s: &Space) -> agentvc_core::Result<Vec<LiveAttempt>> {
         let snaps = s.snapshots(a.id)?;
         let head = snaps.last().cloned();
         let files = match (a.parent_snapshot, &head) {
-            (Some(p), Some(h)) => s.diff(Ref::Snapshot(p), Ref::Snapshot(h.id))?,
+            // own_changes compares a rebased attempt with its new base, so
+            // the files main brought in do not count as overlaps.
+            (Some(_), Some(_)) => s.own_changes(a.id)?,
             _ => Vec::new(),
         };
         for f in &files {

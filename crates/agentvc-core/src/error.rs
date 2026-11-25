@@ -43,6 +43,19 @@ pub enum Error {
     },
     #[error("the overlay view of attempt a{id} is not mounted and could not be mounted: {reason}")]
     ViewUnmounted { id: i64, reason: String },
+    #[error(
+        "rebasing a{attempt} onto {onto} conflicts in {}: {}; nothing was changed \
+         (pass --keep-conflicts to write conflict markers into the view)",
+        if paths.len() == 1 { "1 file".to_string() } else { format!("{} files", paths.len()) },
+        paths.join(", ")
+    )]
+    Conflict {
+        attempt: i64,
+        onto: String,
+        paths: Vec<String>,
+    },
+    #[error("the root attempt a1 is the host checkout; update it with git, not agentvc rebase")]
+    RootAttempt,
     #[error("io error at {path}: {source}")]
     Io {
         path: PathBuf,
@@ -83,10 +96,29 @@ impl Error {
             Error::GitHub { .. } => "github",
             Error::BackendUnavailable { .. } => "backend_unavailable",
             Error::ViewUnmounted { .. } => "view_unmounted",
+            Error::Conflict { .. } => "conflict",
+            Error::RootAttempt => "root_attempt",
             Error::Io { .. } => "io",
             Error::Spawn { .. } => "spawn_failed",
             Error::Db(_) => "db",
             Error::Walk(_) => "walk",
+        }
+    }
+
+    /// Structured details for errors that carry more than a message, merged
+    /// into the `error` object of `--json` output.
+    pub fn details(&self) -> Option<serde_json::Value> {
+        match self {
+            Error::Conflict {
+                attempt,
+                onto,
+                paths,
+            } => Some(serde_json::json!({
+                "attempt": format!("a{attempt}"),
+                "onto": onto,
+                "paths": paths,
+            })),
+            _ => None,
         }
     }
 }

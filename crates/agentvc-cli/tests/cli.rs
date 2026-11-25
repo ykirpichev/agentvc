@@ -579,3 +579,122 @@ fn fork_backend_can_be_forced() {
         "1\n"
     );
 }
+
+#[test]
+fn rebase_onto_moved_main_then_pr_has_only_own_changes() {
+    let tmp = tempdir();
+    let w = tmp.path().join("work");
+    let other = tmp.path().join("other");
+    let remote = tmp.path().join("remotes/acme/widget.git");
+    fs::create_dir_all(&w).unwrap();
+    fs::create_dir_all(&remote).unwrap();
+    git(&remote, &["init", "-q", "--bare", "-b", "main"]);
+    git(&w, &["init", "-q", "-b", "main"]);
+    fs::write(w.join("lib.rs"), "1\n").unwrap();
+    fs::write(w.join("README.md"), "readme\n").unwrap();
+    git(&w, &["add", "-A"]);
+    git(&w, &["commit", "-q", "-m", "base"]);
+    git(&w, &["remote", "add", "origin", remote.to_str().unwrap()]);
+    git(&w, &["push", "-q", "origin", "main"]);
+
+    agentvc(&w, &["init"]);
+    agentvc(&w, &["task", "new", "bump"]);
+    let v = agentvc(&w, &["fork", "--task", "t1", "--from", "a1"]);
+    let view = v["fork"]["attempt"]["view_path"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let view = Path::new(&view);
+    fs::write(view.join("lib.rs"), "2\n").unwrap();
+    fs::write(view.join("README.md"), "readme from a2\n").unwrap();
+
+    // Another PR lands on main meanwhile.
+    git(
+        tmp.path(),
+        &[
+            "clone",
+            "-q",
+            remote.to_str().unwrap(),
+            other.to_str().unwrap(),
+        ],
+    );
+    fs::write(other.join("README.md"), "readme from main\n").unwrap();
+    fs::write(other.join("NEWS.md"), "news\n").unwrap();
+    git(&other, &["add", "-A"]);
+    git(&other, &["commit", "-q", "-m", "other PR"]);
+    git(&other, &["push", "-q", "origin", "main"]);
+    let main = git(&other, &["rev-parse", "HEAD"]);
+
+    // Conflict: code and paths in --json, nothing changed.
+    let before = agentvc(&w, &["show", "a2"])["snapshots"]
+        .as_array()
+        .unwrap()
+        .len();
+    let v = agentvc(&w, &["rebase", "a2"]);
+    assert_eq!(v["ok"], false, "{v}");
+    assert_eq!(v["error"]["code"], "conflict");
+    assert_eq!(v["error"]["paths"], serde_json::json!(["README.md"]));
+    assert_eq!(v["error"]["onto"], main);
+    assert_eq!(
+        agentvc(&w, &["show", "a2"])["snapshots"]
+            .as_array()
+            .unwrap()
+            .len(),
+        before
+    );
+    assert_eq!(
+        fs::read_to_string(view.join("README.md")).unwrap(),
+        "readme from a2\n"
+    );
+
+    // --keep-conflicts writes markers; fix, snapshot, then pr.
+    let v = agentvc(&w, &["rebase", "a2", "--keep-conflicts"]);
+    assert_eq!(v["ok"], true, "{v}");
+    assert_eq!(v["rebase"]["onto"], main);
+    assert_eq!(v["rebase"]["onto_ref"], "origin/main");
+    assert_eq!(v["rebase"]["conflicts"], serde_json::json!(["README.md"]));
+    assert_eq!(v["rebase"]["status"], "exploring");
+    assert!(fs::read_to_string(view.join("README.md"))
+        .unwrap()
+        .contains("<<<<<<<"));
+    assert_eq!(fs::read_to_string(view.join("NEWS.md")).unwrap(), "news\n");
+    fs::write(view.join("README.md"), "readme from main and a2\n").unwrap();
+    assert_eq!(agentvc(&w, &["snapshot", "a2"])["ok"], true);
+
+    let v = agentvc(&w, &["diff", "a2"]);
+    assert_eq!(v["from"], format!("git:{main}"));
+    let paths: Vec<&str> = v["changes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(paths, ["README.md", "lib.rs"]);
+    agentvc(&w, &["promote", "a2"]);
+
+    let (api, _log) = fake_github();
+    let out = Command::cargo_bin("agentvc")
+        .unwrap()
+        .arg("--json")
+        .arg("-C")
+        .arg(&w)
+        .args(["pr", "a2"])
+        .env("GITHUB_TOKEN", "test-token")
+        .env("AGENTVC_GITHUB_API", &api)
+        .env_remove("HTTP_PROXY")
+        .env_remove("HTTPS_PROXY")
+        .env_remove("ALL_PROXY")
+        .env_remove("http_proxy")
+        .env_remove("https_proxy")
+        .env_remove("all_proxy")
+        .output()
+        .unwrap();
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["ok"], true, "{v}");
+    // The pushed commit sits on the new main and reverts nothing.
+    assert_eq!(git(&remote, &["rev-parse", "agentvc/a2^"]), main);
+    assert_eq!(
+        git(&remote, &["diff", "--name-only", "main", "agentvc/a2"]),
+        "README.md\nlib.rs"
+    );
+}

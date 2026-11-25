@@ -40,8 +40,24 @@ agentvc diff aX aY            # or from the terminal
 
 # 4. Pick the winner and ship it
 agentvc promote aX            # siblings become abandoned (lost to aX)
+agentvc rebase aX             # only if main moved since aX was forked (see below)
 agentvc pr aX                 # exports a clean commit on agentvc/aX and opens the PR
 ```
+
+### When main has moved: rebase before `pr`
+
+An attempt's changes are relative to the commit it started from. If other PRs merged
+while it was open, exporting it as is would revert them. `agentvc rebase aX` fetches
+`origin` and three-way merges the attempt onto `origin/main` (or `--onto <rev>`), writes
+the result into its view and records a `rebase` snapshot. `export` and `pr` then parent on
+the new commit, and `agentvc diff aX` lists only the attempt's own files.
+
+On conflicts nothing changes: the command fails with code `conflict` and the paths
+(`error.paths` in `--json`). Either hand it back to the agent, or run
+`agentvc rebase aX --keep-conflicts`, which writes the files with conflict markers into
+the view and marks the attempt `exploring`. Fix them in `$(agentvc path aX)`, then
+`agentvc snapshot aX` and `agentvc pr aX`. A promoted attempt can be rebased too; siblings
+are never touched.
 
 Human edits follow the same loop: `agentvc fork --task tN --actor human`, then work in
 `$(agentvc path aN)`.
