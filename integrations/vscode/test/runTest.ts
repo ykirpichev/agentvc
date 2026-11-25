@@ -7,7 +7,8 @@ import { tmpdir } from 'node:os'
 import * as path from 'node:path'
 import { runTests } from '@vscode/test-electron'
 
-const ext = path.resolve(__dirname, '../../../../integrations/vscode')
+// Compiled to out/integrations/vscode/test/.
+const ext = path.resolve(__dirname, '../../../..')
 const bin = process.env.AGENTVC_BIN_DIR ?? path.resolve(ext, '../../target/debug')
 
 export function makeFixture(): string {
