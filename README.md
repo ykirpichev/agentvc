@@ -12,6 +12,28 @@ Status: early. Milestone M1 (core model and views) is in progress.
 - CLI: [crates/agentvc-cli](crates/agentvc-cli)
 - Review UI: [ui](ui)
 
+## Try it
+
+```sh
+cargo build --release
+alias agentvc=$PWD/target/release/agentvc
+
+cd /path/to/your/repo
+agentvc init                                  # snapshot the working dir as attempt a1
+agentvc task new "make the parser 2x faster"  # -> t1
+agentvc fork --task t1 --actor agent:claude   # -> a2 in .agentvc/views/a2, build output included
+agentvc fork --task t1 --actor agent:codex    # -> a3, a sibling attempt
+cd "$(agentvc path a2)" && ...                # let an agent work there
+agentvc snapshot a2 --meta tests=pass         # record state with metadata
+agentvc diff a2 a3                            # files that differ between two attempts
+agentvc promote a2                            # pick the winner; a3 becomes abandoned (lost to a2)
+agentvc log --task t1                         # the attempt tree
+```
+
+Every command takes `--json` and returns one JSON object; errors carry a
+stable `error.code`. Benchmark forks against `git worktree` with
+`scripts/bench-fork.sh <repo>`.
+
 ## Build
 
 ```sh
