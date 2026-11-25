@@ -1,6 +1,7 @@
 //! `agentvcd`: the local agentvc daemon.
 //!
-//! Serves a read-only JSON API over one [`Space`], a WebSocket stream of live
+//! Serves a JSON API over one [`Space`] (reads, plus the review actions
+//! promote, abandon and mark), a WebSocket stream of live
 //! events and the review UI. It only ever binds to the loopback interface and
 //! rejects requests whose `Host` or `Origin` is not local, so other websites
 //! open in the same browser cannot read the space (DNS rebinding, cross-site
@@ -19,11 +20,12 @@ use axum::http::{header, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::Router;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, Notify};
 
 mod api;
 mod assets;
 mod events;
+mod review;
 
 pub use api::ApiError;
 pub use events::Event;
@@ -59,6 +61,8 @@ struct Inner {
     space: Mutex<Space>,
     workdir: PathBuf,
     events: broadcast::Sender<Event>,
+    /// Wakes the event poller early, after the daemon itself wrote.
+    poke: Notify,
 }
 
 impl AppState {
@@ -74,6 +78,7 @@ impl AppState {
                 space: Mutex::new(space),
                 workdir,
                 events: tx,
+                poke: Notify::new(),
             }),
         };
         events::spawn_poller(state.clone(), watcher, config.poll_interval);
@@ -87,6 +92,17 @@ impl AppState {
     /// Subscribe to live events.
     pub fn subscribe(&self) -> broadcast::Receiver<Event> {
         self.inner.events.subscribe()
+    }
+
+    /// Ask the event poller to look for changes now rather than at its next
+    /// tick, so a write from the UI shows up immediately.
+    pub(crate) fn poke(&self) {
+        self.inner.poke.notify_one();
+    }
+
+    /// Wait until [`AppState::poke`] is called.
+    pub(crate) async fn poked(&self) {
+        self.inner.poke.notified().await;
     }
 
     /// Run `f` against the space on the blocking pool.

@@ -94,7 +94,10 @@ pub(crate) fn spawn_poller(state: AppState, watcher: Watcher, every: Duration) {
         let mut tick = tokio::time::interval(every);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
-            tick.tick().await;
+            tokio::select! {
+                _ = tick.tick() => {}
+                _ = state.poked() => {}
+            }
             let Some(mut w) = watcher.take() else { break };
             let res = state
                 .with_space(move |s| {

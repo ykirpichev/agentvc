@@ -4,7 +4,6 @@ import { api } from '../api/client'
 import { useLive } from '../api/live'
 import { useResource } from '../api/useResource'
 import { useHotkeys, useShortcutHelp } from '../keyboard/hotkeys'
-import { needsDecision } from '../lib/inbox'
 import { useTheme } from '../theme/theme'
 import { Kbd } from './bits'
 import { CommandPalette } from './CommandPalette'
@@ -24,10 +23,10 @@ export function Shell() {
   const [paletteOpen, setPaletteOpen] = useState(false)
   const { connection } = useLive()
   const space = useResource('space', api.space)
-  const tasks = useResource('tasks', api.tasks)
+  const inbox = useResource('inbox', api.inbox)
   const attempts = useResource('attempts', () => api.attempts())
 
-  const inboxCount = tasks.data?.filter(needsDecision).length ?? 0
+  const inboxCount = inbox.data?.length ?? 0
   const liveCount = attempts.data?.filter((a) => a.status === 'exploring' && a.id !== 1).length ?? 0
   const counts: Record<string, number> = { '/inbox': inboxCount, '/live': liveCount }
 
