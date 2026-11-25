@@ -13,6 +13,7 @@ Status: early. Milestone M1 (core model and views) is in progress.
 - MCP server: [crates/agentvc-mcp](crates/agentvc-mcp)
 - Claude Code plugin: [integrations/claude-code](integrations/claude-code)
 - Review UI: [ui](ui)
+- VS Code / Cursor extension: [integrations/vscode](integrations/vscode)
 
 ## Try it
 

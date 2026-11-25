@@ -1,0 +1,21 @@
+// Bundles the extension (and the review UI's shared API types) into one file.
+import * as esbuild from 'esbuild'
+
+const watch = process.argv.includes('--watch')
+const ctx = await esbuild.context({
+  entryPoints: ['src/extension.ts'],
+  bundle: true,
+  outfile: 'dist/extension.js',
+  platform: 'node',
+  format: 'cjs',
+  target: 'node18',
+  external: ['vscode'],
+  sourcemap: true,
+  minify: !watch,
+  logLevel: 'info',
+})
+if (watch) await ctx.watch()
+else {
+  await ctx.rebuild()
+  await ctx.dispose()
+}
