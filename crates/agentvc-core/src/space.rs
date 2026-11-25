@@ -64,6 +64,19 @@ CREATE TABLE IF NOT EXISTS operations (
     payload TEXT NOT NULL,
     created_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS runs (
+    id INTEGER PRIMARY KEY,
+    attempt_id INTEGER NOT NULL REFERENCES attempts(id),
+    command TEXT NOT NULL,
+    check_command TEXT,
+    pid INTEGER,
+    log_path TEXT,
+    started_at INTEGER NOT NULL,
+    finished_at INTEGER,
+    exit_code INTEGER,
+    check_exit_code INTEGER,
+    duration_ms INTEGER
+);
 CREATE INDEX IF NOT EXISTS attempts_task ON attempts(task_id);
 CREATE INDEX IF NOT EXISTS snapshots_attempt ON snapshots(attempt_id);
 "#;
@@ -204,11 +217,11 @@ pub struct SnapshotResult {
 
 pub struct Space {
     workdir: PathBuf,
-    db: Connection,
+    pub(crate) db: Connection,
     objects: ObjectStore,
 }
 
-fn now() -> i64 {
+pub(crate) fn now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -281,7 +294,7 @@ impl Space {
         self.workdir.join(SPACE_DIR).join("views")
     }
 
-    fn record(&self, actor: &str, kind: &str, payload: serde_json::Value) -> Result<()> {
+    pub(crate) fn record(&self, actor: &str, kind: &str, payload: serde_json::Value) -> Result<()> {
         self.db.execute(
             "INSERT INTO operations (actor, kind, payload, created_at) VALUES (?1, ?2, ?3, ?4)",
             params![actor, kind, payload.to_string(), now()],
@@ -584,6 +597,20 @@ impl Space {
         trigger: &str,
         meta: Option<serde_json::Value>,
     ) -> Result<SnapshotResult> {
+        let always = meta.is_some();
+        self.snapshot_with(attempt_id, trigger, meta, always)
+    }
+
+    /// Like [`Space::snapshot`], but `always` decides whether an unchanged
+    /// tree still records a new snapshot (to keep its metadata) or returns
+    /// the previous one with `unchanged: true`.
+    pub fn snapshot_with(
+        &self,
+        attempt_id: i64,
+        trigger: &str,
+        meta: Option<serde_json::Value>,
+        always: bool,
+    ) -> Result<SnapshotResult> {
         let attempt = self.attempt(attempt_id)?;
         if !attempt.status.is_open() {
             return Err(Error::AttemptClosed {
@@ -592,8 +619,9 @@ impl Space {
             });
         }
         let tree = snapshot::capture(&self.objects, &attempt.view_path)?.to_hex();
-        if meta.is_none() {
-            if let Some(last) = self.snapshots(attempt_id)?.pop() {
+        if !always {
+            // A fresh fork compares against the snapshot it was forked from.
+            if let Ok(last) = self.head_snapshot(attempt_id) {
                 if last.tree == tree {
                     return Ok(SnapshotResult {
                         snapshot: last,
