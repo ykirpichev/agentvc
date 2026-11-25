@@ -354,7 +354,7 @@ impl Space {
         Err(Error::NoSpace(start))
     }
 
-    fn open_at(workdir: PathBuf) -> Result<Space> {
+    pub(crate) fn open_at(workdir: PathBuf) -> Result<Space> {
         let dir = workdir.join(SPACE_DIR);
         let db = Connection::open(dir.join("meta.db"))?;
         db.busy_timeout(std::time::Duration::from_secs(5))?;
@@ -384,6 +384,12 @@ impl Space {
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             params![key, value],
         )?;
+        Ok(())
+    }
+
+    pub fn delete_meta(&self, key: &str) -> Result<()> {
+        self.db
+            .execute("DELETE FROM meta WHERE key = ?1", params![key])?;
         Ok(())
     }
 

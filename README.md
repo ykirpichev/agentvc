@@ -39,6 +39,8 @@ agentvc log --task t1                         # the attempt tree
 agentvc rebase a2                             # main moved? merge a2 onto origin/main first
 agentvc export a2 --branch parser-2x          # a2 as a commit on a branch; worktree untouched
 agentvc pr a2 --draft                         # push agentvc/a2 and open a PR listing rejected attempts
+agentvc sync                                  # push the whole space (losers too) to origin
+agentvc init --from-remote                    # elsewhere: rebuild that space, same ids
 ```
 
 `agentvc pr` reads a token from `GITHUB_TOKEN`, `GH_TOKEN` or `gh auth token`.

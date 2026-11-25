@@ -540,6 +540,26 @@ pub static TOOLS: &[Tool] = &[
                 .done())
         },
     },
+    Tool {
+        name: "sync",
+        title: "Sync space to remote",
+        description: "Push the whole space (tasks, attempts including abandoned ones, snapshots, reasons, run logs) to a git remote as refs/agentvc/spaces/<id>, so the history outlives this machine; `agentvc init --from-remote` restores it elsewhere. `pr` syncs on its own. Returns {sync}.",
+        read_only: false,
+        destructive: false,
+        open_world: true,
+        params: || {
+            vec![
+                ("remote", s("Git remote. Defaults to \"origin\"."), false),
+                ("auto", b("Also sync after every run, promote, abandon and pr from now on."), false),
+            ]
+        },
+        argv: |a| {
+            Ok(Argv::new(&["sync"])
+                .opt("remote", a.str("remote")?)
+                .flag("auto", a.bool("auto")?)
+                .done())
+        },
+    },
 ];
 
 /// Look up a tool by name.
