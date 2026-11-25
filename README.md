@@ -26,6 +26,9 @@ agentvc fork --task t1 --actor agent:codex    # -> a3, a sibling attempt
 cd "$(agentvc path a2)" && ...                # let an agent work there
 agentvc snapshot a2 --meta tests=pass         # record state with metadata
 agentvc diff a2 a3                            # files that differ between two attempts
+agentvc run --task t1 --actor agent:claude --check "cargo test" -- claude -p "make the parser faster"
+                                              # fork + run an agent in the view; check decides passed/failed
+agentvc run --detach --task t1 -- <agent cmd> # same, in the background; see `agentvc ps`
 agentvc promote a2                            # pick the winner; a3 becomes abandoned (lost to a2)
 agentvc log --task t1                         # the attempt tree
 ```

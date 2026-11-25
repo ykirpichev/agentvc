@@ -64,6 +64,19 @@ CREATE TABLE IF NOT EXISTS operations (
     payload TEXT NOT NULL,
     created_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS runs (
+    id INTEGER PRIMARY KEY,
+    attempt_id INTEGER NOT NULL REFERENCES attempts(id),
+    command TEXT NOT NULL,
+    check_command TEXT,
+    pid INTEGER,
+    log_path TEXT,
+    started_at INTEGER NOT NULL,
+    finished_at INTEGER,
+    exit_code INTEGER,
+    check_exit_code INTEGER,
+    duration_ms INTEGER
+);
 CREATE INDEX IF NOT EXISTS attempts_task ON attempts(task_id);
 CREATE INDEX IF NOT EXISTS snapshots_attempt ON snapshots(attempt_id);
 "#;
@@ -204,11 +217,11 @@ pub struct SnapshotResult {
 
 pub struct Space {
     workdir: PathBuf,
-    db: Connection,
+    pub(crate) db: Connection,
     objects: ObjectStore,
 }
 
-fn now() -> i64 {
+pub(crate) fn now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -281,7 +294,7 @@ impl Space {
         self.workdir.join(SPACE_DIR).join("views")
     }
 
-    fn record(&self, actor: &str, kind: &str, payload: serde_json::Value) -> Result<()> {
+    pub(crate) fn record(&self, actor: &str, kind: &str, payload: serde_json::Value) -> Result<()> {
         self.db.execute(
             "INSERT INTO operations (actor, kind, payload, created_at) VALUES (?1, ?2, ?3, ?4)",
             params![actor, kind, payload.to_string(), now()],
