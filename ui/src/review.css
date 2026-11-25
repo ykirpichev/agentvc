@@ -1004,6 +1004,212 @@
   background: var(--failed-bg);
 }
 
+
+/* ---- Live board ------------------------------------------------------- */
+
+.live-totals {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.chip-warn {
+  color: var(--promoted);
+  background: var(--promoted-bg);
+  border-color: transparent;
+}
+
+.chip-warn svg {
+  color: inherit;
+}
+
+.section-keys {
+  font-weight: 400;
+  font-size: 12px;
+  margin-left: 12px;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.live-board {
+  list-style: none;
+  margin: 0 0 28px;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+  gap: 12px;
+}
+
+.live-card {
+  position: relative;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.live-card[aria-selected='true'] {
+  background: var(--surface);
+  border-color: var(--selected-edge);
+  box-shadow: 0 0 0 1px var(--selected-edge), var(--shadow);
+}
+
+.live-card.idle {
+  opacity: 0.85;
+}
+
+.idle-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--faint);
+  flex: none;
+}
+
+.live-task {
+  color: var(--text-2);
+  font-size: 12.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.live-task:hover {
+  color: var(--accent-text);
+}
+
+.live-step {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--exploring-bg);
+}
+
+.live-step .label {
+  color: var(--exploring);
+}
+
+.live-step-text {
+  flex: 1;
+  min-width: 0;
+  font-weight: 550;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.live-files {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 12.5px;
+}
+
+.live-files li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.live-files .change-path {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.live-files li.overlap .change-path {
+  color: var(--promoted);
+}
+
+.overlap-with {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 11px;
+  color: var(--promoted);
+  font-family: var(--font-mono);
+  flex: none;
+}
+
+.live-run {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  background: var(--surface-2);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.live-run-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.run-state {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 0 7px;
+  border-radius: 999px;
+  line-height: 18px;
+  flex: none;
+}
+
+.run-state.on {
+  color: var(--exploring);
+  background: var(--exploring-bg);
+}
+
+.run-state.off {
+  color: var(--failed);
+  background: var(--failed-bg);
+}
+
+.live-cmd {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  background: none;
+  border: 0;
+  padding: 0;
+}
+
+.live-log {
+  margin: 4px 0 0;
+  max-height: 160px;
+  overflow: auto;
+  font: 11.5px/1.5 var(--font-mono);
+  color: var(--text-2);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.live-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: auto;
+}
+
 @media (max-width: 1100px) {
   .cmp-heads {
     grid-template-columns: repeat(var(--cols), minmax(0, 1fr));
