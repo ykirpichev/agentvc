@@ -1,0 +1,151 @@
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router'
+import { api, ref } from '../api/client'
+import type { AttemptDetail, Ref } from '../api/types'
+import { useResource } from '../api/useResource'
+import { AttemptMeta } from '../components/AttemptMeta'
+import { ChangeList } from '../components/ChangeList'
+import { DiffView } from '../components/DiffView'
+import { Empty, ErrorNote, Kbd, PageHeader, Skeleton, StatusPill } from '../components/bits'
+import { Icon } from '../components/Icon'
+import { useHotkeys } from '../keyboard/hotkeys'
+import { useListNavigation } from '../keyboard/useListNavigation'
+import { actorName, timeAgo } from '../lib/format'
+
+export function AttemptPage() {
+  const id = Number(useParams().id)
+  const { data, error, loading } = useResource(`attempt:${id}`, () => api.attempt(id))
+  return (
+    <div className="page page-wide">
+      {error && <ErrorNote error={error} />}
+      {loading && <Skeleton />}
+      {data && <AttemptView key={id} detail={data} />}
+    </div>
+  )
+}
+
+function AttemptView({ detail }: { detail: AttemptDetail }) {
+  const { attempt, head } = detail
+  const navigate = useNavigate()
+  const [params, setParams] = useSearchParams()
+  const snapshots = useResource(`snapshots:${attempt.id}`, () => api.snapshots(attempt.id))
+
+  // Compare against the fork point; the root attempt has none, so it shows
+  // each snapshot against the one before.
+  const snapParam = params.get('snap')
+  const headRef: Ref | null = snapParam
+    ? ref.snapshot(Number(snapParam))
+    : attempt.parent_snapshot
+      ? ref.attempt(attempt.id)
+      : head
+        ? ref.snapshot(head.id)
+        : null
+  const baseRef: Ref | undefined = attempt.parent_snapshot ? ref.snapshot(attempt.parent_snapshot) : undefined
+  const diff = useResource(headRef ? `diff:${baseRef}..${headRef}` : null, () => api.diff(headRef!, baseRef))
+  const changes = diff.data?.changes ?? []
+
+  const fileParam = params.get('file')
+  const fileIndex = Math.max(0, changes.findIndex((c) => c.path === fileParam))
+  const select = (i: number) => {
+    const c = changes[i]
+    if (!c) return
+    const next = new URLSearchParams(params)
+    next.set('file', c.path)
+    setParams(next, { replace: true })
+  }
+  const nav = useListNavigation(changes.length, {
+    group: 'Files',
+    noun: 'file',
+    selected: fileIndex,
+    onSelect: select,
+  })
+  const selected = nav.selected
+  const upTo = attempt.task_id ? `/tasks/${attempt.task_id}` : '/tasks'
+  useHotkeys([
+    { keys: ['u', 'backspace'], description: 'Up to the task', group: 'Attempt', handler: () => navigate(upTo) },
+  ])
+  const current = changes[selected]
+
+  return (
+    <>
+      <Link to={upTo} className="back">
+        <Icon name="back" size={14} /> {attempt.task_id ? `Task t${attempt.task_id}` : 'Tasks'}
+      </Link>
+      <PageHeader
+        eyebrow={
+          <>
+            a{attempt.id} · {attempt.backend} view · updated {head ? timeAgo(head.created_at) : 'never'}
+          </>
+        }
+        title={
+          <span className="title-with-pill">
+            {attempt.id === 1 ? 'Working directory' : actorName(attempt.actor)}
+            <StatusPill status={attempt.status} />
+          </span>
+        }
+      >
+        {snapshots.data && snapshots.data.length > 0 && (
+          <label className="select">
+            <span>Snapshot</span>
+            <select
+              value={snapParam ?? ''}
+              onChange={(e) => {
+                const next = new URLSearchParams(params)
+                if (e.target.value) next.set('snap', e.target.value)
+                else next.delete('snap')
+                setParams(next, { replace: true })
+              }}
+            >
+              <option value="">Latest</option>
+              {[...snapshots.data].reverse().map((s) => (
+                <option key={s.id} value={s.id}>
+                  s{s.id} · {s.trigger} · {timeAgo(s.created_at)}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
+      </PageHeader>
+      <AttemptMeta
+        attempt={attempt}
+        extra={
+          <div>
+            <dt>Snapshots</dt>
+            <dd>{detail.snapshot_count}</dd>
+          </div>
+        }
+      />
+
+      {diff.error && <ErrorNote error={diff.error} />}
+      {diff.data && changes.length === 0 && (
+        <Empty title="No changes">
+          {baseRef ? `Identical to ${baseRef}, where it was forked from.` : 'Nothing changed in this snapshot.'}
+        </Empty>
+      )}
+      {diff.data && changes.length > 0 && (
+        <div className="review">
+          <aside className="panel files">
+            <div className="panel-head">
+              <span>
+                {diff.data.a && `s${diff.data.a.id}`} → s{diff.data.b.id}
+              </span>
+              <span className="muted">{changes.length} files</span>
+            </div>
+            <ChangeList changes={changes} selected={selected} onSelect={select} rowRef={nav.rowRef} />
+            <div className="panel-foot muted">
+              <Kbd keys="j" /> <Kbd keys="k" /> next / previous file
+            </div>
+          </aside>
+          {current && (
+            <DiffView
+              key={current.path}
+              base={ref.snapshot(diff.data.a.id)}
+              head={ref.snapshot(diff.data.b.id)}
+              path={current.path}
+              kind={current.kind}
+            />
+          )}
+        </div>
+      )}
+    </>
+  )
+}
