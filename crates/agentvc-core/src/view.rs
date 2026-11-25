@@ -89,7 +89,9 @@ impl std::str::FromStr for BackendChoice {
 /// Whether files in `dir` can be cloned with reflinks. Tries a real clone of
 /// a scratch file.
 pub fn reflinks_supported(dir: &Path) -> std::result::Result<(), String> {
-    let a = dir.join(format!(".reflink-probe-{}", std::process::id()));
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let a = dir.join(format!(".reflink-probe-{}-{n}", std::process::id()));
     let b = a.with_extension("clone");
     fs::write(&a, b"probe").map_err(|e| format!("{}: {e}", a.display()))?;
     let r = reflink_copy::reflink(&a, &b);
