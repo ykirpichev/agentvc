@@ -13,6 +13,7 @@ name = "agentvc-cli"
 version = "0.0.1"
 dependencies = [
  "agentvc-core",
+ "agentvc-mcp",
  "anyhow",
  "assert_cmd",
  "clap",
@@ -36,6 +37,14 @@ dependencies = [
  "tempfile",
  "thiserror",
  "ureq",
+]
+
+[[package]]
+name = "agentvc-mcp"
+version = "0.0.1"
+dependencies = [
+ "agentvc-core",
+ "serde_json",
 ]
 
 [[package]]
