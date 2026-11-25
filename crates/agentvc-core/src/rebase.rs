@@ -153,6 +153,22 @@ impl Space {
             .optional()?)
     }
 
+    /// A recorded rebase onto `commit` (full id), from any attempt. Its
+    /// tree is stored in the space, so it can be read like a snapshot's.
+    pub fn git_base_by_commit(&self, commit: &str) -> Result<Option<GitBase>> {
+        Ok(self
+            .db
+            .query_row(
+                &format!(
+                    "SELECT {BASE_COLS} FROM git_bases WHERE commit_id = ?1
+                     ORDER BY id DESC LIMIT 1"
+                ),
+                params![commit],
+                row_to_base,
+            )
+            .optional()?)
+    }
+
     /// Files the attempt changed: against the commit it was last rebased
     /// onto, else against the snapshot it was forked from. Empty for an
     /// attempt with no parent.

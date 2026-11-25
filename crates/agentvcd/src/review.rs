@@ -624,7 +624,7 @@ async fn compare(
 // ---- actions --------------------------------------------------------------
 
 /// Unwrap a JSON body, turning a bad one into our error shape.
-fn json_body<T>(body: Result<Json<T>, JsonRejection>) -> Result<T, ApiError> {
+pub(crate) fn json_body<T>(body: Result<Json<T>, JsonRejection>) -> Result<T, ApiError> {
     body.map(|Json(b)| b).map_err(|e| {
         ApiError::new(
             StatusCode::BAD_REQUEST,
