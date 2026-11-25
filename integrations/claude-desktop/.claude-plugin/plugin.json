@@ -1,0 +1,35 @@
+{
+  "name": "agentvc-panel",
+  "version": "0.1.0",
+  "description": "A pane beside the chat showing agentvc tasks, each task's attempt tree, and the agents running now",
+  "author": {
+    "name": "agentvc"
+  },
+  "types": "./types/index.d.ts",
+  "network": {
+    "hosts": [
+      "127.0.0.1",
+      "localhost"
+    ]
+  },
+  "userConfig": {
+    "url": {
+      "type": "string",
+      "title": "agentvcd URL",
+      "description": "Where the local agentvc daemon listens",
+      "default": "http://127.0.0.1:7420"
+    },
+    "pollSeconds": {
+      "type": "number",
+      "title": "Refresh every (seconds)",
+      "description": "How often the pane asks the daemon for changes",
+      "default": 2
+    },
+    "autoOpen": {
+      "type": "boolean",
+      "title": "Open the pane when the daemon answers",
+      "description": "Open the pane at session start once agentvcd is reachable",
+      "default": true
+    }
+  }
+}

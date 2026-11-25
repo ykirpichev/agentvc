@@ -13,6 +13,7 @@ Status: early. Milestone M1 (core model and views) is in progress.
 - MCP server: [crates/agentvc-mcp](crates/agentvc-mcp)
 - Claude Code plugin: [integrations/claude-code](integrations/claude-code)
 - Review UI: [ui](ui)
+- VS Code / Cursor extension: [integrations/vscode](integrations/vscode)
 
 ## Try it
 
@@ -70,6 +71,19 @@ trees, statuses, reasons, runs, PRs) as one JSON document; the daemon serves the
 same at `/api/overview`. The Claude project's **agentvc Experiments** artifact
 renders it. See [docs/overview.md](docs/overview.md).
 
+## Side panel in Claude
+
+`integrations/claude-desktop` is a Claude Code plugin that shows the attempt
+tree and running agents in a pane beside the chat (desktop app Code tab or
+terminal), read live from agentvcd:
+
+```
+/plugin install agentvc-panel --marketplace ykirpichev/agentvc
+```
+
+See [its README](integrations/claude-desktop/README.md) for the desktop app
+steps and options.
+
 ## MCP server
 
 `agentvc mcp` serves the agentvc commands to coding agents over the Model
@@ -112,7 +126,8 @@ directory, so pass the space):
 }
 ```
 
-Cursor (`.cursor/mcp.json` in the repo):
+Cursor: run `agentvc integrate cursor` in the space (see below), or add
+`.cursor/mcp.json` by hand:
 
 ```json
 {
@@ -127,6 +142,33 @@ Cursor (`.cursor/mcp.json` in the repo):
 
 Try it by hand with the MCP inspector:
 `npx @modelcontextprotocol/inspector agentvc mcp`.
+
+## Cursor
+
+```sh
+agentvc integrate cursor           # in a space; --json for scripts
+agentvc integrate cursor --remove  # revert every file it wrote
+```
+
+This writes three files under `.cursor/`, merging into any that exist:
+
+- `mcp.json`: the `agentvc` MCP server, so Cursor's agent can list, fork,
+  snapshot and mark attempts.
+- `hooks.json`: Cursor hooks. `afterFileEdit` runs `agentvc hook
+  cursor-after-file-edit`, which snapshots the attempt whose view holds the
+  edited file. `stop` records the end of each agent turn. Snapshots show up in
+  the review UI within a second.
+- `rules/agentvc.mdc`: an always-on rule describing the attempt workflow,
+  including that background and parallel agents each fork their own attempt and
+  work only in its view.
+
+`--remove` takes out only agentvc's entries, keeps your own MCP servers, hooks
+and rules, and deletes files and directories that are then empty. The command
+is written as a bare `agentvc` when that is the binary on `PATH`, so the files
+can be committed. Otherwise it is written as an absolute path.
+
+To review attempts inside Cursor, install the VS Code extension
+([integrations/vscode](integrations/vscode)): Cursor runs VS Code extensions.
 
 ## Build
 

@@ -34,3 +34,35 @@ jobs:
       - run: npm run typecheck
       - run: npm run lint
       - run: npm run build
+
+  vscode:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: integrations/vscode
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build agentvc and agentvcd for the extension tests
+        working-directory: .
+        run: cargo build -p agentvc-cli -p agentvcd
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: integrations/vscode/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run test:unit
+      - uses: actions/cache@v4
+        with:
+          path: integrations/vscode/.vscode-test
+          key: vscode-test-${{ runner.os }}-stable
+      - name: Extension tests (@vscode/test-electron)
+        run: xvfb-run -a npm test
+      - run: npm run package
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agentvc-vsix
+          path: integrations/vscode/agentvc.vsix

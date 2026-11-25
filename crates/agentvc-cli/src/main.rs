@@ -245,8 +245,25 @@ enum Cmd {
     /// Hook handler called by Claude Code; reads the hook JSON on stdin.
     /// Always exits 0 so a hook can never break an agent session.
     Hook {
-        #[arg(value_parser = ["post-tool-use", "stop", "subagent-stop"])]
+        #[arg(value_parser = [
+            "post-tool-use",
+            "stop",
+            "subagent-stop",
+            "cursor-after-file-edit",
+            "cursor-stop",
+        ])]
         event: String,
+    },
+    /// Set up an editor to work in this space: for Cursor, the MCP server
+    /// (.cursor/mcp.json), hooks that snapshot the agent's edits
+    /// (.cursor/hooks.json) and a rule describing the attempt workflow
+    /// (.cursor/rules/agentvc.mdc).
+    Integrate {
+        #[arg(value_parser = ["cursor"])]
+        editor: String,
+        /// Revert every file `integrate` wrote, keeping your own settings.
+        #[arg(long)]
+        remove: bool,
     },
 }
 
@@ -409,13 +426,18 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
     match &cli.cmd {
         Cmd::Hook { event } => return Ok(run_hook(event, &cwd, cli.json)),
         Cmd::Hooks { user, uninstall } => return hooks_cmd(&cwd, *user, *uninstall),
+        Cmd::Integrate { remove, .. } => return integrate_cmd(&cwd, *remove),
         _ => {}
     }
     let space = Space::discover(&cwd)?;
     let current = || -> anyhow::Result<i64> { Ok(space.attempt_for_path(&cwd)?.id) };
 
     Ok(match cli.cmd {
-        Cmd::Init { .. } | Cmd::Hook { .. } | Cmd::Hooks { .. } | Cmd::Mcp { .. } => unreachable!(),
+        Cmd::Init { .. }
+        | Cmd::Hook { .. }
+        | Cmd::Hooks { .. }
+        | Cmd::Integrate { .. }
+        | Cmd::Mcp { .. } => unreachable!(),
         Cmd::Task(TaskCmd::New { goal, criteria }) => {
             let t = space.create_task(&goal, criteria.as_deref())?;
             Out {
@@ -1001,7 +1023,13 @@ fn run_hook(event: &str, cwd: &std::path::Path, as_json: bool) -> Out {
     use std::io::Read;
     let mut raw = String::new();
     let _ = std::io::stdin().read_to_string(&mut raw);
-    let input: Value = serde_json::from_str(&raw).unwrap_or(json!({}));
+    let mut input: Value = serde_json::from_str(&raw).unwrap_or(json!({}));
+    let mut event = event;
+    // Cursor's hooks send their own shape; reshape it for the shared handler.
+    if let Some((e, reshaped)) = agentvc_core::cursor::hook_input(event, &input) {
+        event = e;
+        input = reshaped;
+    }
     let result = agentvc_core::hooks::handle(event, &input, cwd);
     let json = match &result {
         Ok(o) => json!({ "hook": o }),
@@ -1018,6 +1046,43 @@ fn run_hook(event: &str, cwd: &std::path::Path, as_json: bool) -> Out {
         text: String::new(),
         json: if as_json { json } else { Value::Null },
     }
+}
+
+fn integrate_cmd(cwd: &std::path::Path, remove: bool) -> anyhow::Result<Out> {
+    let space = Space::discover(cwd)?;
+    let root = space.workdir().to_path_buf();
+    let exe = std::env::current_exe()?;
+    // A bare `agentvc` keeps committed .cursor files portable; fall back to
+    // the absolute path when this binary is not the one on PATH.
+    let on_path = std::env::var_os("PATH").is_some_and(|p| {
+        std::env::split_paths(&p).any(|d| {
+            d.join("agentvc")
+                .canonicalize()
+                .is_ok_and(|c| exe.canonicalize().is_ok_and(|e| e == c))
+        })
+    });
+    let cmd = if on_path {
+        "agentvc".to_string()
+    } else {
+        exe.to_string_lossy().into_owned()
+    };
+    let r = agentvc_core::cursor::integrate(&root, &cmd, remove)?;
+    let mut text = String::new();
+    for f in &r.files {
+        let action = serde_json::to_value(&f.action)?;
+        text += &format!(
+            "{:<10} {}\n",
+            action.as_str().unwrap_or(""),
+            f.path.strip_prefix(&root).unwrap_or(&f.path).display()
+        );
+    }
+    if !remove {
+        text += "Reload Cursor, then enable the agentvc MCP server in Settings > MCP if asked.";
+    }
+    Ok(Out {
+        text: text.trim_end().to_string(),
+        json: json!({ "integrate": r, "command": cmd }),
+    })
 }
 
 fn hooks_cmd(cwd: &std::path::Path, user: bool, uninstall: bool) -> anyhow::Result<Out> {

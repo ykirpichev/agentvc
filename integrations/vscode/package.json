@@ -1,0 +1,416 @@
+{
+  "name": "agentvc",
+  "displayName": "agentvc",
+  "description": "Review agent attempts in the editor: attempt tree, native diff compare, and pick a winner.",
+  "version": "0.1.0",
+  "publisher": "agentvc",
+  "private": true,
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ykirpichev/agentvc"
+  },
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "SCM Providers",
+    "Other"
+  ],
+  "icon": "media/icon.png",
+  "activationEvents": [
+    "workspaceContains:.agentvc",
+    "onStartupFinished"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "agentvc",
+          "title": "agentvc",
+          "icon": "media/agentvc.svg"
+        }
+      ]
+    },
+    "views": {
+      "agentvc": [
+        {
+          "id": "agentvc.attempts",
+          "name": "Attempts",
+          "icon": "media/agentvc.svg",
+          "contextualTitle": "agentvc"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "agentvc.attempts",
+        "contents": "Connecting to agentvcd\u2026",
+        "when": "agentvc.state == connecting"
+      },
+      {
+        "view": "agentvc.attempts",
+        "contents": "agentvcd is not running for this workspace.\n[Start agentvcd](command:agentvc.startDaemon)\n[Retry](command:agentvc.refresh)\nOr set `agentvc.daemonUrl` to a running daemon. Read-only actions fall back to the `agentvc` CLI.",
+        "when": "agentvc.state == offline"
+      },
+      {
+        "view": "agentvc.attempts",
+        "contents": "No agentvc space in this workspace.\nRun `agentvc init` in your repository, then [Refresh](command:agentvc.refresh).",
+        "when": "agentvc.state == nospace"
+      },
+      {
+        "view": "agentvc.attempts",
+        "contents": "No attempts yet. Fork one, or start an agent with `agentvc run`.",
+        "when": "agentvc.state == connected || agentvc.state == cli"
+      }
+    ],
+    "commands": [
+      {
+        "command": "agentvc.refresh",
+        "title": "Refresh",
+        "category": "agentvc",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "agentvc.startDaemon",
+        "title": "Start agentvcd",
+        "category": "agentvc",
+        "icon": "$(play)"
+      },
+      {
+        "command": "agentvc.compareAttempts",
+        "title": "Compare Two Attempts\u2026",
+        "category": "agentvc",
+        "icon": "$(diff-multiple)"
+      },
+      {
+        "command": "agentvc.compareWithParent",
+        "title": "Show Changes",
+        "category": "agentvc",
+        "icon": "$(diff)"
+      },
+      {
+        "command": "agentvc.selectForCompare",
+        "title": "Select for Compare",
+        "category": "agentvc"
+      },
+      {
+        "command": "agentvc.compareWithSelected",
+        "title": "Compare with Selected",
+        "category": "agentvc"
+      },
+      {
+        "command": "agentvc.openSnapshotChanges",
+        "title": "Open Snapshot Changes",
+        "category": "agentvc",
+        "icon": "$(diff)"
+      },
+      {
+        "command": "agentvc.openFileDiff",
+        "title": "Open Changed File\u2026",
+        "category": "agentvc",
+        "icon": "$(go-to-file)"
+      },
+      {
+        "command": "agentvc.openView",
+        "title": "Open View in New Window",
+        "category": "agentvc",
+        "icon": "$(empty-window)"
+      },
+      {
+        "command": "agentvc.addViewToWorkspace",
+        "title": "Add View to Workspace",
+        "category": "agentvc",
+        "icon": "$(root-folder)"
+      },
+      {
+        "command": "agentvc.fork",
+        "title": "Fork Attempt",
+        "category": "agentvc",
+        "icon": "$(repo-forked)"
+      },
+      {
+        "command": "agentvc.markPassed",
+        "title": "Mark Passed",
+        "category": "agentvc",
+        "icon": "$(pass)"
+      },
+      {
+        "command": "agentvc.markFailed",
+        "title": "Mark Failed",
+        "category": "agentvc",
+        "icon": "$(error)"
+      },
+      {
+        "command": "agentvc.markExploring",
+        "title": "Mark Exploring",
+        "category": "agentvc"
+      },
+      {
+        "command": "agentvc.promote",
+        "title": "Promote (Pick Winner)",
+        "category": "agentvc",
+        "icon": "$(star-full)"
+      },
+      {
+        "command": "agentvc.abandon",
+        "title": "Abandon\u2026",
+        "category": "agentvc",
+        "icon": "$(circle-slash)"
+      },
+      {
+        "command": "agentvc.stopRun",
+        "title": "Stop Run",
+        "category": "agentvc",
+        "icon": "$(debug-stop)"
+      },
+      {
+        "command": "agentvc.openPr",
+        "title": "Open Pull Request",
+        "category": "agentvc",
+        "icon": "$(git-pull-request-create)"
+      },
+      {
+        "command": "agentvc.openInWebUi",
+        "title": "Open in Review UI",
+        "category": "agentvc",
+        "icon": "$(link-external)"
+      },
+      {
+        "command": "agentvc.copyRef",
+        "title": "Copy Ref",
+        "category": "agentvc"
+      },
+      {
+        "command": "agentvc.revealCurrent",
+        "title": "Reveal Current Attempt",
+        "category": "agentvc"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "agentvc.compareAttempts",
+          "when": "view == agentvc.attempts",
+          "group": "navigation@1"
+        },
+        {
+          "command": "agentvc.openInWebUi",
+          "when": "view == agentvc.attempts",
+          "group": "navigation@2"
+        },
+        {
+          "command": "agentvc.refresh",
+          "when": "view == agentvc.attempts",
+          "group": "navigation@3"
+        },
+        {
+          "command": "agentvc.startDaemon",
+          "when": "view == agentvc.attempts && agentvc.state != connected",
+          "group": "navigation@4"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "agentvc.compareAttempts",
+          "when": "view == agentvc.attempts && viewItem =~ /^task/",
+          "group": "inline@1"
+        },
+        {
+          "command": "agentvc.compareAttempts",
+          "when": "view == agentvc.attempts && viewItem =~ /^task/",
+          "group": "1_compare@1"
+        },
+        {
+          "command": "agentvc.openInWebUi",
+          "when": "view == agentvc.attempts && viewItem =~ /^task/",
+          "group": "4_web@1"
+        },
+        {
+          "command": "agentvc.promote",
+          "when": "view == agentvc.attempts && viewItem =~ /^attempt:open/",
+          "group": "inline@1"
+        },
+        {
+          "command": "agentvc.compareWithParent",
+          "when": "view == agentvc.attempts && viewItem =~ /^attempt/",
+          "group": "inline@2"
+        },
+        {
+          "command": "agentvc.stopRun",
+          "when": "view == agentvc.attempts && viewItem =~ /:running/",
+          "group": "inline@0"
+        },
+        {
+          "command": "agentvc.compareWithParent",
+          "when": "view == agentvc.attempts && viewItem =~ /^attempt/",
+          "group": "1_compare@1"
+        },
+        {
+          "command": "agentvc.selectForCompare",
+          "when": "view == agentvc.attempts && viewItem =~ /^attempt/",
+          "group": "1_compare@2"
+        },
+        {
+          "command": "agentvc.compareWithSelected",
+          "when": "view == agentvc.attempts && viewItem =~ /^attempt/ && agentvc.hasCompareSelection",
+          "group": "1_compare@3"
+        },
+        {
+          "command": "agentvc.openFileDiff",
+          "when": "view == agentvc.attempts && viewItem =~ /^attempt/",
+          "group": "1_compare@4"
+        },
+        {
+          "command": "agentvc.openView",
+          "when": "view == agentvc.attempts && viewItem =~ /^attempt/",
+          "group": "2_view@1"
+        },
+        {
+          "command": "agentvc.addViewToWorkspace",
+          "when": "view == agentvc.attempts && viewItem =~ /^attempt/",
+          "group": "2_view@2"
+        },
+        {
+          "command": "agentvc.fork",
+          "when": "view == agentvc.attempts && viewItem =~ /^attempt/",
+          "group": "2_view@3"
+        },
+        {
+          "command": "agentvc.markPassed",
+          "when": "view == agentvc.attempts && viewItem =~ /^attempt:open/",
+          "group": "3_status@1"
+        },
+        {
+          "command": "agentvc.markFailed",
+          "when": "view == agentvc.attempts && viewItem =~ /^attempt:open/",
+          "group": "3_status@2"
+        },
+        {
+          "command": "agentvc.markExploring",
+          "when": "view == agentvc.attempts && viewItem =~ /^attempt:open/",
+          "group": "3_status@3"
+        },
+        {
+          "command": "agentvc.promote",
+          "when": "view == agentvc.attempts && viewItem =~ /^attempt:open/",
+          "group": "3_status@4"
+        },
+        {
+          "command": "agentvc.abandon",
+          "when": "view == agentvc.attempts && viewItem =~ /^attempt:open/",
+          "group": "3_status@5"
+        },
+        {
+          "command": "agentvc.stopRun",
+          "when": "view == agentvc.attempts && viewItem =~ /:running/",
+          "group": "3_status@6"
+        },
+        {
+          "command": "agentvc.openPr",
+          "when": "view == agentvc.attempts && viewItem =~ /^attempt/",
+          "group": "4_web@1"
+        },
+        {
+          "command": "agentvc.openInWebUi",
+          "when": "view == agentvc.attempts && viewItem =~ /^attempt/",
+          "group": "4_web@2"
+        },
+        {
+          "command": "agentvc.copyRef",
+          "when": "view == agentvc.attempts && viewItem =~ /^(attempt|snapshot|task)/",
+          "group": "9_copy@1"
+        },
+        {
+          "command": "agentvc.openSnapshotChanges",
+          "when": "view == agentvc.attempts && viewItem == snapshot",
+          "group": "inline@1"
+        },
+        {
+          "command": "agentvc.selectForCompare",
+          "when": "view == agentvc.attempts && viewItem == snapshot",
+          "group": "1_compare@2"
+        },
+        {
+          "command": "agentvc.compareWithSelected",
+          "when": "view == agentvc.attempts && viewItem == snapshot && agentvc.hasCompareSelection",
+          "group": "1_compare@3"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "agentvc.selectForCompare",
+          "when": "false"
+        },
+        {
+          "command": "agentvc.compareWithSelected",
+          "when": "false"
+        },
+        {
+          "command": "agentvc.openSnapshotChanges",
+          "when": "false"
+        },
+        {
+          "command": "agentvc.copyRef",
+          "when": "false"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "agentvc",
+      "properties": {
+        "agentvc.daemonUrl": {
+          "type": "string",
+          "default": "http://127.0.0.1:7420",
+          "description": "URL of a running agentvcd. When nothing answers there, the extension can start its own (see agentvc.autoStartDaemon)."
+        },
+        "agentvc.autoStartDaemon": {
+          "type": "boolean",
+          "default": true,
+          "description": "Start agentvcd for this workspace on a free port when agentvc.daemonUrl does not answer."
+        },
+        "agentvc.cliPath": {
+          "type": "string",
+          "default": "agentvc",
+          "description": "Path to the agentvc CLI, used for fork, pull requests, and as a read-only fallback when no daemon is reachable."
+        },
+        "agentvc.daemonPath": {
+          "type": "string",
+          "default": "agentvcd",
+          "description": "Path to the agentvcd binary used by Start agentvcd."
+        },
+        "agentvc.forkActor": {
+          "type": "string",
+          "default": "human",
+          "description": "Actor recorded on attempts forked from the editor."
+        },
+        "agentvc.confirmPromote": {
+          "type": "boolean",
+          "default": true,
+          "description": "Ask before promoting, since promoting abandons the task's other open attempts."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "node esbuild.mjs",
+    "watch": "node esbuild.mjs --watch",
+    "typecheck": "tsc -p . --noEmit && tsc -p test --noEmit",
+    "compile-tests": "tsc -p test",
+    "test:unit": "npm run compile-tests && mocha 'out/integrations/vscode/test/unit/**/*.test.js'",
+    "test": "npm run build && npm run compile-tests && node out/integrations/vscode/test/runTest.js",
+    "package": "npm run build && vsce package --no-dependencies --skip-license -o agentvc.vsix"
+  },
+  "devDependencies": {
+    "@types/mocha": "^10.0.10",
+    "@types/node": "^20.17.0",
+    "@types/vscode": "~1.90.0",
+    "@types/ws": "^8.5.13",
+    "@vscode/test-electron": "^2.5.2",
+    "@vscode/vsce": "^3.2.2",
+    "esbuild": "^0.25.0",
+    "mocha": "^11.1.0",
+    "typescript": "^5.7.3",
+    "ws": "^8.18.0"
+  }
+}
