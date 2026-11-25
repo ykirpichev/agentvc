@@ -119,7 +119,8 @@ directory, so pass the space):
 }
 ```
 
-Cursor (`.cursor/mcp.json` in the repo):
+Cursor: run `agentvc integrate cursor` in the space (see below), or add
+`.cursor/mcp.json` by hand:
 
 ```json
 {
@@ -134,6 +135,33 @@ Cursor (`.cursor/mcp.json` in the repo):
 
 Try it by hand with the MCP inspector:
 `npx @modelcontextprotocol/inspector agentvc mcp`.
+
+## Cursor
+
+```sh
+agentvc integrate cursor           # in a space; --json for scripts
+agentvc integrate cursor --remove  # revert every file it wrote
+```
+
+This writes three files under `.cursor/`, merging into any that exist:
+
+- `mcp.json`: the `agentvc` MCP server, so Cursor's agent can list, fork,
+  snapshot and mark attempts.
+- `hooks.json`: Cursor hooks. `afterFileEdit` runs `agentvc hook
+  cursor-after-file-edit`, which snapshots the attempt whose view holds the
+  edited file. `stop` records the end of each agent turn. Snapshots show up in
+  the review UI within a second.
+- `rules/agentvc.mdc`: an always-on rule describing the attempt workflow,
+  including that background and parallel agents each fork their own attempt and
+  work only in its view.
+
+`--remove` takes out only agentvc's entries, keeps your own MCP servers, hooks
+and rules, and deletes files and directories that are then empty. The command
+is written as a bare `agentvc` when that is the binary on `PATH`, so the files
+can be committed. Otherwise it is written as an absolute path.
+
+To review attempts inside Cursor, install the VS Code extension
+([integrations/vscode](integrations/vscode)): Cursor runs VS Code extensions.
 
 ## Build
 

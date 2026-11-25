@@ -232,6 +232,9 @@ export class CliBackend implements Backend {
       head: out.snapshots.at(-1) ?? null,
       snapshot_count: out.snapshots.length,
       children: all.filter((a) => a.parent_attempt === id).map((a) => a.id),
+      // Rebase info is served by the daemon only.
+      git_base: null,
+      base_commit: null,
     }
   }
 
