@@ -64,7 +64,21 @@ fn fixture() -> tempfile::TempDir {
 }
 
 fn app(dir: &Path) -> axum::Router {
-    agentvcd::router(AppState::start(&Config::new(dir)).unwrap())
+    let mut config = Config::new(dir);
+    config.actor = agentvcd::human_actor(Some("Ana"));
+    agentvcd::router(AppState::start(&config).unwrap())
+}
+
+/// Actors of the attempt status operations, oldest first.
+fn status_actors(dir: &Path) -> Vec<String> {
+    let db = rusqlite::Connection::open(dir.join(".agentvc/meta.db")).unwrap();
+    let mut q = db
+        .prepare("SELECT actor FROM operations WHERE kind LIKE 'attempt.%' AND kind != 'attempt.fork' ORDER BY id")
+        .unwrap();
+    q.query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
 }
 
 async fn send(
@@ -248,6 +262,12 @@ async fn actions_change_status() {
     assert_eq!(s, StatusCode::OK);
     assert_eq!(v["attempt"]["status"], "promoted");
     assert_eq!(v["closed_siblings"], json!([3]));
+
+    // The fixture's CLI-style changes are plain `human`; the three UI
+    // actions above carry the reviewer's name.
+    let actors = status_actors(tmp.path());
+    assert_eq!(&actors[actors.len() - 3..], ["human:ana"; 3]);
+    assert!(actors[..actors.len() - 3].iter().all(|a| a == "human"));
 
     // Closed attempts cannot change again.
     let (s, v) = send(&app, "POST", "/api/attempts/a2/promote", None).await;
