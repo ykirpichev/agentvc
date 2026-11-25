@@ -41,8 +41,8 @@ To try two approaches, fork twice from the same parent, not one from the other.
 
 - At milestones, call `snapshot` with meta, for example `{"tests": "pass"}` or
   `{"note": "parser rewritten, benchmarks pending"}`.
-- When you know how an attempt went, `mark` it `passed` or `failed` with a
-  short reason. Marking does not close it.
+- When you know how an attempt went, `mark` it `passed` or `failed`. Marking
+  does not close it. Put the reason in a snapshot note.
 - Leave `promote`, `abandon` and `pr` to the human unless they ask you.
 
 ## Show the human

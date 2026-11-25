@@ -12,6 +12,7 @@ Status: early. Milestone M1 (core model and views) is in progress.
 - CLI: [crates/agentvc-cli](crates/agentvc-cli)
 - MCP server: [crates/agentvc-mcp](crates/agentvc-mcp)
 - Claude Code plugin: [integrations/claude-code](integrations/claude-code)
+- Agent skills (SKILL.md, any agent): [skills](skills)
 - Review UI: [ui](ui)
 - VS Code / Cursor extension: [integrations/vscode](integrations/vscode)
 
