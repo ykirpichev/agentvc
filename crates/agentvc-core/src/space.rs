@@ -547,8 +547,26 @@ impl Space {
         let mut losers = Vec::new();
         if status == Status::Promoted {
             if let Some(task) = attempt.task_id {
+                // Attempts the winner was forked from are part of the winning
+                // path, not losers: they are promoted along with it.
+                let mut ancestors = std::collections::HashSet::new();
+                let mut cur = attempt.parent_attempt;
+                while let Some(p) = cur {
+                    if !ancestors.insert(p) {
+                        break;
+                    }
+                    cur = self.attempt(p)?.parent_attempt;
+                }
                 for sib in self.attempts(Some(task))? {
-                    if sib.id != id && sib.status.is_open() {
+                    if sib.id == id || !sib.status.is_open() {
+                        continue;
+                    }
+                    if ancestors.contains(&sib.id) {
+                        self.db.execute(
+                            "UPDATE attempts SET status = 'promoted', reason = ?1 WHERE id = ?2",
+                            params![format!("continued in a{id}"), sib.id],
+                        )?;
+                    } else {
                         self.db.execute(
                             "UPDATE attempts SET status = 'abandoned', reason = ?1 WHERE id = ?2",
                             params![format!("lost to a{id}"), sib.id],
@@ -833,6 +851,37 @@ mod tests {
             space.set_status(b, Status::Passed, None),
             Err(Error::AttemptClosed { .. })
         ));
+    }
+
+    #[test]
+    fn promote_keeps_ancestors_on_the_winning_path() {
+        let (_tmp, space) = repo();
+        let task = space.create_task("t", None).unwrap();
+        let fork = |from| {
+            space
+                .fork(&ForkRequest {
+                    task_id: Some(task.id),
+                    from,
+                    actor: "agent".into(),
+                    ..Default::default()
+                })
+                .unwrap()
+                .attempt
+                .id
+        };
+        let parent = fork(None);
+        let sibling = fork(None);
+        let child = fork(Some(Ref::Attempt(parent)));
+        space.set_status(child, Status::Promoted, None).unwrap();
+        let p = space.attempt(parent).unwrap();
+        assert_eq!(p.status, Status::Promoted);
+        assert_eq!(
+            p.reason.as_deref(),
+            Some(&*format!("continued in a{child}"))
+        );
+        let s = space.attempt(sibling).unwrap();
+        assert_eq!(s.status, Status::Abandoned);
+        assert_eq!(s.reason.as_deref(), Some(&*format!("lost to a{child}")));
     }
 
     #[test]

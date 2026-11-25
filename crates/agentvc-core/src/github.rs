@@ -195,6 +195,21 @@ pub fn pr_body(space: &Space, winner: &Attempt, export: &ExportResult) -> Result
     Ok(body)
 }
 
+/// Root certificates from `SSL_CERT_FILE`, when set: corporate proxies and
+/// sandboxes re-sign TLS with their own CA, which the built-in Mozilla roots
+/// don't trust. As with curl and OpenSSL, the file replaces the defaults.
+fn roots_from_env() -> Option<ureq::tls::RootCerts> {
+    let path = std::env::var_os("SSL_CERT_FILE")?;
+    let pem = std::fs::read(path).ok()?;
+    let certs: Vec<_> = ureq::tls::parse_pem(&pem)
+        .filter_map(|item| match item {
+            Ok(ureq::tls::PemItem::Certificate(c)) => Some(c),
+            _ => None,
+        })
+        .collect();
+    (!certs.is_empty()).then(|| ureq::tls::RootCerts::new_with_certs(&certs))
+}
+
 struct Api {
     base: String,
     token: String,
@@ -203,11 +218,13 @@ struct Api {
 
 impl Api {
     fn new(token: String) -> Api {
-        let agent: ureq::Agent = ureq::Agent::config_builder()
+        let mut config = ureq::Agent::config_builder()
             .http_status_as_error(false)
-            .timeout_global(Some(Duration::from_secs(60)))
-            .build()
-            .into();
+            .timeout_global(Some(Duration::from_secs(60)));
+        if let Some(roots) = roots_from_env() {
+            config = config.tls_config(ureq::tls::TlsConfig::builder().root_certs(roots).build());
+        }
+        let agent: ureq::Agent = config.build().into();
         Api {
             base: std::env::var(API_ENV)
                 .ok()
