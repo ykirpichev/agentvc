@@ -1,0 +1,625 @@
+//! The tool table: one MCP tool per CLI command.
+//!
+//! Each tool has a JSON schema for its arguments and turns those arguments
+//! into the argv of the matching `agentvc` command. Options are always passed
+//! as `--name=value` and positionals after `--`, so a value that starts with
+//! `-` can never be read as a flag.
+
+use serde_json::{json, Map, Value};
+
+/// Arguments did not match the tool's schema.
+#[derive(Debug, PartialEq)]
+pub struct BadArgs(pub String);
+
+/// One MCP tool.
+pub struct Tool {
+    pub name: &'static str,
+    pub title: &'static str,
+    pub description: &'static str,
+    /// Tool only reads state (MCP `readOnlyHint`).
+    pub read_only: bool,
+    /// Tool may close or rewrite something a human cares about
+    /// (MCP `destructiveHint`).
+    pub destructive: bool,
+    /// Tool reaches outside the machine (MCP `openWorldHint`).
+    pub open_world: bool,
+    /// Properties of the input schema, as (name, schema, required).
+    pub params: fn() -> Vec<(&'static str, Value, bool)>,
+    /// Build the argv after `agentvc --json -C <dir>`.
+    pub argv: fn(&Args) -> Result<Vec<String>, BadArgs>,
+}
+
+impl Tool {
+    /// The entry for `tools/list`.
+    pub fn describe(&self) -> Value {
+        let mut props = Map::new();
+        let mut required = vec![];
+        for (name, schema, req) in (self.params)() {
+            props.insert(name.into(), schema);
+            if req {
+                required.push(name);
+            }
+        }
+        json!({
+            "name": self.name,
+            "title": self.title,
+            "description": self.description,
+            "inputSchema": {
+                "type": "object",
+                "properties": props,
+                "required": required,
+                "additionalProperties": false,
+            },
+            "annotations": {
+                "title": self.title,
+                "readOnlyHint": self.read_only,
+                "destructiveHint": self.destructive,
+                "idempotentHint": self.read_only,
+                "openWorldHint": self.open_world,
+            },
+        })
+    }
+
+    /// Check `args` against the schema and build the argv.
+    pub fn build(&self, args: &Value) -> Result<Vec<String>, BadArgs> {
+        let obj = match args {
+            Value::Null => Map::new(),
+            Value::Object(m) => m.clone(),
+            _ => return Err(BadArgs("arguments must be an object".into())),
+        };
+        let params = (self.params)();
+        for key in obj.keys() {
+            if !params.iter().any(|(n, _, _)| n == key) {
+                return Err(BadArgs(format!("unknown argument {key:?}")));
+            }
+        }
+        for (name, _, req) in &params {
+            if *req && obj.get(*name).is_none_or(Value::is_null) {
+                return Err(BadArgs(format!("missing required argument {name:?}")));
+            }
+        }
+        (self.argv)(&Args(obj))
+    }
+}
+
+/// Tool arguments with typed accessors.
+pub struct Args(Map<String, Value>);
+
+impl Args {
+    fn get(&self, key: &str) -> Option<&Value> {
+        self.0.get(key).filter(|v| !v.is_null())
+    }
+
+    /// A string argument. Numbers are accepted too, so `3` works for `a3`.
+    fn str(&self, key: &str) -> Result<Option<String>, BadArgs> {
+        match self.get(key) {
+            None => Ok(None),
+            Some(Value::String(s)) => Ok(Some(s.clone())),
+            Some(Value::Number(n)) => Ok(Some(n.to_string())),
+            Some(_) => Err(BadArgs(format!("{key} must be a string"))),
+        }
+    }
+
+    fn req(&self, key: &str) -> Result<String, BadArgs> {
+        self.str(key)?
+            .ok_or_else(|| BadArgs(format!("missing required argument {key:?}")))
+    }
+
+    fn bool(&self, key: &str) -> Result<Option<bool>, BadArgs> {
+        match self.get(key) {
+            None => Ok(None),
+            Some(Value::Bool(b)) => Ok(Some(*b)),
+            Some(_) => Err(BadArgs(format!("{key} must be a boolean"))),
+        }
+    }
+
+    fn strings(&self, key: &str) -> Result<Vec<String>, BadArgs> {
+        match self.get(key) {
+            None => Ok(vec![]),
+            Some(Value::Array(items)) => items
+                .iter()
+                .map(|v| match v {
+                    Value::String(s) => Ok(s.clone()),
+                    _ => Err(BadArgs(format!("{key} must be an array of strings"))),
+                })
+                .collect(),
+            Some(_) => Err(BadArgs(format!("{key} must be an array of strings"))),
+        }
+    }
+}
+
+/// Collects argv: options first, then `--` and positionals.
+#[derive(Default)]
+struct Argv {
+    cmd: Vec<String>,
+    opts: Vec<String>,
+    pos: Vec<String>,
+}
+
+impl Argv {
+    fn new(cmd: &[&str]) -> Self {
+        Argv {
+            cmd: cmd.iter().map(|s| s.to_string()).collect(),
+            ..Default::default()
+        }
+    }
+
+    fn opt(&mut self, name: &str, value: Option<String>) -> &mut Self {
+        if let Some(v) = value {
+            self.opts.push(format!("--{name}={v}"));
+        }
+        self
+    }
+
+    fn flag(&mut self, name: &str, on: Option<bool>) -> &mut Self {
+        if on == Some(true) {
+            self.opts.push(format!("--{name}"));
+        }
+        self
+    }
+
+    fn pos(&mut self, value: Option<String>) -> &mut Self {
+        self.pos.extend(value);
+        self
+    }
+
+    fn done(&mut self) -> Vec<String> {
+        let mut out = std::mem::take(&mut self.cmd);
+        out.append(&mut self.opts);
+        if !self.pos.is_empty() {
+            out.push("--".into());
+            out.append(&mut self.pos);
+        }
+        out
+    }
+}
+
+fn s(description: &str) -> Value {
+    json!({ "type": "string", "description": description })
+}
+
+fn b(description: &str) -> Value {
+    json!({ "type": "boolean", "description": description })
+}
+
+const ATTEMPT: &str = "Attempt id, for example \"a3\".";
+const TASK: &str = "Task id, for example \"t1\".";
+const FROM: &str = "What to fork from: \"aN\" (latest state of an attempt) or \"sN\" (a snapshot). Defaults to the attempt of the server's directory.";
+const ACTOR: &str =
+    "Who works in the attempt, for example \"agent:claude-code\". Defaults to \"agent\".";
+
+/// Default actor for attempts started through MCP. The CLI defaults `fork`
+/// to `human`; a caller of this server is an agent.
+const DEFAULT_ACTOR: &str = "agent";
+
+fn fork_params() -> Vec<(&'static str, Value, bool)> {
+    vec![
+        ("task", s(TASK), false),
+        ("from", s(FROM), false),
+        ("actor", s(ACTOR), false),
+        (
+            "model",
+            s("Model the agent runs on, for example \"opus\"."),
+            false,
+        ),
+        (
+            "prompt",
+            s("The prompt or instructions this attempt works from."),
+            false,
+        ),
+        (
+            "backend",
+            json!({
+                "type": "string",
+                "enum": ["auto", "reflink", "overlay", "copy"],
+                "description": "How the view is made. Defaults to auto. An overlay view in an unprivileged user namespace is visible only to agentvc processes (and what `run` starts); use copy or reflink for a view you edit directly.",
+            }),
+            false,
+        ),
+    ]
+}
+
+fn fork_opts(argv: &mut Argv, a: &Args) -> Result<(), BadArgs> {
+    argv.opt("task", a.str("task")?)
+        .opt("from", a.str("from")?)
+        .opt(
+            "actor",
+            Some(a.str("actor")?.unwrap_or_else(|| DEFAULT_ACTOR.into())),
+        )
+        .opt("model", a.str("model")?)
+        .opt("prompt", a.str("prompt")?)
+        .opt("backend", a.str("backend")?);
+    Ok(())
+}
+
+/// Every tool, in the order `tools/list` returns them.
+pub static TOOLS: &[Tool] = &[
+    Tool {
+        name: "task_new",
+        title: "New task",
+        description: "Open a task: the goal that one or more attempts work on. Returns {task}.",
+        read_only: false,
+        destructive: false,
+        open_world: false,
+        params: || {
+            vec![
+                ("goal", s("What the task should achieve."), true),
+                ("criteria", s("Acceptance criteria."), false),
+            ]
+        },
+        argv: |a| {
+            Ok(Argv::new(&["task", "new"])
+                .opt("criteria", a.str("criteria")?)
+                .pos(Some(a.req("goal")?))
+                .done())
+        },
+    },
+    Tool {
+        name: "task_list",
+        title: "List tasks",
+        description: "List all tasks. Returns {tasks}.",
+        read_only: true,
+        destructive: false,
+        open_world: false,
+        params: Vec::new,
+        argv: |_| Ok(Argv::new(&["task", "list"]).done()),
+    },
+    Tool {
+        name: "fork",
+        title: "Fork attempt",
+        description: "Start a new attempt in its own copy-on-write view, forked from an attempt or snapshot. Fork before trying a risky or alternative approach; work only inside the returned fork.attempt.view_path. Returns {fork}.",
+        read_only: false,
+        destructive: false,
+        open_world: false,
+        params: fork_params,
+        argv: |a| {
+            let mut argv = Argv::new(&["fork"]);
+            fork_opts(&mut argv, a)?;
+            Ok(argv.done())
+        },
+    },
+    Tool {
+        name: "snapshot",
+        title: "Snapshot attempt",
+        description: "Record the current state of an attempt's view. Attach results such as tests or cost as meta. Returns {snapshot, unchanged}.",
+        read_only: false,
+        destructive: false,
+        open_world: false,
+        params: || {
+            vec![
+                ("attempt", s("Attempt id, for example \"a3\". Defaults to the attempt of the server's directory."), false),
+                ("trigger", s("What caused the snapshot. Defaults to \"mcp\"."), false),
+                (
+                    "meta",
+                    json!({
+                        "type": "object",
+                        "description": "Metadata to attach, for example {\"tests\": \"pass\"}.",
+                        "additionalProperties": { "type": "string" },
+                    }),
+                    false,
+                ),
+            ]
+        },
+        argv: |a| {
+            let mut argv = Argv::new(&["snapshot"]);
+            argv.opt("trigger", Some(a.str("trigger")?.unwrap_or_else(|| "mcp".into())));
+            match a.get("meta") {
+                None => {}
+                Some(Value::Object(m)) => {
+                    for (k, v) in m {
+                        let v = match v {
+                            Value::String(s) => s.clone(),
+                            Value::Number(_) | Value::Bool(_) => v.to_string(),
+                            _ => return Err(BadArgs(format!("meta.{k} must be a string"))),
+                        };
+                        if k.is_empty() || k.contains('=') {
+                            return Err(BadArgs(format!("bad meta key {k:?}")));
+                        }
+                        argv.opt("meta", Some(format!("{k}={v}")));
+                    }
+                }
+                Some(_) => return Err(BadArgs("meta must be an object".into())),
+            }
+            Ok(argv.pos(a.str("attempt")?).done())
+        },
+    },
+    Tool {
+        name: "mark",
+        title: "Mark attempt",
+        description: "Mark an attempt passed, failed or exploring. It stays open. Returns {attempt}.",
+        read_only: false,
+        destructive: false,
+        open_world: false,
+        params: || {
+            vec![
+                ("attempt", s(ATTEMPT), true),
+                (
+                    "status",
+                    json!({ "type": "string", "enum": ["passed", "failed", "exploring"] }),
+                    true,
+                ),
+            ]
+        },
+        argv: |a| {
+            let status = a.req("status")?;
+            if !["passed", "failed", "exploring"].contains(&status.as_str()) {
+                return Err(BadArgs(format!(
+                    "status must be passed, failed or exploring, got {status:?}"
+                )));
+            }
+            Ok(Argv::new(&["mark"])
+                .pos(Some(a.req("attempt")?))
+                .pos(Some(status))
+                .done())
+        },
+    },
+    Tool {
+        name: "abandon",
+        title: "Abandon attempt",
+        description: "Close an attempt, keeping it and the reason in history. Returns {attempt}.",
+        read_only: false,
+        destructive: true,
+        open_world: false,
+        params: || {
+            vec![
+                ("attempt", s(ATTEMPT), true),
+                ("reason", s("Why the attempt is abandoned."), true),
+            ]
+        },
+        argv: |a| {
+            Ok(Argv::new(&["abandon"])
+                .opt("reason", Some(a.req("reason")?))
+                .pos(Some(a.req("attempt")?))
+                .done())
+        },
+    },
+    Tool {
+        name: "promote",
+        title: "Promote attempt",
+        description: "Pick an attempt as the task's winner; its open siblings are abandoned as lost. Usually a human's call. Returns {attempt, closed_siblings}.",
+        read_only: false,
+        destructive: true,
+        open_world: false,
+        params: || vec![("attempt", s(ATTEMPT), true)],
+        argv: |a| Ok(Argv::new(&["promote"]).pos(Some(a.req("attempt")?)).done()),
+    },
+    Tool {
+        name: "log",
+        title: "Attempt log",
+        description: "List attempts (the attempt tree via parent_attempt), optionally for one task. Returns {attempts}.",
+        read_only: true,
+        destructive: false,
+        open_world: false,
+        params: || vec![("task", s(TASK), false)],
+        argv: |a| Ok(Argv::new(&["log"]).opt("task", a.str("task")?).done()),
+    },
+    Tool {
+        name: "show",
+        title: "Show attempt",
+        description: "Show one attempt and its snapshots. Returns {attempt, snapshots}.",
+        read_only: true,
+        destructive: false,
+        open_world: false,
+        params: || vec![("attempt", s(ATTEMPT), true)],
+        argv: |a| Ok(Argv::new(&["show"]).pos(Some(a.req("attempt")?)).done()),
+    },
+    Tool {
+        name: "diff",
+        title: "Diff",
+        description: "List files that differ between two refs (aN or sN). With only `a`, diffs attempt a against the snapshot it was forked from. Returns {from, to, changes}.",
+        read_only: true,
+        destructive: false,
+        open_world: false,
+        params: || {
+            vec![
+                ("a", s("First ref: aN or sN."), true),
+                ("b", s("Second ref: aN or sN."), false),
+            ]
+        },
+        argv: |a| {
+            Ok(Argv::new(&["diff"])
+                .pos(Some(a.req("a")?))
+                .pos(a.str("b")?)
+                .done())
+        },
+    },
+    Tool {
+        name: "path",
+        title: "Attempt path",
+        description: "The view directory of an attempt. Returns {attempt, path}.",
+        read_only: true,
+        destructive: false,
+        open_world: false,
+        params: || vec![("attempt", s(ATTEMPT), true)],
+        argv: |a| Ok(Argv::new(&["path"]).pos(Some(a.req("attempt")?)).done()),
+    },
+    Tool {
+        name: "run",
+        title: "Run in new attempt",
+        description: "Fork a new attempt and run a command (usually an agent) inside its view. The view is snapshotted when it exits; `check` decides passed or failed. Runs in the background by default (detach=true) and returns {attempt, run, pid}; follow it with `ps`. With detach=false it waits and returns {attempt, run, snapshot}.",
+        read_only: false,
+        destructive: false,
+        open_world: true,
+        params: || {
+            let mut p = fork_params();
+            p.push((
+                "command",
+                json!({
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "minItems": 1,
+                    "description": "Program and arguments, for example [\"claude\", \"-p\", \"fix the parser\"].",
+                }),
+                true,
+            ));
+            p.push(("check", s("Shell command run in the view afterwards to judge the attempt, for example \"cargo test\"."), false));
+            p.push(("detach", b("Return at once and run in the background. Defaults to true."), false));
+            p
+        },
+        argv: |a| {
+            let command = a.strings("command")?;
+            if command.is_empty() {
+                return Err(BadArgs("command must not be empty".into()));
+            }
+            let mut argv = Argv::new(&["run"]);
+            fork_opts(&mut argv, a)?;
+            argv.opt("check", a.str("check")?)
+                .flag("detach", Some(a.bool("detach")?.unwrap_or(true)));
+            // `run` takes the command after `--`, so it goes in as positionals.
+            for c in command {
+                argv.pos(Some(c));
+            }
+            Ok(argv.done())
+        },
+    },
+    Tool {
+        name: "ps",
+        title: "List runs",
+        description: "List runs that have not finished, or all runs. Returns {runs}.",
+        read_only: true,
+        destructive: false,
+        open_world: false,
+        params: || vec![("all", b("Include finished runs."), false)],
+        argv: |a| Ok(Argv::new(&["ps"]).flag("all", a.bool("all")?).done()),
+    },
+    Tool {
+        name: "pr",
+        title: "Open pull request",
+        description: "Export an attempt as a commit, push its branch and open (or update) a GitHub pull request that lists the rejected attempts. Returns {pr}.",
+        read_only: false,
+        destructive: false,
+        open_world: true,
+        params: || {
+            vec![
+                ("attempt", s(ATTEMPT), true),
+                ("base", s("Branch the PR merges into. Defaults to the repository's default branch."), false),
+                ("branch", s("Branch to push. Defaults to agentvc/aN."), false),
+                ("draft", b("Open as a draft."), false),
+                ("title", s("PR title and commit subject. Defaults to the task goal."), false),
+                ("remote", s("Git remote to push to. Defaults to \"origin\"."), false),
+                ("repo", s("GitHub repository as owner/name. Defaults to the remote's."), false),
+                ("force", b("Move the branch even if another attempt exported to it."), false),
+            ]
+        },
+        argv: |a| {
+            Ok(Argv::new(&["pr"])
+                .opt("base", a.str("base")?)
+                .opt("branch", a.str("branch")?)
+                .flag("draft", a.bool("draft")?)
+                .opt("title", a.str("title")?)
+                .opt("remote", a.str("remote")?)
+                .opt("repo", a.str("repo")?)
+                .flag("force", a.bool("force")?)
+                .pos(Some(a.req("attempt")?))
+                .done())
+        },
+    },
+];
+
+/// Look up a tool by name.
+pub fn find(name: &str) -> Option<&'static Tool> {
+    TOOLS.iter().find(|t| t.name == name)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn argv(tool: &str, args: Value) -> Result<Vec<String>, BadArgs> {
+        find(tool).unwrap().build(&args)
+    }
+
+    #[test]
+    fn values_never_become_flags() {
+        assert_eq!(
+            argv("task_new", json!({ "goal": "--help", "criteria": "-x" })).unwrap(),
+            ["task", "new", "--criteria=-x", "--", "--help"]
+        );
+        assert_eq!(
+            argv("abandon", json!({ "attempt": "a3", "reason": "--force" })).unwrap(),
+            ["abandon", "--reason=--force", "--", "a3"]
+        );
+    }
+
+    #[test]
+    fn fork_defaults_to_agent_actor() {
+        assert_eq!(
+            argv("fork", json!({ "task": "t1", "from": 1 })).unwrap(),
+            ["fork", "--task=t1", "--from=1", "--actor=agent"]
+        );
+        assert_eq!(
+            argv("fork", json!({ "backend": "copy" })).unwrap(),
+            ["fork", "--actor=agent", "--backend=copy"]
+        );
+    }
+
+    #[test]
+    fn snapshot_meta_and_default_trigger() {
+        assert_eq!(
+            argv(
+                "snapshot",
+                json!({ "attempt": "a2", "meta": { "tests": "pass", "cost": 0.5 } })
+            )
+            .unwrap(),
+            [
+                "snapshot",
+                "--trigger=mcp",
+                "--meta=cost=0.5",
+                "--meta=tests=pass",
+                "--",
+                "a2"
+            ]
+        );
+        assert_eq!(
+            argv("snapshot", json!({})).unwrap(),
+            ["snapshot", "--trigger=mcp"]
+        );
+    }
+
+    #[test]
+    fn run_detaches_by_default() {
+        assert_eq!(
+            argv(
+                "run",
+                json!({ "task": "t1", "command": ["sh", "-c", "true"], "check": "true" })
+            )
+            .unwrap(),
+            [
+                "run",
+                "--task=t1",
+                "--actor=agent",
+                "--check=true",
+                "--detach",
+                "--",
+                "sh",
+                "-c",
+                "true"
+            ]
+        );
+        let attached = argv("run", json!({ "command": ["true"], "detach": false })).unwrap();
+        assert!(!attached.contains(&"--detach".to_string()));
+    }
+
+    #[test]
+    fn rejects_bad_arguments() {
+        assert!(argv("show", json!({})).is_err());
+        assert!(argv("show", json!({ "attempt": "a1", "extra": 1 })).is_err());
+        assert!(argv("mark", json!({ "attempt": "a1", "status": "won" })).is_err());
+        assert!(argv("run", json!({ "command": [] })).is_err());
+        assert!(argv("ps", json!({ "all": "yes" })).is_err());
+        assert!(argv("log", json!([1])).is_err());
+    }
+
+    #[test]
+    fn every_tool_has_an_object_schema() {
+        for t in TOOLS {
+            let d = t.describe();
+            assert_eq!(d["inputSchema"]["type"], "object", "{}", t.name);
+            for r in d["inputSchema"]["required"].as_array().unwrap() {
+                assert!(d["inputSchema"]["properties"]
+                    .get(r.as_str().unwrap())
+                    .is_some());
+            }
+        }
+    }
+}
