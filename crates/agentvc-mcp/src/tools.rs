@@ -483,6 +483,32 @@ pub static TOOLS: &[Tool] = &[
         argv: |a| Ok(Argv::new(&["ps"]).flag("all", a.bool("all")?).done()),
     },
     Tool {
+        name: "rebase",
+        title: "Rebase attempt",
+        description: "Move an attempt onto a newer commit of the host repo (default: the remote's default branch, fetched), so `pr` carries only its own changes. Three-way merges the attempt with the new commit, writes the result into its view and records a `rebase` snapshot. On conflicts nothing changes and the error has code `conflict` with `paths`; with keep_conflicts=true the files get conflict markers in the view and the attempt becomes exploring: fix them, then `snapshot`. Returns {rebase}.",
+        read_only: false,
+        destructive: false,
+        open_world: true,
+        params: || {
+            vec![
+                ("attempt", s(ATTEMPT), true),
+                ("onto", s("Git revision to rebase onto, for example \"origin/main\". Defaults to the remote's default branch."), false),
+                ("remote", s("Remote whose default branch is the default target. Defaults to \"origin\"."), false),
+                ("no_fetch", b("Use the remote-tracking branch as it is, without fetching."), false),
+                ("keep_conflicts", b("On conflicts, write conflict markers into the view instead of failing."), false),
+            ]
+        },
+        argv: |a| {
+            Ok(Argv::new(&["rebase"])
+                .opt("onto", a.str("onto")?)
+                .opt("remote", a.str("remote")?)
+                .flag("no-fetch", a.bool("no_fetch")?)
+                .flag("keep-conflicts", a.bool("keep_conflicts")?)
+                .pos(Some(a.req("attempt")?))
+                .done())
+        },
+    },
+    Tool {
         name: "pr",
         title: "Open pull request",
         description: "Export an attempt as a commit, push its branch and open (or update) a GitHub pull request that lists the rejected attempts. Returns {pr}.",

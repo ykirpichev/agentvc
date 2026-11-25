@@ -103,6 +103,14 @@ CREATE TABLE IF NOT EXISTS overlays (
     top_layer INTEGER NOT NULL REFERENCES layers(id),
     mounter TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS git_bases (
+    id INTEGER PRIMARY KEY,
+    attempt_id INTEGER NOT NULL REFERENCES attempts(id),
+    snapshot_id INTEGER NOT NULL REFERENCES snapshots(id),
+    commit_id TEXT NOT NULL,
+    tree TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+);
 CREATE INDEX IF NOT EXISTS attempts_task ON attempts(task_id);
 CREATE INDEX IF NOT EXISTS snapshots_attempt ON snapshots(attempt_id);
 "#;

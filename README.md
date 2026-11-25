@@ -33,6 +33,7 @@ agentvc run --detach --task t1 -- <agent cmd> # same, in the background; see `ag
 agentvc hooks                                 # Claude Code hooks: snapshot after every edit, inside any view
 agentvc promote a2                            # pick the winner; a3 becomes abandoned (lost to a2)
 agentvc log --task t1                         # the attempt tree
+agentvc rebase a2                             # main moved? merge a2 onto origin/main first
 agentvc export a2 --branch parser-2x          # a2 as a commit on a branch; worktree untouched
 agentvc pr a2 --draft                         # push agentvc/a2 and open a PR listing rejected attempts
 ```
@@ -63,7 +64,8 @@ stable `error.code`. Benchmark forks against `git worktree` with
 
 `agentvc mcp` serves the agentvc commands to coding agents over the Model
 Context Protocol (stdio). Tools: `task_new`, `task_list`, `fork`, `snapshot`,
-`mark`, `abandon`, `promote`, `log`, `show`, `diff`, `path`, `run`, `ps`, `pr`.
+`mark`, `abandon`, `promote`, `log`, `show`, `diff`, `path`, `run`, `ps`, `pr`,
+`rebase`.
 Each one runs the matching command with `--json` and returns the same JSON,
 with `isError` set and the stable `error.code` (for example `no_space`) on
 failure. Resources: `agentvc://tree` (attempts of the current task) and

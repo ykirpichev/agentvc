@@ -113,6 +113,28 @@ enum Cmd {
         #[arg(long)]
         force: bool,
     },
+    /// Rebase an attempt onto a newer commit of the host repo, so `export`
+    /// and `pr` carry only its own changes. Three-way merges the attempt's
+    /// tree with the new commit, writes the result into its view and records
+    /// it as a snapshot. On conflicts nothing changes and the error (code
+    /// `conflict`) lists the paths.
+    Rebase {
+        attempt: String,
+        /// Git revision to rebase onto. Defaults to the remote's default
+        /// branch, fetched first.
+        #[arg(long)]
+        onto: Option<String>,
+        /// Remote whose default branch is the default target.
+        #[arg(long, default_value = "origin")]
+        remote: String,
+        /// Use the remote-tracking branch as it is, without fetching.
+        #[arg(long)]
+        no_fetch: bool,
+        /// On conflicts, write files with conflict markers into the view and
+        /// mark the attempt exploring; fix them, then `snapshot`.
+        #[arg(long)]
+        keep_conflicts: bool,
+    },
     /// Export an attempt, push its branch and open (or update) a GitHub PR.
     Pr {
         attempt: String,
@@ -247,20 +269,40 @@ fn main() -> ExitCode {
             }
         }
         Err(e) => {
-            let (code, message) = match e.downcast_ref::<Error>() {
-                Some(ce) => (ce.code(), ce.to_string()),
-                None => ("error", format!("{e:#}")),
+            let (code, message, details) = match e.downcast_ref::<Error>() {
+                Some(ce) => (ce.code(), ce.to_string(), ce.details()),
+                None => ("error", format!("{e:#}"), None),
             };
             if as_json {
-                println!(
-                    "{}",
-                    json!({ "ok": false, "error": { "code": code, "message": message } })
-                );
+                let mut err = json!({ "code": code, "message": message });
+                if let (Value::Object(m), Some(Value::Object(d))) = (&mut err, details) {
+                    m.extend(d);
+                }
+                println!("{}", json!({ "ok": false, "error": err }));
             } else {
                 eprintln!("error[{code}]: {message}");
             }
             ExitCode::FAILURE
         }
+    }
+}
+
+fn diff_out(from: String, to: Ref, changes: &[agentvc_core::snapshot::FileChange]) -> Out {
+    let mut text = String::new();
+    for c in changes {
+        let mark = match c.kind {
+            ChangeKind::Added => 'A',
+            ChangeKind::Modified => 'M',
+            ChangeKind::Removed => 'D',
+        };
+        text += &format!("{mark}  {}\n", c.path);
+    }
+    if changes.is_empty() {
+        text = "no differences".into();
+    }
+    Out {
+        text,
+        json: json!({ "from": from, "to": to.to_string(), "changes": changes }),
     }
 }
 
@@ -527,6 +569,12 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
                     let Ref::Attempt(id) = ra else {
                         anyhow::bail!("diff with one argument needs an attempt (aN)");
                     };
+                    // A rebased attempt is compared with the commit it was
+                    // rebased onto, so main's newer changes are not listed.
+                    if let Some(base) = space.own_git_base(id)? {
+                        let changes = space.own_changes(id)?;
+                        return Ok(diff_out(format!("git:{}", base.commit), ra, &changes));
+                    }
                     let parent = space
                         .attempt(id)?
                         .parent_snapshot
@@ -535,22 +583,7 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
                 }
             };
             let changes = space.diff(from, to)?;
-            let mut text = String::new();
-            for c in &changes {
-                let mark = match c.kind {
-                    ChangeKind::Added => 'A',
-                    ChangeKind::Modified => 'M',
-                    ChangeKind::Removed => 'D',
-                };
-                text += &format!("{mark}  {}\n", c.path);
-            }
-            if changes.is_empty() {
-                text = "no differences".into();
-            }
-            Out {
-                text,
-                json: json!({ "from": from.to_string(), "to": to.to_string(), "changes": changes }),
-            }
+            diff_out(from.to_string(), to, &changes)
         }
         Cmd::Run {
             task,
@@ -710,6 +743,58 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
                         .unwrap_or_else(|| ", root commit".into())
                 ),
                 json: json!({ "export": r }),
+            }
+        }
+        Cmd::Rebase {
+            attempt,
+            onto,
+            remote,
+            no_fetch,
+            keep_conflicts,
+        } => {
+            let opts = agentvc_core::RebaseOptions {
+                onto,
+                remote: Some(remote),
+                no_fetch,
+                keep_conflicts,
+                actor: None,
+            };
+            let r = agentvc_core::rebase::rebase(&space, attempt_id(&attempt)?, &opts)?;
+            let short = |c: &str| c[..12.min(c.len())].to_string();
+            let text = if !r.rebased {
+                format!(
+                    "a{} is already based on {} ({})",
+                    r.attempt,
+                    r.onto_ref,
+                    short(&r.onto)
+                )
+            } else {
+                let mut t = format!(
+                    "a{} rebased onto {} ({}): {} files changed, snapshot s{}",
+                    r.attempt,
+                    r.onto_ref,
+                    short(&r.onto),
+                    r.changes.len(),
+                    r.snapshot.as_ref().map(|s| s.id).unwrap_or_default()
+                );
+                if !r.view_updated {
+                    t += "\n(the view is gone, so only history was updated)";
+                }
+                if !r.conflicts.is_empty() {
+                    t += &format!(
+                        "\n{} files have conflict markers; fix them, then `agentvc snapshot a{}`:",
+                        r.conflicts.len(),
+                        r.attempt
+                    );
+                    for p in &r.conflicts {
+                        t += &format!("\n  C  {p}");
+                    }
+                }
+                t
+            };
+            Out {
+                text,
+                json: json!({ "rebase": r }),
             }
         }
         Cmd::Pr {

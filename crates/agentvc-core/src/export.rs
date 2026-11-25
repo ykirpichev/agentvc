@@ -149,7 +149,7 @@ impl HostRepo {
         .filter(|s| !s.is_empty())
     }
 
-    fn objects_dir(&self) -> Result<PathBuf> {
+    pub(crate) fn objects_dir(&self) -> Result<PathBuf> {
         let p = self.git(
             &[
                 "rev-parse",
@@ -171,7 +171,7 @@ pub(crate) fn host_head(workdir: &Path) -> Option<String> {
 
 /// Copy the objects reachable from `tree` into a git object directory.
 /// Returns how many objects were copied.
-fn copy_tree_objects(space: &Space, tree: &Oid, dest: &Path) -> Result<usize> {
+pub(crate) fn copy_tree_objects(space: &Space, tree: &Oid, dest: &Path) -> Result<usize> {
     let src_root = space.objects().root();
     let copy = |oid: &Oid| -> Result<bool> {
         let hex = oid.to_hex();
@@ -273,21 +273,27 @@ pub fn export(space: &Space, attempt_id: i64, opts: &ExportOptions) -> Result<Ex
         return Err(Error::BranchCheckedOut(opts.branch.clone()));
     }
 
-    let parent = match &opts.base {
+    let base = match &opts.base {
         Some(b) => Some(repo.rev(b).ok_or_else(|| Error::NotFound {
             kind: "git revision",
             id: b.clone(),
         })?),
-        None => space
-            .meta(IMPORT_BASE_KEY)?
-            .and_then(|h| repo.rev(&h))
-            .or_else(|| repo.rev("HEAD")),
+        None => None,
     };
 
     let snapshot = if attempt.status.is_open() && space.ensure_view(&attempt)? {
         space.snapshot(attempt_id, "export", None)?.snapshot
     } else {
         space.head_snapshot(attempt_id)?
+    };
+    // By default, parent on the commit this state is based on: the one it was
+    // last rebased onto, else the host HEAD recorded at init.
+    let parent = match base {
+        Some(b) => Some(b),
+        None => space
+            .git_base_commit(&snapshot)?
+            .and_then(|h| repo.rev(&h))
+            .or_else(|| repo.rev("HEAD")),
     };
     let tree = Oid::from_hex(&snapshot.tree)?;
     let objects_copied = copy_tree_objects(space, &tree, &repo.objects_dir()?)?;
