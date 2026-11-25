@@ -34,6 +34,7 @@ agentvc run --detach --task t1 -- <agent cmd> # same, in the background; see `ag
 agentvc hooks                                 # Claude Code hooks: snapshot after every edit, inside any view
 agentvc promote a2                            # pick the winner; a3 becomes abandoned (lost to a2)
 agentvc log --task t1                         # the attempt tree
+agentvc rebase a2                             # main moved? merge a2 onto origin/main first
 agentvc export a2 --branch parser-2x          # a2 as a commit on a branch; worktree untouched
 agentvc pr a2 --draft                         # push agentvc/a2 and open a PR listing rejected attempts
 ```
@@ -51,9 +52,10 @@ stable `error.code`. Benchmark forks against `git worktree` with
 
 - `reflink` (btrfs, XFS, APFS): every file is cloned, which costs metadata only.
 - `overlay` (Linux without reflinks, e.g. ext4): the view is an overlayfs
-  mount over frozen layers of the parent. The first fork from a parent copies
-  it once into a base layer; later forks write only what changed since, so
-  they take tens of milliseconds. Mounted with `mount(2)` as root,
+  mount over frozen layers of the parent. A parent is copied once into a base
+  layer (`agentvc init` starts that in the background, `agentvc prepare aN`
+  does it on demand); after that, forks write only what changed, so they take
+  tens of milliseconds. Mounted with `mount(2)` as root,
   `fuse-overlayfs` if installed, or else inside an unprivileged user
   namespace, where only agentvc processes (and what `agentvc run` starts) see
   the view. Views are remounted on demand after a reboot (`agentvc path aN`).
@@ -64,7 +66,8 @@ stable `error.code`. Benchmark forks against `git worktree` with
 
 `agentvc mcp` serves the agentvc commands to coding agents over the Model
 Context Protocol (stdio). Tools: `task_new`, `task_list`, `fork`, `snapshot`,
-`mark`, `abandon`, `promote`, `log`, `show`, `diff`, `path`, `run`, `ps`, `pr`.
+`mark`, `abandon`, `promote`, `log`, `show`, `diff`, `path`, `run`, `ps`, `pr`,
+`rebase`.
 Each one runs the matching command with `--json` and returns the same JSON,
 with `isError` set and the stable `error.code` (for example `no_space`) on
 failure. Resources: `agentvc://tree` (attempts of the current task) and

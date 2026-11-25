@@ -117,6 +117,17 @@ impl ObjectStore {
         Ok(oid)
     }
 
+    /// Store an object whose body is already in git's format, such as a
+    /// tree read from a git repository.
+    pub fn write_raw(&self, kind: &str, data: &[u8]) -> Result<Oid> {
+        self.write_object(kind, data)
+    }
+
+    /// True when the object is in the store.
+    pub fn contains(&self, oid: &Oid) -> bool {
+        self.path_for(oid).exists()
+    }
+
     pub fn write_blob(&self, data: &[u8]) -> Result<Oid> {
         self.write_object("blob", data)
     }
@@ -169,33 +180,38 @@ impl ObjectStore {
         if kind != "tree" {
             return Err(Error::BadObject(oid.to_hex()));
         }
-        let bad = || Error::BadObject(oid.to_hex());
-        let mut entries = Vec::new();
-        let mut rest = &data[..];
-        while !rest.is_empty() {
-            let sp = rest.iter().position(|&b| b == b' ').ok_or_else(bad)?;
-            let nul = rest.iter().position(|&b| b == 0).ok_or_else(bad)?;
-            let mode = std::str::from_utf8(&rest[..sp]).map_err(|_| bad())?;
-            let name = std::str::from_utf8(&rest[sp + 1..nul]).map_err(|_| bad())?;
-            let id: [u8; 20] = rest
-                .get(nul + 1..nul + 21)
-                .ok_or_else(bad)?
-                .try_into()
-                .map_err(|_| bad())?;
-            entries.push(TreeEntry {
-                name: name.to_string(),
-                mode: Mode::parse(mode).ok_or_else(bad)?,
-                oid: Oid(id),
-            });
-            rest = &rest[nul + 21..];
-        }
-        Ok(entries)
+        parse_tree(oid, &data)
     }
 
     /// The root directory of the store.
     pub fn root(&self) -> &Path {
         &self.root
     }
+}
+
+/// Parse the body of tree object `oid`.
+pub fn parse_tree(oid: &Oid, data: &[u8]) -> Result<Vec<TreeEntry>> {
+    let bad = || Error::BadObject(oid.to_hex());
+    let mut entries = Vec::new();
+    let mut rest = data;
+    while !rest.is_empty() {
+        let sp = rest.iter().position(|&b| b == b' ').ok_or_else(bad)?;
+        let nul = rest.iter().position(|&b| b == 0).ok_or_else(bad)?;
+        let mode = std::str::from_utf8(&rest[..sp]).map_err(|_| bad())?;
+        let name = std::str::from_utf8(&rest[sp + 1..nul]).map_err(|_| bad())?;
+        let id: [u8; 20] = rest
+            .get(nul + 1..nul + 21)
+            .ok_or_else(bad)?
+            .try_into()
+            .map_err(|_| bad())?;
+        entries.push(TreeEntry {
+            name: name.to_string(),
+            mode: Mode::parse(mode).ok_or_else(bad)?,
+            oid: Oid(id),
+        });
+        rest = &rest[nul + 21..];
+    }
+    Ok(entries)
 }
 
 /// Git sorts tree entries by name, comparing directories as if they ended in '/'.

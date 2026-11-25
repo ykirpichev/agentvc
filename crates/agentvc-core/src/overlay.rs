@@ -882,6 +882,21 @@ pub struct OverlayInfo {
     pub freeze: LayerStats,
 }
 
+/// What [`Space::prepare`] did.
+#[derive(Clone, Debug, Serialize)]
+pub struct PrepareResult {
+    pub attempt: i64,
+    /// Why nothing was done, when nothing was.
+    pub skipped: Option<String>,
+    /// The attempt's latest layer.
+    pub layer: Option<i64>,
+    pub layers: usize,
+    /// True when the view had not changed since its last layer.
+    pub reused: bool,
+    pub freeze: LayerStats,
+    pub millis: u128,
+}
+
 impl Space {
     fn space_dir(&self) -> PathBuf {
         self.workdir().join(SPACE_DIR)
@@ -939,6 +954,22 @@ impl Space {
     /// a delta against its last layer afterwards, or that layer itself when
     /// nothing changed. Returns (layer, cost, reused).
     fn freeze(&self, parent: &Attempt) -> Result<(i64, LayerStats, bool)> {
+        // One freeze per parent at a time: a fork that races a `prepare`
+        // waits for it and then reuses its layer instead of copying again.
+        let _lock = self.freeze_lock(parent.id)?;
+        // Holding the lock, any unfinished layer of this parent is a leftover
+        // of a crashed or killed freeze.
+        let stale: Vec<i64> = self
+            .db
+            .prepare("SELECT id FROM layers WHERE source_attempt = ?1 AND complete = 0")?
+            .query_map(params![parent.id], |r| r.get(0))?
+            .collect::<std::result::Result<_, _>>()?;
+        for l in stale {
+            remove_tree(&self.layer_dir(l));
+            let _ = fs::remove_file(self.layer_manifest(l));
+            self.db
+                .execute("DELETE FROM layers WHERE id = ?1", params![l])?;
+        }
         let last_own: Option<i64> = self
             .db
             .query_row(
@@ -1003,6 +1034,84 @@ impl Space {
             params![stats.files as i64, stats.bytes as i64, id],
         )?;
         Ok((id, stats, false))
+    }
+
+    /// An exclusive `flock` on `.agentvc/layers/aN.lock`, released on drop.
+    fn freeze_lock(&self, attempt: i64) -> Result<fs::File> {
+        use std::os::fd::AsRawFd;
+        let dir = self.space_dir().join("layers");
+        fs::create_dir_all(&dir).at(&dir)?;
+        let path = dir.join(format!("a{attempt}.lock"));
+        let f = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&path)
+            .at(&path)?;
+        loop {
+            // SAFETY: the fd is open for the duration of the call.
+            if unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX) } == 0 {
+                return Ok(f);
+            }
+            let e = std::io::Error::last_os_error();
+            if e.kind() != std::io::ErrorKind::Interrupted {
+                return Err(e).at(&path);
+            }
+        }
+    }
+
+    /// The mounter a fork in this space would use for an overlay view, or
+    /// why it would not use overlayfs (reflinks work, or nothing can mount).
+    pub fn overlay_mounter(&self) -> std::result::Result<Mounter, String> {
+        let views = self.space_dir().join("views");
+        if crate::view::reflinks_supported(&views).is_ok() {
+            return Err("reflinks work here, so forks do not need overlay layers".into());
+        }
+        let scratch = self.space_dir().join("tmp");
+        fs::create_dir_all(&scratch).map_err(|e| format!("{}: {e}", scratch.display()))?;
+        probe(&scratch).map_err(|why| format!("overlayfs unavailable ({why})"))
+    }
+
+    /// Freeze an attempt's view into a layer now, off the fork path, so the
+    /// next fork from it only has to write what changed since. The first
+    /// prepare copies the whole view; later ones write deltas or nothing.
+    /// Skipped, with the reason, when forks here would not use overlayfs.
+    pub fn prepare(&self, attempt_id: i64) -> Result<PrepareResult> {
+        let start = std::time::Instant::now();
+        let attempt = self.attempt(attempt_id)?;
+        let skip = |reason: String| PrepareResult {
+            attempt: attempt_id,
+            skipped: Some(reason),
+            layer: None,
+            layers: 0,
+            reused: false,
+            freeze: LayerStats::default(),
+            millis: start.elapsed().as_millis(),
+        };
+        if !attempt.status.is_open() {
+            return Ok(skip(format!("attempt a{attempt_id} is {}", attempt.status)));
+        }
+        if let Err(why) = self.overlay_mounter() {
+            return Ok(skip(why));
+        }
+        if !self.ensure_view(&attempt)? {
+            return Ok(skip(format!("attempt a{attempt_id} has no view")));
+        }
+        let (layer, freeze, reused) = self.freeze(&attempt)?;
+        self.record(
+            "agentvc",
+            "attempt.prepare",
+            serde_json::json!({ "attempt": attempt_id, "layer": layer, "reused": reused }),
+        )?;
+        Ok(PrepareResult {
+            attempt: attempt_id,
+            skipped: None,
+            layer: Some(layer),
+            layers: self.layer_chain(layer)?.len(),
+            reused,
+            freeze,
+            millis: start.elapsed().as_millis(),
+        })
     }
 
     fn mount_spec(&self, attempt: &Attempt, top: i64) -> Result<MountSpec> {
@@ -1315,5 +1424,99 @@ mod tests {
             fs::read_to_string(v.join("main.rs")).unwrap(),
             "fn main() { a() }\n"
         );
+    }
+
+    /// A space with some backdated files, or None when this host cannot
+    /// mount overlays (the test then has nothing to check).
+    fn overlay_space() -> Option<(crate::testutil::TestDir, Space)> {
+        let tmp = crate::testutil::tempdir();
+        let w = tmp.path();
+        fs::create_dir_all(w.join("target/debug")).unwrap();
+        for i in 0..20 {
+            fs::write(w.join(format!("target/debug/f{i}")), format!("{i}")).unwrap();
+        }
+        fs::write(w.join("main.rs"), "fn main() {}\n").unwrap();
+        age(w);
+        let space = Space::init(w).unwrap();
+        match space.overlay_mounter() {
+            Ok(_) => Some((tmp, space)),
+            Err(why) => {
+                eprintln!("skipping: {why}");
+                assert!(space.prepare(ROOT_ATTEMPT).unwrap().skipped.is_some());
+                None
+            }
+        }
+    }
+
+    #[test]
+    fn prepare_makes_the_first_fork_thin() {
+        let Some((tmp, space)) = overlay_space() else {
+            return;
+        };
+        let _guard = Unmount(&space);
+        // A crashed freeze left an unfinished layer behind.
+        space
+            .db
+            .execute(
+                "INSERT INTO layers (source_attempt, created_at) VALUES (1, 0)",
+                [],
+            )
+            .unwrap();
+        let stale = space.db.last_insert_rowid();
+        fs::create_dir_all(space.layer_dir(stale).join("junk")).unwrap();
+
+        let p = space.prepare(ROOT_ATTEMPT).unwrap();
+        assert!(p.skipped.is_none(), "{p:?}");
+        assert_eq!((p.freeze.files, p.layers, p.reused), (21, 1, false));
+        // Removed (its id may be reused by the new layer).
+        assert!(!space.layer_dir(stale).join("junk").exists());
+
+        let f = fork(&space, ROOT_ATTEMPT, BackendChoice::Auto);
+        let o = f.overlay.unwrap();
+        assert!(o.reused && Some(o.layer) == p.layer, "{o:?}");
+        assert_eq!(o.freeze.files, 0);
+        assert_eq!(
+            fs::read_to_string(f.attempt.view_path.join("target/debug/f7")).unwrap(),
+            "7"
+        );
+
+        // Preparing again with no changes writes nothing.
+        let again = space.prepare(ROOT_ATTEMPT).unwrap();
+        assert!(again.reused && again.layer == p.layer);
+        drop(tmp);
+    }
+
+    #[test]
+    fn prepare_and_fork_at_once_copy_the_parent_once() {
+        let Some((tmp, space)) = overlay_space() else {
+            return;
+        };
+        let _guard = Unmount(&space);
+        let w = tmp.path().to_path_buf();
+        let barrier = std::sync::Barrier::new(2);
+        let (p, f) = std::thread::scope(|s| {
+            let p = s.spawn(|| {
+                let sp = Space::discover(&w).unwrap();
+                barrier.wait();
+                sp.prepare(ROOT_ATTEMPT).unwrap()
+            });
+            let f = s.spawn(|| {
+                let sp = Space::discover(&w).unwrap();
+                barrier.wait();
+                let r = fork(&sp, ROOT_ATTEMPT, BackendChoice::Overlay);
+                r.overlay.unwrap()
+            });
+            (p.join().unwrap(), f.join().unwrap())
+        });
+        // Whichever froze first copied the files; the other reused its layer.
+        assert_eq!(p.freeze.files + f.freeze.files, 21, "{p:?} {f:?}");
+        assert_eq!(Some(f.layer), p.layer);
+        let complete: i64 = space
+            .db
+            .query_row("SELECT count(*) FROM layers WHERE complete = 1", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(complete, 1);
     }
 }

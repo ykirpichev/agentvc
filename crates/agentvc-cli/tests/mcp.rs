@@ -124,6 +124,7 @@ fn lists_every_tool_with_a_schema() {
         "run",
         "ps",
         "pr",
+        "rebase",
     ] {
         assert!(names.contains(&want), "missing tool {want}");
     }
@@ -305,4 +306,54 @@ fn run_and_ps() {
     let ps = c.ok("ps", json!({ "all": true }));
     assert_eq!(ps, cli(w, &["ps", "--all"]));
     assert_eq!(ps["runs"].as_array().unwrap().len(), 1);
+}
+
+fn git(dir: &Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .env("GIT_AUTHOR_NAME", "t")
+        .env("GIT_AUTHOR_EMAIL", "t@t")
+        .env("GIT_COMMITTER_NAME", "t")
+        .env("GIT_COMMITTER_EMAIL", "t@t")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "git {args:?}: {out:?}");
+    String::from_utf8(out.stdout).unwrap().trim().to_string()
+}
+
+#[test]
+fn rebase_reports_conflicts_and_keeps_them_on_request() {
+    let tmp = tempfile::tempdir().unwrap();
+    let w = tmp.path();
+    git(w, &["init", "-q", "-b", "main"]);
+    fs::write(w.join("README.md"), "one\n").unwrap();
+    git(w, &["add", "-A"]);
+    git(w, &["commit", "-q", "-m", "base"]);
+    cli(w, &["init"]);
+    let mut c = Client::start(w);
+    let f = c.ok("fork", json!({ "backend": "copy" }));
+    let view = f["fork"]["attempt"]["view_path"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    fs::write(Path::new(&view).join("README.md"), "one from a2\n").unwrap();
+    fs::write(w.join("README.md"), "one from main\n").unwrap();
+    git(w, &["commit", "-q", "-am", "main moves on"]);
+    let main = git(w, &["rev-parse", "HEAD"]);
+
+    let (v, is_error) = c.tool("rebase", json!({ "attempt": "a2", "onto": "main" }));
+    assert!(is_error, "{v}");
+    assert_eq!(v["error"]["code"], "conflict");
+    assert_eq!(v["error"]["paths"], json!(["README.md"]));
+
+    let v = c.ok(
+        "rebase",
+        json!({ "attempt": "a2", "onto": "main", "keep_conflicts": true }),
+    );
+    assert_eq!(v["rebase"]["onto"], main);
+    assert_eq!(v["rebase"]["conflicts"], json!(["README.md"]));
+    let again = cli(w, &["show", "a2"]);
+    assert_eq!(again["attempt"]["status"], "exploring");
 }
