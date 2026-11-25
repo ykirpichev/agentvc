@@ -34,7 +34,8 @@ each in its own copy-on-write view. Workflow: `task_new` (or reuse a task from `
 `fork` an attempt before trying an approach and work only inside its view_path, `snapshot` with \
 meta such as {\"tests\": \"pass\"} at milestones, `mark` it passed or failed, and leave `promote`, \
 `abandon` and `pr` to the human unless asked. `run` forks and runs another agent in the background; \
-watch it with `ps`. Every result is the JSON of the matching `agentvc --json` command; on failure \
+watch it with `ps`. If main moved while an attempt was open, `rebase` it before `pr`; on error.code \
+conflict, fix the listed paths or retry with keep_conflicts. Every result is the JSON of the matching `agentvc --json` command; on failure \
 error.code is a stable code such as no_space, not_found or attempt_closed. Ids look like t1 \
 (task), a3 (attempt) and s7 (snapshot).";
 
@@ -418,7 +419,7 @@ mod tests {
             .collect();
         for want in [
             "task_new", "fork", "snapshot", "mark", "abandon", "promote", "log", "show", "diff",
-            "path", "run", "ps", "pr",
+            "path", "run", "ps", "pr", "rebase",
         ] {
             assert!(names.contains(&want), "missing {want}");
         }
