@@ -24,6 +24,12 @@ pub enum Error {
         #[source]
         source: std::io::Error,
     },
+    #[error("could not start {program:?}: {source}")]
+    Spawn {
+        program: String,
+        #[source]
+        source: std::io::Error,
+    },
     #[error("database error: {0}")]
     Db(#[from] rusqlite::Error),
     #[error("walk error: {0}")]
@@ -42,6 +48,7 @@ impl Error {
             Error::BadObject(_) => "bad_object",
             Error::NotInView(_) => "not_in_view",
             Error::Io { .. } => "io",
+            Error::Spawn { .. } => "spawn_failed",
             Error::Db(_) => "db",
             Error::Walk(_) => "walk",
         }

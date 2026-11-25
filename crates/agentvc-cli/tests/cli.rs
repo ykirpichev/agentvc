@@ -105,3 +105,84 @@ fn errors_have_stable_codes() {
     let v = agentvc(tmp.path(), &["init"]);
     assert_eq!(v["error"]["code"], "space_exists");
 }
+
+#[test]
+fn run_records_outcome_and_check() {
+    let tmp = tempfile::tempdir().unwrap();
+    let w = tmp.path();
+    fs::write(w.join("answer.txt"), "41\n").unwrap();
+    agentvc(w, &["init"]);
+    agentvc(w, &["task", "new", "fix the answer"]);
+
+    // A fake agent that edits a file; the check decides the outcome.
+    let v = agentvc(
+        w,
+        &[
+            "run",
+            "--task",
+            "t1",
+            "--actor",
+            "agent:fake",
+            "--check",
+            "grep -q 42 answer.txt",
+            "--",
+            "sh",
+            "-c",
+            "echo working; echo 42 > answer.txt",
+        ],
+    );
+    assert_eq!(v["ok"], true, "{v}");
+    assert_eq!(v["attempt"]["status"], "passed");
+    assert_eq!(v["run"]["exit_code"], 0);
+    assert_eq!(v["run"]["check_exit_code"], 0);
+    assert_eq!(v["snapshot"]["trigger"], "run-exit");
+    let log = fs::read_to_string(v["run"]["log_path"].as_str().unwrap()).unwrap();
+    assert!(log.contains("working"));
+
+    let v = agentvc(w, &["run", "--task", "t1", "--", "sh", "-c", "exit 2"]);
+    assert_eq!(v["attempt"]["status"], "failed");
+    assert_eq!(v["run"]["exit_code"], 2);
+
+    // The root working directory is untouched.
+    assert_eq!(fs::read_to_string(w.join("answer.txt")).unwrap(), "41\n");
+}
+
+#[test]
+fn detached_run_finishes_in_background() {
+    let tmp = tempfile::tempdir().unwrap();
+    let w = tmp.path();
+    fs::write(w.join("f"), "x\n").unwrap();
+    agentvc(w, &["init"]);
+    let v = agentvc(
+        w,
+        &[
+            "run",
+            "--detach",
+            "--",
+            "sh",
+            "-c",
+            "sleep 0.3; echo done > f",
+        ],
+    );
+    assert_eq!(v["ok"], true, "{v}");
+    let a = v["attempt"]["id"].as_i64().unwrap();
+    assert!(v["pid"].as_u64().is_some());
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        let ps = agentvc(w, &["ps"]);
+        if ps["runs"].as_array().unwrap().is_empty() {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "run never finished: {ps}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let all = agentvc(w, &["ps", "--all"]);
+    assert_eq!(all["runs"][0]["exit_code"], 0);
+    let show = agentvc(w, &["show", &format!("a{a}")]);
+    let snaps = show["snapshots"].as_array().unwrap();
+    assert_eq!(snaps.last().unwrap()["trigger"], "run-exit");
+}

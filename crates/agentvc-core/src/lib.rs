@@ -3,6 +3,7 @@
 
 pub mod error;
 pub mod objects;
+pub mod run;
 pub mod snapshot;
 pub mod space;
 pub mod view;

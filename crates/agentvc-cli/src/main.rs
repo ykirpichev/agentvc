@@ -6,7 +6,8 @@
 //! with status 1. Nothing ever prompts for input.
 
 use std::path::PathBuf;
-use std::process::ExitCode;
+use std::process::{ExitCode, Stdio};
+use std::sync::atomic::{AtomicI32, Ordering};
 
 use agentvc_core::snapshot::ChangeKind;
 use agentvc_core::{Attempt, Error, ForkRequest, Ref, Space, Status};
@@ -89,6 +90,42 @@ enum Cmd {
     Diff { a: String, b: Option<String> },
     /// Print the view directory of an attempt.
     Path { attempt: String },
+    /// Fork a new attempt and run a command (usually an agent) inside its view.
+    ///
+    /// The view is snapshotted when the command exits. With --check, the
+    /// attempt is marked passed or failed by the check's exit code; without
+    /// it, a non-zero exit marks it failed. In text mode `agentvc run` exits
+    /// with the command's exit code.
+    Run {
+        /// Task this attempt works on (tN or N).
+        #[arg(long)]
+        task: Option<String>,
+        /// What to fork from: aN or sN. Defaults to the attempt of the current directory.
+        #[arg(long)]
+        from: Option<String>,
+        #[arg(long, default_value = "agent")]
+        actor: String,
+        #[arg(long)]
+        model: Option<String>,
+        #[arg(long)]
+        prompt: Option<String>,
+        /// Shell command run in the view afterwards to judge the attempt.
+        #[arg(long)]
+        check: Option<String>,
+        /// Start in the background and return at once; see `agentvc ps`.
+        #[arg(long)]
+        detach: bool,
+        /// The command to run, after `--`.
+        #[arg(last = true, required = true)]
+        command: Vec<String>,
+    },
+    /// List runs that have not finished (or all with --all).
+    Ps {
+        #[arg(long)]
+        all: bool,
+    },
+    #[command(hide = true)]
+    RunWorker { run: i64 },
 }
 
 #[derive(Subcommand)]
@@ -104,6 +141,9 @@ enum TaskCmd {
 }
 
 /// Output of a command: JSON for `--json`, text otherwise.
+/// Exit code to use in text mode instead of 0 (set by `run`).
+static EXIT_OVERRIDE: AtomicI32 = AtomicI32::new(0);
+
 struct Out {
     json: Value,
     text: String,
@@ -123,7 +163,10 @@ fn main() -> ExitCode {
             } else if !out.text.is_empty() {
                 println!("{}", out.text.trim_end());
             }
-            ExitCode::SUCCESS
+            match EXIT_OVERRIDE.load(Ordering::Relaxed) {
+                c if c > 0 && !as_json => ExitCode::from(c.min(255) as u8),
+                _ => ExitCode::SUCCESS,
+            }
         }
         Err(e) => {
             let (code, message) = match e.downcast_ref::<Error>() {
@@ -377,6 +420,126 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
             Out {
                 text,
                 json: json!({ "from": from.to_string(), "to": to.to_string(), "changes": changes }),
+            }
+        }
+        Cmd::Run {
+            task,
+            from,
+            actor,
+            model,
+            prompt,
+            check,
+            detach,
+            command,
+        } => {
+            let from = match from {
+                Some(f) => parse_ref(&f)?,
+                None => Ref::Attempt(current()?),
+            };
+            let fork = space.fork(&ForkRequest {
+                task_id: task.map(|t| parse_id(&t, 't', "task")).transpose()?,
+                from: Some(from),
+                actor,
+                model,
+                prompt,
+            })?;
+            let a = fork.attempt.id;
+            // Child output would corrupt --json, and a detached run has no terminal.
+            let log_to_file = detach || cli.json;
+            let run = space.create_run(a, &command, check.as_deref(), log_to_file)?;
+            if detach {
+                let log = run.log_path.clone().expect("detached runs log to a file");
+                let f = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&log)?;
+                let mut worker = std::process::Command::new(std::env::current_exe()?);
+                worker
+                    .arg("-C")
+                    .arg(space.workdir())
+                    .arg("run-worker")
+                    .arg(run.id.to_string())
+                    .stdin(Stdio::null())
+                    .stdout(f.try_clone()?)
+                    .stderr(f);
+                #[cfg(unix)]
+                {
+                    use std::os::unix::process::CommandExt;
+                    // Own process group, so closing the terminal doesn't stop it.
+                    worker.process_group(0);
+                }
+                let child = worker.spawn()?;
+                Out {
+                    text: format!(
+                        "a{a} started in background (run r{}, pid {})\nview {}\nlog  {}",
+                        run.id,
+                        child.id(),
+                        fork.attempt.view_path.display(),
+                        log.display()
+                    ),
+                    json: json!({ "attempt": fork.attempt, "run": run, "pid": child.id() }),
+                }
+            } else {
+                let out = agentvc_core::run::execute(&space, run.id)?;
+                let code = out.run.exit_code.unwrap_or(1);
+                EXIT_OVERRIDE.store(code, Ordering::Relaxed);
+                Out {
+                    text: format!(
+                        "a{a} {}  exit {}{}  {} ms  snapshot s{}",
+                        out.attempt.status,
+                        code,
+                        out.run
+                            .check_exit_code
+                            .map(|c| format!(", check {c}"))
+                            .unwrap_or_default(),
+                        out.run.duration_ms.unwrap_or(0),
+                        out.snapshot.id
+                    ),
+                    json: json!({ "attempt": out.attempt, "run": out.run, "snapshot": out.snapshot }),
+                }
+            }
+        }
+        Cmd::RunWorker { run } => {
+            let out = agentvc_core::run::execute(&space, run)?;
+            Out {
+                text: format!(
+                    "[agentvc] r{run} finished: exit {}, a{} {}",
+                    out.run.exit_code.unwrap_or(-1),
+                    out.attempt.id,
+                    out.attempt.status
+                ),
+                json: json!({ "run": out.run }),
+            }
+        }
+        Cmd::Ps { all } => {
+            let runs = space.runs(!all)?;
+            let mut text = String::new();
+            for r in &runs {
+                let state = match (r.exit_code, r.alive) {
+                    (Some(c), _) => format!("exit {c}"),
+                    (None, Some(true)) => "running".to_string(),
+                    _ => "lost".to_string(),
+                };
+                text += &format!(
+                    "r{}  a{}  {:<8}  pid {}  {}\n",
+                    r.id,
+                    r.attempt_id,
+                    state,
+                    r.pid.map(|p| p.to_string()).unwrap_or("-".into()),
+                    r.command.join(" ")
+                );
+            }
+            if runs.is_empty() {
+                text = if all {
+                    "no runs"
+                } else {
+                    "no running attempts"
+                }
+                .into();
+            }
+            Out {
+                text,
+                json: json!({ "runs": runs }),
             }
         }
         Cmd::Path { attempt } => {
