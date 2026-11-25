@@ -120,6 +120,7 @@ fn lists_every_tool_with_a_schema() {
         "log",
         "show",
         "diff",
+        "status",
         "path",
         "run",
         "ps",
@@ -215,6 +216,14 @@ fn fork_snapshot_diff_promote_matches_cli() {
     // Read-only tools return exactly what the CLI prints.
     let d = c.ok("diff", json!({ "a": aid }));
     assert_eq!(d, cli(w, &["diff", &aid]));
+    let dp = c.ok("diff", json!({ "a": aid, "patch": true }));
+    assert_eq!(dp, cli(w, &["diff", "--patch", &aid]));
+    assert!(dp["changes"][0]["hunks"].is_array(), "{dp}");
+    let st = c.ok("status", json!({ "attempt": aid }));
+    assert_eq!(
+        st["status"]["attempt"]["id"],
+        cli(w, &["status", &aid])["status"]["attempt"]["id"]
+    );
     let paths: Vec<_> = d["changes"]
         .as_array()
         .unwrap()

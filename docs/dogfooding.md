@@ -82,18 +82,22 @@ thread goes idle. Use your thread's own push branch wherever `<branch>` appears.
    - your own edits: `agentvc fork --task tN --actor agent:claude-code` (or `--from aN` to
      continue a winner), then edit only under `$(agentvc path aN)`, run builds and tests
      there, and `agentvc snapshot aN --meta tests=pass` after each step that works.
-4. **Compare:** `agentvc diff aX aY` lists files; until #58 read the patches with
-   `git diff --no-index <file> .agentvc/views/aN/<file>`. Abandon losers with a reason:
+4. **Compare:** `agentvc diff aX aY --stat`, then `--patch` for the unified diff. Inside a
+   view, `agentvc diff --patch` shows unsnapshotted work and `agentvc status` says where you
+   are (and `behind` when main moved). Abandon losers with a reason:
    `agentvc abandon aN --reason "..."`.
-5. **Ship:** `agentvc promote aX`, `agentvc rebase aX` (always, it's a no-op when main
-   hasn't moved), then `agentvc pr aX --branch <branch>`. Run fmt, clippy and tests in the
-   view first. `GITHUB_TOKEN` is set in cloud sessions. If `<branch>` is the one checked out
-   in the main checkout (the usual case in a thread), run `git checkout --detach` once and
-   add `--force` to `pr`, until #59.
-6. **PR body:** keep agentvc's generated body; put any required attribution lines above it
-   (by hand until #59). Say which attempts ran and which won.
+5. **Ship:** once per thread, `agentvc config pr.branch <branch>` and add any required
+   commit trailers with `agentvc config pr.trailer "Key: value" --add`. Then
+   `agentvc promote aX`, `agentvc rebase aX` (always, it's a no-op when main hasn't moved),
+   `agentvc pr aX`. Run fmt, clippy and tests in the view first. `GITHUB_TOKEN` is set in
+   cloud sessions. Exporting to the branch checked out in the main checkout (the usual case
+   in a thread) moves that checkout along; no detach or `--force` needed.
+6. **PR body:** keep agentvc's generated body; put required attribution lines and your
+   summary in a file and pass `--body-prefix <file>` on the first `pr`. Text outside
+   agentvc's `<!-- agentvc:begin/end -->` markers is kept on every later update. Say which
+   attempts ran and which won.
 7. **Follow-up work in the same PR** (review fixes): `agentvc fork --from aX`, edit, snapshot,
-   promote the new attempt, `agentvc pr aY --branch <branch>` again. The PR body then shows
+   promote the new attempt, `agentvc pr aY` again. The PR body then shows
    the winning path aX -> aY.
 8. **If agentvc gets in the way**, don't silently fall back to git: file a `dogfood` issue,
    then say in the PR why it didn't go through agentvc.
@@ -113,7 +117,7 @@ thread goes idle. Use your thread's own push branch wherever `<branch>` appears.
 
 ## What we measure (#23)
 
-- fork time and disk per attempt (`agentvc fork --json` reports the fork stats; `run --json` will with #60);
+- fork time and disk per attempt (`agentvc fork --json` and `agentvc run --json` report the fork stats);
 - attempts per task, and how many win;
 - time from the first attempt to `promote`, and from `promote` to merged PR.
 
@@ -156,6 +160,8 @@ story. What hurt, filed as `dogfood` issues:
 - `diff` lists files but shows no patch, and views have no `.git` (#58);
 - `pr` from a thread needs a body prefix and a fixed branch (#59);
 - no `agentvc status`, and `run --json` lacks the fork stats this guide promised (#60);
+  #58 (except `.git` in views), #59 and #60 fixed in PR #65, itself shipped with `agentvc pr`
+  onto its checked-out thread branch;
 - `ps` showed a just-started run as `lost` and printed whole prompts. Fixed here.
 
 ## Cloud sessions: keeping history and hooks
