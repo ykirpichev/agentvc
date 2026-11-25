@@ -1,0 +1,14 @@
+{
+  "name": "agentvc",
+  "owner": { "name": "agentvc" },
+  "metadata": {
+    "description": "Claude Code plugins for agentvc, agent-first version control."
+  },
+  "plugins": [
+    {
+      "name": "agentvc",
+      "source": "./integrations/claude-code",
+      "description": "Snapshot every edit into an agentvc attempt, drive the attempt tree over MCP, and fork, compare and promote attempts with slash commands."
+    }
+  ]
+}
