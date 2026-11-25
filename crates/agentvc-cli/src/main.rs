@@ -35,7 +35,15 @@ struct Cli {
 #[derive(Subcommand)]
 enum Cmd {
     /// Create a space here and snapshot the working directory as attempt a1.
-    Init,
+    ///
+    /// Where forks will use overlayfs, this also starts `agentvc prepare a1`
+    /// in the background, so the first fork does not pay for copying the
+    /// working directory into a base layer.
+    Init {
+        /// Do not prepare a1 in the background.
+        #[arg(long)]
+        no_prepare: bool,
+    },
     /// Create and list tasks.
     #[command(subcommand)]
     Task(TaskCmd),
@@ -96,6 +104,13 @@ enum Cmd {
     /// Print the view directory of an attempt, mounting an overlay view first
     /// if it is not mounted (for example after a reboot).
     Path { attempt: String },
+    /// Freeze an attempt's view into an overlay layer now, so the next fork
+    /// from it is fast. The first prepare copies the view; later ones write
+    /// only what changed. Does nothing where forks do not use overlayfs.
+    Prepare {
+        /// Attempt (aN). Defaults to the attempt of the current directory.
+        attempt: Option<String>,
+    },
     /// Write an attempt's latest state as a commit on a branch of the host git
     /// repo, without touching the working tree, index or checked-out branch.
     Export {
@@ -277,17 +292,33 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
         Some(d) => d.clone(),
         None => std::env::current_dir()?,
     };
-    if let Cmd::Init = cli.cmd {
+    if let Cmd::Init { no_prepare } = cli.cmd {
         let space = Space::init(&cwd)?;
         let snap = space.head_snapshot(agentvc_core::space::ROOT_ATTEMPT)?;
+        let prepare = if no_prepare {
+            json!({ "skipped": "--no-prepare" })
+        } else {
+            prepare_in_background(&space)
+        };
+        let note = match prepare["pid"].as_u64() {
+            Some(pid) => {
+                format!("\nPreparing a1 for fast overlay forks in the background (pid {pid})")
+            }
+            None => String::new(),
+        };
         return Ok(Out {
             text: format!(
-                "Initialized agentvc space in {}\nRoot attempt a1 at snapshot s{} (tree {})",
+                "Initialized agentvc space in {}\nRoot attempt a1 at snapshot s{} (tree {}){note}",
                 space.workdir().display(),
                 snap.id,
                 &snap.tree[..12]
             ),
-            json: json!({ "workdir": space.workdir(), "attempt": 1, "snapshot": snap }),
+            json: json!({
+                "workdir": space.workdir(),
+                "attempt": 1,
+                "snapshot": snap,
+                "prepare": prepare,
+            }),
         });
     }
     match &cli.cmd {
@@ -299,7 +330,7 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
     let current = || -> anyhow::Result<i64> { Ok(space.attempt_for_path(&cwd)?.id) };
 
     Ok(match cli.cmd {
-        Cmd::Init | Cmd::Hook { .. } | Cmd::Hooks { .. } => unreachable!(),
+        Cmd::Init { .. } | Cmd::Hook { .. } | Cmd::Hooks { .. } => unreachable!(),
         Cmd::Task(TaskCmd::New { goal, criteria }) => {
             let t = space.create_task(&goal, criteria.as_deref())?;
             Out {
@@ -641,6 +672,13 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
                 json: json!({ "runs": runs }),
             }
         }
+        Cmd::Prepare { attempt } => {
+            let id = match attempt {
+                Some(a) => attempt_id(&a)?,
+                None => current()?,
+            };
+            prepare_cmd(&space, id)?
+        }
         Cmd::Path { attempt } => {
             let a = space.attempt(attempt_id(&attempt)?)?;
             // Mount an overlay view that is not mounted, e.g. after a reboot.
@@ -827,4 +865,72 @@ fn hooks_cmd(cwd: &std::path::Path, user: bool, uninstall: bool) -> anyhow::Resu
         ),
         json: json!({ "settings": path, "installed": !uninstall, "exe": exe }),
     })
+}
+
+#[cfg(target_os = "linux")]
+fn prepare_cmd(space: &Space, id: i64) -> anyhow::Result<Out> {
+    let r = space.prepare(id)?;
+    let text = match (&r.skipped, r.layer) {
+        (Some(why), _) => format!("a{id}: nothing to prepare ({why})"),
+        (None, Some(l)) if r.reused => {
+            format!("a{id} unchanged since layer L{l}, {} ms", r.millis)
+        }
+        (None, Some(l)) => format!(
+            "a{id} frozen into L{l} ({} layers): {} files, {} MB, {} ms",
+            r.layers,
+            r.freeze.files,
+            r.freeze.bytes / (1 << 20),
+            r.millis
+        ),
+        (None, None) => format!("a{id} prepared"),
+    };
+    Ok(Out {
+        text,
+        json: json!({ "prepare": r }),
+    })
+}
+
+#[cfg(not(target_os = "linux"))]
+fn prepare_cmd(_space: &Space, id: i64) -> anyhow::Result<Out> {
+    Ok(Out {
+        text: format!("a{id}: nothing to prepare (overlayfs needs Linux)"),
+        json: json!({ "prepare": { "attempt": id, "skipped": "overlayfs needs Linux" } }),
+    })
+}
+
+/// Start `agentvc prepare a1` detached, when forks here will use overlayfs.
+/// Returns what happened, for the init output.
+fn prepare_in_background(space: &Space) -> Value {
+    #[cfg(target_os = "linux")]
+    {
+        if let Err(why) = space.overlay_mounter() {
+            return json!({ "skipped": why });
+        }
+        let start = || -> std::io::Result<u32> {
+            let log = space
+                .workdir()
+                .join(agentvc_core::space::SPACE_DIR)
+                .join("prepare.log");
+            let f = std::fs::File::create(&log)?;
+            let mut cmd = std::process::Command::new(std::env::current_exe()?);
+            cmd.arg("-C")
+                .arg(space.workdir())
+                .args(["prepare", "a1"])
+                .stdin(Stdio::null())
+                .stdout(f.try_clone()?)
+                .stderr(f);
+            use std::os::unix::process::CommandExt;
+            cmd.process_group(0);
+            Ok(cmd.spawn()?.id())
+        };
+        match start() {
+            Ok(pid) => json!({ "pid": pid }),
+            Err(e) => json!({ "skipped": format!("could not start prepare: {e}") }),
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = space;
+        json!({ "skipped": "overlayfs needs Linux" })
+    }
 }
