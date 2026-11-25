@@ -1,0 +1,9 @@
+[package]
+name = "agentvc-core"
+description = "Store, attempt model and copy-on-write views for agentvc"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]

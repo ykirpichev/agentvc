@@ -1,0 +1,14 @@
+[package]
+name = "agentvc-cli"
+description = "Command-line interface for agentvc"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "agentvc"
+path = "src/main.rs"
+
+[dependencies]
+agentvc-core.workspace = true
