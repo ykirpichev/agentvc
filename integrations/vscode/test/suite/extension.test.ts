@@ -70,7 +70,7 @@ describe('agentvc extension', function () {
     assert.equal(await text(add[2]), 'brand new\n')
     // The diff editor opened (multi-file where available, else one diff).
     await until('a diff tab', () =>
-      vscode.window.tabGroups.all.some((g) => g.tabs.some((t) => t.input instanceof vscode.TabInputTextDiff || /↔|changes/.test(t.label))),
+      vscode.window.tabGroups.all.some((g) => g.tabs.some((t) => t.input instanceof vscode.TabInputTextDiff || t.label.includes("a2 vs s1"))),
     )
   })
 
