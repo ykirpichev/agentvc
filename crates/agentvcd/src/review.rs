@@ -24,6 +24,7 @@ pub(crate) fn routes() -> Router<AppState> {
         .route("/attempts/{id}/promote", post(promote))
         .route("/attempts/{id}/abandon", post(abandon))
         .route("/attempts/{id}/mark", post(mark))
+        .merge(crate::live::routes())
 }
 
 // ---- stats ----------------------------------------------------------------
@@ -76,7 +77,7 @@ fn as_i64(v: Option<&Value>) -> Option<i64> {
     }
 }
 
-fn attempt_stats(a: &Attempt, snaps: &[Snapshot]) -> AttemptStats {
+pub(crate) fn attempt_stats(a: &Attempt, snaps: &[Snapshot]) -> AttemptStats {
     let mut st = AttemptStats {
         attempt: a.id,
         snapshots: snaps.len(),
@@ -642,9 +643,10 @@ struct ActionResponse {
 
 async fn promote(State(st): State<AppState>, Path(id): Path<String>) -> ApiResult<ActionResponse> {
     let id = parse_attempt_id(&id)?;
+    let actor = st.actor().to_string();
     let out = st
         .with_space(move |s| {
-            let attempt = s.set_status(id, Status::Promoted, None)?;
+            let attempt = s.set_status_as(&actor, id, Status::Promoted, None)?;
             let lost = format!("lost to a{id}");
             let closed_siblings = match attempt.task_id {
                 Some(t) => s
@@ -677,6 +679,7 @@ async fn abandon(
 ) -> ApiResult<ActionResponse> {
     let body = json_body(body)?;
     let id = parse_attempt_id(&id)?;
+    let actor = st.actor().to_string();
     let reason = body.reason.trim().to_string();
     if reason.is_empty() {
         return Err(ApiError::new(
@@ -686,7 +689,7 @@ async fn abandon(
         ));
     }
     let attempt = st
-        .with_space(move |s| s.set_status(id, Status::Abandoned, Some(&reason)))
+        .with_space(move |s| s.set_status_as(&actor, id, Status::Abandoned, Some(&reason)))
         .await?;
     st.poke();
     Ok(Json(ActionResponse {
@@ -707,6 +710,7 @@ async fn mark(
 ) -> ApiResult<ActionResponse> {
     let body = json_body(body)?;
     let id = parse_attempt_id(&id)?;
+    let actor = st.actor().to_string();
     let status = match Status::parse(&body.status) {
         Some(s @ (Status::Passed | Status::Failed | Status::Exploring)) => s,
         _ => {
@@ -721,7 +725,7 @@ async fn mark(
         }
     };
     let attempt = st
-        .with_space(move |s| s.set_status(id, status, None))
+        .with_space(move |s| s.set_status_as(&actor, id, status, None))
         .await?;
     st.poke();
     Ok(Json(ActionResponse {

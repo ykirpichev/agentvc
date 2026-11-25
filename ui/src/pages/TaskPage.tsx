@@ -12,6 +12,7 @@ import { StatChips } from '../components/StatChips'
 import { useHotkeys } from '../keyboard/hotkeys'
 import { useListNavigation } from '../keyboard/useListNavigation'
 import { actorName, fullDate, money, timeAgo } from '../lib/format'
+import { triggerKind, triggerLabel } from '../lib/snapshot'
 import { visibleTree, type VisibleRow } from '../lib/tree'
 
 const MAX_COMPARE = 4
@@ -392,23 +393,4 @@ function Timeline({ attemptId, snapshots }: { attemptId: number; snapshots: Snap
       )}
     </ol>
   )
-}
-
-function triggerKind(t: string): string {
-  if (t.startsWith('tool:')) return 'tool'
-  if (t === 'run-exit') return 'run'
-  if (['passed', 'failed', 'promoted'].includes(t)) return t
-  return 'other'
-}
-
-function triggerLabel(s: Snapshot): string {
-  const t = s.trigger
-  if (t.startsWith('tool:')) return t.slice(5)
-  if (t === 'run-exit') {
-    const code = s.meta?.['check_exit_code'] ?? s.meta?.['exit_code']
-    return code === undefined || code === null ? 'Run finished' : `Run exited ${String(code)}`
-  }
-  if (t === 'fork') return 'Forked'
-  if (t === 'stop') return 'Agent turn ended'
-  return t.charAt(0).toUpperCase() + t.slice(1)
 }
