@@ -186,3 +186,78 @@ fn detached_run_finishes_in_background() {
     let snaps = show["snapshots"].as_array().unwrap();
     assert_eq!(snaps.last().unwrap()["trigger"], "run-exit");
 }
+
+#[test]
+fn hooks_install_and_snapshot_per_tool_call() {
+    use std::io::Write;
+    let tmp = tempfile::tempdir().unwrap();
+    let w = tmp.path();
+    fs::write(w.join("f"), "1\n").unwrap();
+    agentvc(w, &["init"]);
+    let v = agentvc(w, &["hooks"]);
+    let settings: Value =
+        serde_json::from_str(&fs::read_to_string(v["settings"].as_str().unwrap()).unwrap())
+            .unwrap();
+    let cmd = settings["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(cmd.ends_with(" hook post-tool-use"));
+
+    let v = agentvc(w, &["fork", "--actor", "agent:claude"]);
+    let view = v["fork"]["attempt"]["view_path"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let a = v["fork"]["attempt"]["id"].as_i64().unwrap();
+    fs::write(Path::new(&view).join("f"), "2\n").unwrap();
+
+    // Call the hook the way Claude Code does: JSON on stdin, text mode, no output.
+    let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin("agentvc"))
+        .args(["hook", "post-tool-use"])
+        .current_dir(&view)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let input = serde_json::json!({ "session_id": "abc", "tool_name": "Write", "cwd": view });
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(input.to_string().as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success());
+    assert!(out.stdout.is_empty());
+
+    let show = agentvc(w, &["show", &format!("a{a}")]);
+    let last = show["snapshots"]
+        .as_array()
+        .unwrap()
+        .last()
+        .unwrap()
+        .clone();
+    assert_eq!(last["trigger"], "tool:Write");
+    assert_eq!(last["meta"]["session_id"], "abc");
+
+    // The local settings file is copied into views but never captured.
+    let d = agentvc(w, &["diff", &format!("a{a}")]);
+    let paths: Vec<_> = d["changes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["path"].clone())
+        .collect();
+    assert_eq!(paths, vec![Value::from("f")]);
+
+    // Outside a space the hook is a silent no-op.
+    let other = tempfile::tempdir().unwrap();
+    let status = std::process::Command::new(assert_cmd::cargo::cargo_bin("agentvc"))
+        .args(["hook", "stop"])
+        .current_dir(other.path())
+        .stdin(std::process::Stdio::null())
+        .status()
+        .unwrap();
+    assert!(status.success());
+}

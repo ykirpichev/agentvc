@@ -597,6 +597,20 @@ impl Space {
         trigger: &str,
         meta: Option<serde_json::Value>,
     ) -> Result<SnapshotResult> {
+        let always = meta.is_some();
+        self.snapshot_with(attempt_id, trigger, meta, always)
+    }
+
+    /// Like [`Space::snapshot`], but `always` decides whether an unchanged
+    /// tree still records a new snapshot (to keep its metadata) or returns
+    /// the previous one with `unchanged: true`.
+    pub fn snapshot_with(
+        &self,
+        attempt_id: i64,
+        trigger: &str,
+        meta: Option<serde_json::Value>,
+        always: bool,
+    ) -> Result<SnapshotResult> {
         let attempt = self.attempt(attempt_id)?;
         if !attempt.status.is_open() {
             return Err(Error::AttemptClosed {
@@ -605,8 +619,9 @@ impl Space {
             });
         }
         let tree = snapshot::capture(&self.objects, &attempt.view_path)?.to_hex();
-        if meta.is_none() {
-            if let Some(last) = self.snapshots(attempt_id)?.pop() {
+        if !always {
+            // A fresh fork compares against the snapshot it was forked from.
+            if let Ok(last) = self.head_snapshot(attempt_id) {
                 if last.tree == tree {
                     return Ok(SnapshotResult {
                         snapshot: last,

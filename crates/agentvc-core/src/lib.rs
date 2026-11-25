@@ -2,6 +2,7 @@
 //! copy-on-write views. See `docs/design.md`.
 
 pub mod error;
+pub mod hooks;
 pub mod objects;
 pub mod run;
 pub mod snapshot;
