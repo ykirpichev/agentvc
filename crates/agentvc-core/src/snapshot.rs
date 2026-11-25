@@ -7,10 +7,14 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+
+use ignore::WalkState;
 
 use serde::Serialize;
 
-use crate::error::{IoContext, Result};
+use crate::error::{Error, IoContext, Result};
+use crate::index::{Stat, StatIndex};
 use crate::objects::{Mode, ObjectStore, Oid, TreeEntry};
 
 /// Directory names never captured in a snapshot, at any depth.
@@ -22,6 +26,14 @@ pub const ALWAYS_SKIPPED_FILES: &[&str] = &[".claude/settings.local.json"];
 
 /// Capture `dir` into `store` and return the root tree id.
 pub fn capture(store: &ObjectStore, dir: &Path) -> Result<Oid> {
+    capture_indexed(store, dir, None)
+}
+
+/// Capture `dir`, reusing blob ids from the stat index at `index_path` for
+/// files whose size, mtime, inode and mode are unchanged, and rewriting the
+/// index afterwards.
+pub fn capture_indexed(store: &ObjectStore, dir: &Path, index_path: Option<&Path>) -> Result<Oid> {
+    let mut index = index_path.map(StatIndex::load).unwrap_or_default();
     let mut files: BTreeMap<PathBuf, (Mode, Oid)> = BTreeMap::new();
     let walker = ignore::WalkBuilder::new(dir)
         .hidden(false)
@@ -42,47 +54,92 @@ pub fn capture(store: &ObjectStore, dir: &Path) -> Result<Oid> {
                 !ALWAYS_SKIPPED_FILES.iter().any(|f| rel == Path::new(f))
             }
         })
-        .build();
-    for entry in walker {
-        let entry = entry?;
-        let Some(ft) = entry.file_type() else {
-            continue;
-        };
-        let path = entry.path();
-        if ft.is_dir() {
-            continue;
-        }
-        let rel = path
-            .strip_prefix(dir)
-            .expect("walk stays under dir")
-            .to_path_buf();
-        if ft.is_symlink() {
-            let target = fs::read_link(path).at(path)?;
-            let oid = store.write_blob(target.to_string_lossy().as_bytes())?;
-            files.insert(rel, (Mode::Symlink, oid));
-        } else if ft.is_file() {
-            let data = fs::read(path).at(path)?;
-            let oid = store.write_blob(&data)?;
-            files.insert(rel, (file_mode(path)?, oid));
-        }
+        .build_parallel();
+
+    // Walk and stat in parallel; stats dominate the cost of an unchanged view.
+    let found: Mutex<Vec<(PathBuf, bool, fs::Metadata)>> = Mutex::new(Vec::new());
+    let failure: Mutex<Option<Error>> = Mutex::new(None);
+    walker.run(|| {
+        Box::new(|entry| {
+            let fail = |e: Error| {
+                failure.lock().expect("lock").get_or_insert(e);
+                WalkState::Quit
+            };
+            let entry = match entry {
+                Ok(e) => e,
+                Err(e) => return fail(e.into()),
+            };
+            let Some(ft) = entry.file_type() else {
+                return WalkState::Continue;
+            };
+            if !(ft.is_symlink() || ft.is_file()) {
+                return WalkState::Continue;
+            }
+            let path = entry.path();
+            let meta = match fs::symlink_metadata(path) {
+                Ok(m) => m,
+                Err(source) => {
+                    return fail(Error::Io {
+                        path: path.to_path_buf(),
+                        source,
+                    })
+                }
+            };
+            let rel = path
+                .strip_prefix(dir)
+                .expect("walk stays under dir")
+                .to_path_buf();
+            found
+                .lock()
+                .expect("lock")
+                .push((rel, ft.is_symlink(), meta));
+            WalkState::Continue
+        })
+    });
+    if let Some(e) = failure.into_inner().expect("lock") {
+        return Err(e);
     }
-    build_tree(store, &files, Path::new(""))
+
+    for (rel, is_symlink, meta) in found.into_inner().expect("lock") {
+        let path = dir.join(&rel);
+        let mode = if is_symlink {
+            Mode::Symlink
+        } else {
+            mode_from_meta(&meta)
+        };
+        let stat = Stat::of(&meta, mode);
+        let cached = index.lookup(&rel, &stat);
+        let oid = match cached {
+            Some(oid) => oid,
+            None if is_symlink => {
+                let target = fs::read_link(&path).at(&path)?;
+                store.write_blob(target.to_string_lossy().as_bytes())?
+            }
+            None => store.write_blob(&fs::read(&path).at(&path)?)?,
+        };
+        index.record(rel.clone(), stat, oid, cached.is_some());
+        files.insert(rel, (mode, oid));
+    }
+    let tree = build_tree(store, &files, Path::new(""))?;
+    if let Some(p) = index_path.filter(|_| index.is_dirty()) {
+        index.save(p)?;
+    }
+    Ok(tree)
 }
 
 #[cfg(unix)]
-fn file_mode(path: &Path) -> Result<Mode> {
+fn mode_from_meta(meta: &fs::Metadata) -> Mode {
     use std::os::unix::fs::PermissionsExt;
-    let meta = fs::metadata(path).at(path)?;
-    Ok(if meta.permissions().mode() & 0o111 != 0 {
+    if meta.permissions().mode() & 0o111 != 0 {
         Mode::Executable
     } else {
         Mode::File
-    })
+    }
 }
 
 #[cfg(not(unix))]
-fn file_mode(_path: &Path) -> Result<Mode> {
-    Ok(Mode::File)
+fn mode_from_meta(_meta: &fs::Metadata) -> Mode {
+    Mode::File
 }
 
 /// Build the tree for directory `prefix` from a flat, sorted map of files.
@@ -263,6 +320,45 @@ mod tests {
             "fn a() {}\n"
         );
         assert_eq!(capture(&store, &out).unwrap(), tree);
+    }
+
+    #[test]
+    fn index_skips_unchanged_files_and_sees_edits() {
+        let (tmp, store, work) = setup();
+        let idx = tmp.path().join("index");
+        let plain = capture(&store, &work).unwrap();
+        // First indexed capture: everything is a miss, same tree as unindexed.
+        assert_eq!(capture_indexed(&store, &work, Some(&idx)).unwrap(), plain);
+
+        // Age the index so entries are not racy, then capture again.
+        let mut text = fs::read_to_string(&idx).unwrap();
+        let header_end = text.find('\n').unwrap();
+        text.replace_range(..header_end, "agentvc-index v1 99999999999999999999");
+        fs::write(&idx, &text).unwrap();
+        let mut loaded = StatIndex::load(&idx);
+        let rel = Path::new("src/lib.rs");
+        let meta = fs::symlink_metadata(work.join(rel)).unwrap();
+        assert!(loaded.lookup(rel, &Stat::of(&meta, Mode::File)).is_some());
+
+        // An edit that keeps the size is still seen (mtime/inode change).
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        fs::write(work.join("src/lib.rs"), "fn z() {}\n").unwrap();
+        fs::write(&idx, &text).unwrap();
+        let t2 = capture_indexed(&store, &work, Some(&idx)).unwrap();
+        assert_ne!(t2, plain);
+        assert_eq!(t2, capture(&store, &work).unwrap());
+    }
+
+    #[test]
+    fn racy_entries_are_rehashed() {
+        let (tmp, store, work) = setup();
+        let idx = tmp.path().join("index");
+        capture_indexed(&store, &work, Some(&idx)).unwrap();
+        // Files were written just now, inside the racy window: no hits.
+        let mut loaded = StatIndex::load(&idx);
+        let rel = Path::new("README.md");
+        let meta = fs::symlink_metadata(work.join(rel)).unwrap();
+        assert!(loaded.lookup(rel, &Stat::of(&meta, Mode::File)).is_none());
     }
 
     #[test]

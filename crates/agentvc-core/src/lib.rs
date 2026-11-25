@@ -3,6 +3,7 @@
 
 pub mod error;
 pub mod hooks;
+pub mod index;
 pub mod objects;
 pub mod run;
 pub mod snapshot;

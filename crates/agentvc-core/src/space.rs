@@ -618,7 +618,13 @@ impl Space {
                 status: attempt.status.to_string(),
             });
         }
-        let tree = snapshot::capture(&self.objects, &attempt.view_path)?.to_hex();
+        let index = self
+            .workdir
+            .join(SPACE_DIR)
+            .join("index")
+            .join(format!("a{attempt_id}"));
+        let tree =
+            snapshot::capture_indexed(&self.objects, &attempt.view_path, Some(&index))?.to_hex();
         if !always {
             // A fresh fork compares against the snapshot it was forked from.
             if let Ok(last) = self.head_snapshot(attempt_id) {
