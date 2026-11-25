@@ -10,6 +10,8 @@ import type {
   AttemptDetail,
   DiffResponse,
   FileResponse,
+  RebaseOptions,
+  RebaseResponse,
   Ref,
   Snapshot,
   SpaceInfo,
@@ -21,11 +23,14 @@ import type {
 export class ApiError extends Error {
   readonly code: string
   readonly status: number
-  constructor(status: number, code: string, message: string) {
+  /** Extra fields of the error object, e.g. `paths` for `conflict`. */
+  readonly details: Record<string, unknown>
+  constructor(status: number, code: string, message: string, details: Record<string, unknown> = {}) {
     super(message)
     this.name = 'ApiError'
     this.status = status
     this.code = code
+    this.details = details
   }
 }
 
@@ -53,7 +58,8 @@ async function request<T>(url: string, init: RequestInit = {}): Promise<T> {
   const body: unknown = await res.json().catch(() => null)
   if (!res.ok) {
     const err = (body as ApiErrorBody | null)?.error
-    throw new ApiError(res.status, err?.code ?? 'http', err?.message ?? res.statusText)
+    const { code, message, ...details } = err ?? { code: 'http', message: res.statusText }
+    throw new ApiError(res.status, code, message, details)
   }
   return body as T
 }
@@ -78,6 +84,8 @@ export const api = {
   stop: (id: number) => post<StopResponse>(`/attempts/${id}/stop`),
   promote: (id: number) => post<ActionResponse>(`/attempts/${id}/promote`),
   abandon: (id: number, reason: string) => post<ActionResponse>(`/attempts/${id}/abandon`, { reason }),
+  /** Rebase onto `onto`, by default the remote's default branch (fetched). */
+  rebase: (id: number, opts: RebaseOptions = {}) => post<RebaseResponse>(`/attempts/${id}/rebase`, opts),
   mark: (id: number, status: 'passed' | 'failed' | 'exploring') =>
     post<ActionResponse>(`/attempts/${id}/mark`, { status }),
 }
@@ -85,4 +93,6 @@ export const api = {
 export const ref = {
   attempt: (id: number): Ref => `a${id}`,
   snapshot: (id: number): Ref => `s${id}`,
+  /** A commit an attempt was rebased onto. */
+  git: (commit: string): Ref => `git:${commit}`,
 }
