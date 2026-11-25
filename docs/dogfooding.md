@@ -68,6 +68,39 @@ are never touched.
 Human edits follow the same loop: `agentvc fork --task tN --actor human`, then work in
 `$(agentvc path aN)`.
 
+## Checklist for every thread (cloud sessions included)
+
+Each thread runs in a fresh container, so set up at the start and ship before the
+thread goes idle. Use your thread's own push branch wherever `<branch>` appears.
+
+1. **Set up** (about a minute): `scripts/dogfood-setup.sh && export PATH=$PWD/target/release:$PATH`.
+2. **One task per issue:** `agentvc task new "<goal> (#N)" --criteria "<acceptance criteria>"` gives `tN`.
+3. **Never edit the main checkout.** All work happens in attempt views:
+   - agents: `agentvc run --detach --task tN --actor agent:claude --model <m> --check "<test cmd>" -- claude -p --settings .claude/settings.local.json --permission-mode acceptEdits "<prompt>"`.
+     Start two when the approach is open; `agentvc ps` shows them. The `--settings` flag is
+     needed until #57: cloud sessions ignore `settings.local.json`, so without it the hooks
+     never snapshot.
+   - your own edits: `agentvc fork --task tN --actor agent:claude-code` (or `--from aN` to
+     continue a winner), then edit only under `$(agentvc path aN)`, run builds and tests
+     there, and `agentvc snapshot aN --meta tests=pass` after each step that works.
+4. **Compare:** `agentvc diff aX aY` lists files; until #58 read the patches with
+   `git diff --no-index <file> .agentvc/views/aN/<file>`. Abandon losers with a reason:
+   `agentvc abandon aN --reason "..."`.
+5. **Ship:** `agentvc promote aX`, `agentvc rebase aX` (always, it's a no-op when main
+   hasn't moved), then `agentvc pr aX --branch <branch>`. Run fmt, clippy and tests in the
+   view first. `GITHUB_TOKEN` is set in cloud sessions. If `<branch>` is the one checked out
+   in the main checkout (the usual case in a thread), run `git checkout --detach` once and
+   add `--force` to `pr`, until #59.
+6. **PR body:** keep agentvc's generated body; put any required attribution lines above it
+   (by hand until #59). Say which attempts ran and which won.
+7. **Follow-up work in the same PR** (review fixes): `agentvc fork --from aX`, edit, snapshot,
+   promote the new attempt, `agentvc pr aY --branch <branch>` again. The PR body then shows
+   the winning path aX -> aY.
+8. **If agentvc gets in the way**, don't silently fall back to git: file a `dogfood` issue,
+   then say in the PR why it didn't go through agentvc.
+9. **Before the thread ends:** the space dies with the container (#56). Paste
+   `agentvc log` into the PR or thread so the losing attempts aren't lost.
+
 ## Rules while dogfooding
 
 - No agent edits the main checkout directly. Agents start with `agentvc run`, or in a view.
@@ -80,7 +113,7 @@ Human edits follow the same loop: `agentvc fork --task tN --actor human`, then w
 
 ## What we measure (#23)
 
-- fork time and disk per attempt (`agentvc run --json` reports the fork stats);
+- fork time and disk per attempt (`agentvc fork --json` reports the fork stats; `run --json` will with #60);
 - attempts per task, and how many win;
 - time from the first attempt to `promote`, and from `promote` to merged PR.
 
@@ -104,6 +137,26 @@ two scripted attempts writing the guide (a2, a3), a2 won, a4 continued it with a
 - **Forks are slow on ext4.** Each fork copied about 2.7 GB of `target/` and
   `node_modules`: 3 to 16 s. That is the overlayfs work in #3; on APFS, btrfs or XFS
   reflinks make it near-free.
+
+## Second dogfood run (Nov 25, 2026): issue #32 in a cloud session
+
+Until this run, only #31 and #44 went through agentvc; the 13 other PRs since switch-on
+were plain git branches from cloud threads, which said they had no space or token. Both
+were wrong: setup takes under a minute and `GITHUB_TOKEN` is there. This run: task t1, two
+`claude -p` agents (a2 opus, a3 sonnet) in parallel overlay views, both passed `--check`,
+a2 won (a3 listed open attempts as rejected), a4 was a probe, a5 continued a2 with this
+guide and a `ps` fix, `agentvc pr a5 --branch ...` opened the PR.
+
+Better than plain git: two agents on the same files at once with no worktree juggling or
+rebuilds (forks took 0.5 s with a 700 MB `target/` shared), `--check` marking each attempt,
+losers kept with a reason, and promote/rebase/pr as one flow with a PR body that tells the
+story. What hurt, filed as `dogfood` issues:
+
+- history dies with the cloud container (#56); hooks silently off in cloud sessions (#57);
+- `diff` lists files but shows no patch, and views have no `.git` (#58);
+- `pr` from a thread needs a body prefix and a fixed branch (#59);
+- no `agentvc status`, and `run --json` lacks the fork stats this guide promised (#60);
+- `ps` showed a just-started run as `lost` and printed whole prompts. Fixed here.
 
 ## Known gaps at switch-on
 

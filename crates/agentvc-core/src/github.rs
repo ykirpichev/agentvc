@@ -2,8 +2,9 @@
 //! the branch, and create (or update) the PR through the REST API.
 //!
 //! The PR body tells the story of the task: the goal and criteria, the chosen
-//! attempt, and every sibling attempt that lost, with its reason, tests and
-//! cost, so a reviewer on GitHub sees what was tried.
+//! attempt, the winning path of attempts it was forked from, and every
+//! attempt off that path that lost, with its reason, tests and cost, so a
+//! reviewer on GitHub sees what was tried.
 
 use std::collections::BTreeMap;
 use std::process::Command;
@@ -14,7 +15,7 @@ use serde_json::{json, Value};
 
 use crate::error::{Error, Result};
 use crate::export::{export, ExportOptions, ExportResult, HostRepo};
-use crate::space::{Attempt, Space};
+use crate::space::{Attempt, Space, Status};
 
 /// Overrides the API base URL (GitHub Enterprise, tests).
 pub const API_ENV: &str = "AGENTVC_GITHUB_API";
@@ -115,8 +116,61 @@ fn who(a: &Attempt) -> String {
     }
 }
 
-/// The PR body for `winner`: task, criteria, the chosen attempt and the
-/// rejected siblings with their reasons, tests and cost.
+/// The attempts `winner` was forked from on its own task, oldest first. Each
+/// comes with the snapshot the next step on the path was forked from (`None`
+/// only if that link is missing). Stops at the first ancestor on another task
+/// (usually the root attempt).
+fn winning_path(space: &Space, winner: &Attempt) -> Result<Vec<(Attempt, Option<i64>)>> {
+    let mut path = Vec::new();
+    let mut seen = std::collections::HashSet::from([winner.id]);
+    let mut child = winner.clone();
+    while let Some(p) = child.parent_attempt {
+        if winner.task_id.is_none() || !seen.insert(p) {
+            break;
+        }
+        let parent = space.attempt(p)?;
+        if parent.task_id != winner.task_id {
+            break;
+        }
+        path.push((parent.clone(), child.parent_snapshot));
+        child = parent;
+    }
+    path.reverse();
+    Ok(path)
+}
+
+/// A metadata value for a table cell: run commands carry whole agent prompts,
+/// so long values are cut at 60 characters.
+fn short(v: &str) -> String {
+    match v.char_indices().nth(60) {
+        Some((i, _)) => format!("{}…", &v[..i]),
+        None => v.to_string(),
+    }
+}
+
+/// A table of attempts with their outcome, reason, agent, tests and cost.
+fn attempt_table(space: &Space, attempts: &[Attempt]) -> Result<String> {
+    let mut t = String::new();
+    t += "| Attempt | Outcome | Reason | Agent | Tests | Cost |\n";
+    t += "| --- | --- | --- | --- | --- | --- |\n";
+    for s in attempts {
+        let m = attempt_meta(space, s.id)?;
+        t += &format!(
+            "| a{} | {} | {} | {} | {} | {} |\n",
+            s.id,
+            s.status,
+            cell(s.reason.as_deref().unwrap_or("-")),
+            cell(&who(s)),
+            cell(m.get("tests").map(String::as_str).unwrap_or("-")),
+            cell(m.get("cost").map(String::as_str).unwrap_or("-")),
+        );
+    }
+    Ok(t)
+}
+
+/// The PR body for `winner`: task, criteria, the chosen attempt, the winning
+/// path of attempts it was forked from, and the rejected (abandoned or
+/// failed) attempts off that path with their reasons, tests and cost.
 pub fn pr_body(space: &Space, winner: &Attempt, export: &ExportResult) -> Result<String> {
     let task = winner.task_id.map(|t| space.task(t)).transpose()?;
     let mut body = String::new();
@@ -161,32 +215,69 @@ pub fn pr_body(space: &Space, winner: &Attempt, export: &ExportResult) -> Result
     }
     body += "\n";
 
-    let siblings: Vec<Attempt> = match &task {
+    // The attempts the winner was forked from, oldest first, each paired with
+    // the snapshot it handed on to the next step.
+    let path = winning_path(space, winner)?;
+    if !path.is_empty() {
+        body += "## Winning path\n\n";
+        let chain: Vec<String> = path
+            .iter()
+            .map(|(a, _)| format!("a{}", a.id))
+            .chain([format!("**a{}** (chosen)", winner.id)])
+            .collect();
+        body += &format!("{}\n\n", chain.join(" → "));
+        body += "| Step | Attempt | Snapshot | Outcome | Agent | Tests | Cost | Other metadata |\n";
+        body += "| --- | --- | --- | --- | --- | --- | --- | --- |\n";
+        let steps = path
+            .iter()
+            .map(|(a, s)| (a, s.map(|s| format!("s{s}"))))
+            .chain([(winner, Some(format!("s{} (exported)", export.snapshot.id)))]);
+        for (i, (a, snap)) in steps.enumerate() {
+            let m = attempt_meta(space, a.id)?;
+            let other: Vec<String> = m
+                .iter()
+                .filter(|(k, _)| *k != "tests" && *k != "cost")
+                .map(|(k, v)| format!("{k}: {}", short(v)))
+                .collect();
+            let other = if other.is_empty() {
+                "-".to_string()
+            } else {
+                other.join(", ")
+            };
+            body += &format!(
+                "| {} | a{} | {} | {} | {} | {} | {} | {} |\n",
+                i + 1,
+                a.id,
+                snap.as_deref().unwrap_or("-"),
+                a.status,
+                cell(&who(a)),
+                cell(m.get("tests").map(String::as_str).unwrap_or("-")),
+                cell(m.get("cost").map(String::as_str).unwrap_or("-")),
+                cell(&other),
+            );
+        }
+        body += "\n";
+    }
+
+    let on_path = |id: i64| id == winner.id || path.iter().any(|(a, _)| a.id == id);
+    let (rejected, open): (Vec<Attempt>, Vec<Attempt>) = match &task {
         Some(t) => space
             .attempts(Some(t.id))?
             .into_iter()
-            .filter(|a| a.id != winner.id)
-            .collect(),
-        None => Vec::new(),
+            .filter(|a| !on_path(a.id))
+            .partition(|a| matches!(a.status, Status::Abandoned | Status::Failed)),
+        None => (Vec::new(), Vec::new()),
     };
     body += "## Rejected attempts\n\n";
-    if siblings.is_empty() {
-        body += "_None: this was the only attempt._\n";
+    if rejected.is_empty() {
+        body += "_None: no other attempt was abandoned or failed._\n";
     } else {
-        body += "| Attempt | Outcome | Reason | Agent | Tests | Cost |\n";
-        body += "| --- | --- | --- | --- | --- | --- |\n";
-        for s in &siblings {
-            let m = attempt_meta(space, s.id)?;
-            body += &format!(
-                "| a{} | {} | {} | {} | {} | {} |\n",
-                s.id,
-                s.status,
-                cell(s.reason.as_deref().unwrap_or("-")),
-                cell(&who(s)),
-                cell(m.get("tests").map(String::as_str).unwrap_or("-")),
-                cell(m.get("cost").map(String::as_str).unwrap_or("-")),
-            );
-        }
+        body += &attempt_table(space, &rejected)?;
+    }
+    if !open.is_empty() {
+        body += "\n## Other attempts\n\n";
+        body += "Not on the winning path and not closed as rejected.\n\n";
+        body += &attempt_table(space, &open)?;
     }
     body += &format!(
         "\n---\n_Exported by agentvc from attempt a{} (snapshot s{})._\n",
@@ -408,5 +499,111 @@ mod tests {
             );
         }
         assert_eq!(parse_remote("agentvc"), None);
+    }
+
+    #[test]
+    fn pr_body_shows_winning_path_and_rejects_only_off_path() {
+        use crate::space::{ForkRequest, Ref};
+
+        let tmp = crate::testutil::tempdir();
+        std::fs::write(tmp.path().join("main.rs"), "fn main() {}\n").unwrap();
+        let space = Space::init(tmp.path()).unwrap();
+        let task = space.create_task("speed up main", None).unwrap();
+        let fork = |from: Option<i64>| {
+            space
+                .fork(&ForkRequest {
+                    task_id: Some(task.id),
+                    from: from.map(Ref::Attempt),
+                    actor: "agent".into(),
+                    ..Default::default()
+                })
+                .unwrap()
+                .attempt
+                .id
+        };
+        let edit = |id: i64, text: &str, meta: Value| {
+            let view = space.attempt(id).unwrap().view_path;
+            std::fs::write(view.join("main.rs"), text).unwrap();
+            space.snapshot(id, "tool", Some(meta)).unwrap();
+        };
+
+        // Chain: first -> second -> chosen, plus siblings off the path.
+        let first = fork(None);
+        edit(
+            first,
+            "fn main() { a() }\n",
+            json!({"tests": "3/5", "cost": "$0.10"}),
+        );
+        let second = fork(Some(first));
+        edit(
+            second,
+            "fn main() { b() }\n",
+            json!({"tests": "4/5", "note": "x"}),
+        );
+        let chosen = fork(Some(second));
+        edit(chosen, "fn main() { c() }\n", json!({"tests": "5/5"}));
+        let failed = fork(None);
+        space
+            .set_status(failed, Status::Failed, Some("tests red"))
+            .unwrap();
+        let side = fork(Some(first)); // branches off the path
+        let lost = fork(None);
+        space.set_status(chosen, Status::Promoted, None).unwrap();
+
+        let winner = space.attempt(chosen).unwrap();
+        let snap = space.head_snapshot(chosen).unwrap();
+        let exp = ExportResult {
+            export_id: 1,
+            attempt: chosen,
+            snapshot: snap.clone(),
+            branch: "agentvc/test".into(),
+            commit: "0123456789abcdef".into(),
+            parent: None,
+            tree: snap.tree.clone(),
+            replaced: None,
+            objects_copied: 0,
+        };
+        let body = pr_body(&space, &winner, &exp).unwrap();
+
+        let (path, rest) = body
+            .split_once("## Winning path")
+            .unwrap()
+            .1
+            .split_once("## Rejected attempts")
+            .unwrap();
+        assert!(
+            path.contains(&format!("a{first} → a{second} → **a{chosen}** (chosen)")),
+            "{body}"
+        );
+        // Each step names the snapshot carried forward and its metadata.
+        let from_first = space.attempt(second).unwrap().parent_snapshot.unwrap();
+        let from_second = winner.parent_snapshot.unwrap();
+        assert!(path.contains(&format!(
+            "| 1 | a{first} | s{from_first} | promoted | agent | 3/5 | $0.10 | - |"
+        )));
+        assert!(path.contains(&format!(
+            "| 2 | a{second} | s{from_second} | promoted | agent | 4/5 | - | note: x |"
+        )));
+        assert!(path.contains(&format!(
+            "| 3 | a{chosen} | s{} (exported) | promoted | agent | 5/5 | - | - |",
+            snap.id
+        )));
+
+        // Rejected lists the off-path losers only, never the promoted ancestors.
+        for id in [failed, side, lost] {
+            assert!(rest.contains(&format!("| a{id} | abandoned |")), "{body}");
+        }
+        for id in [first, second, chosen] {
+            assert!(!rest.contains(&format!("| a{id} |")), "{body}");
+        }
+        assert!(!body.contains("## Other attempts"));
+    }
+
+    #[test]
+    fn short_cuts_long_metadata_values() {
+        assert_eq!(short("pass"), "pass");
+        let cut = short(&"é".repeat(100));
+        assert_eq!(cut.chars().count(), 61);
+        assert!(cut.ends_with('…'));
     }
 }
