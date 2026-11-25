@@ -40,6 +40,8 @@ pub struct Config {
     pub dir: PathBuf,
     /// How often the event poller checks the database for changes.
     pub poll_interval: Duration,
+    /// Who review actions from the UI are recorded as, e.g. `human:ana`.
+    pub actor: String,
 }
 
 impl Config {
@@ -47,6 +49,7 @@ impl Config {
         Config {
             dir: dir.into(),
             poll_interval: Duration::from_millis(500),
+            actor: "human".into(),
         }
     }
 }
@@ -60,6 +63,7 @@ pub struct AppState {
 struct Inner {
     space: Mutex<Space>,
     workdir: PathBuf,
+    actor: String,
     events: broadcast::Sender<Event>,
     /// Wakes the event poller early, after the daemon itself wrote.
     poke: Notify,
@@ -77,6 +81,7 @@ impl AppState {
             inner: Arc::new(Inner {
                 space: Mutex::new(space),
                 workdir,
+                actor: config.actor.clone(),
                 events: tx,
                 poke: Notify::new(),
             }),
@@ -87,6 +92,11 @@ impl AppState {
 
     pub fn workdir(&self) -> &Path {
         &self.inner.workdir
+    }
+
+    /// The actor review actions are recorded as.
+    pub fn actor(&self) -> &str {
+        &self.inner.actor
     }
 
     /// Subscribe to live events.
@@ -129,6 +139,23 @@ pub fn router(state: AppState) -> Router {
         .fallback(assets::serve)
         .layer(middleware::from_fn(local_only))
         .with_state(state)
+}
+
+/// `human:<name>` for a reviewer's name, or plain `human` without one.
+/// Whitespace collapses to `-` so the actor stays one token.
+pub fn human_actor(name: Option<&str>) -> String {
+    let name = name
+        .map(|n| {
+            n.split_whitespace()
+                .collect::<Vec<_>>()
+                .join("-")
+                .to_lowercase()
+        })
+        .filter(|n| !n.is_empty());
+    match name {
+        Some(n) => format!("human:{n}"),
+        None => "human".into(),
+    }
 }
 
 /// True for `localhost`, `127.0.0.1`, `[::1]`, with or without a port.
@@ -175,6 +202,13 @@ async fn local_only(req: Request, next: Next) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn human_actor_names() {
+        assert_eq!(human_actor(Some("Ana Lee")), "human:ana-lee");
+        assert_eq!(human_actor(Some("  ")), "human");
+        assert_eq!(human_actor(None), "human");
+    }
 
     #[test]
     fn local_hosts() {
