@@ -338,11 +338,12 @@ fn enter_userns() -> std::result::Result<(), String> {
 /// empty overlay under `scratch`. Returns the reasons each mounter failed.
 pub fn probe(scratch: &Path) -> std::result::Result<Mounter, String> {
     let mut why = Vec::new();
-    // Unique per call: threads of one process may probe at the same time
-    // (prepare and fork racing), and must not delete each other's dirs.
-    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let dir = scratch.join(format!("probe-{}-{seq}", std::process::id()));
+    // Unique per call, not just per process: two threads of one process can
+    // probe at once (prepare and fork racing), and a shared directory would
+    // be removed under the other's mount.
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    let dir = scratch.join(format!("probe-{}-{n}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     let spec = MountSpec {
         lowers: vec![dir.join("l")],
