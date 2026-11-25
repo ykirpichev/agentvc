@@ -24,6 +24,7 @@ pub(crate) fn routes() -> Router<AppState> {
         .route("/attempts/{id}/promote", post(promote))
         .route("/attempts/{id}/abandon", post(abandon))
         .route("/attempts/{id}/mark", post(mark))
+        .merge(crate::live::routes())
 }
 
 // ---- stats ----------------------------------------------------------------
@@ -76,7 +77,7 @@ fn as_i64(v: Option<&Value>) -> Option<i64> {
     }
 }
 
-fn attempt_stats(a: &Attempt, snaps: &[Snapshot]) -> AttemptStats {
+pub(crate) fn attempt_stats(a: &Attempt, snaps: &[Snapshot]) -> AttemptStats {
     let mut st = AttemptStats {
         attempt: a.id,
         snapshots: snaps.len(),

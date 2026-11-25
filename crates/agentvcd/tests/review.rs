@@ -30,6 +30,7 @@ fn fixture() -> tempfile::TempDir {
                 actor: actor.into(),
                 model: Some("model-x".into()),
                 prompt: None,
+                ..Default::default()
             })
             .unwrap()
             .attempt

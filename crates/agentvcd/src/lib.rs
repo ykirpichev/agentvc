@@ -25,6 +25,7 @@ use tokio::sync::{broadcast, Notify};
 mod api;
 mod assets;
 mod events;
+mod live;
 mod review;
 
 pub use api::ApiError;
