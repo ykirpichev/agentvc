@@ -43,6 +43,40 @@ enum Cmd {
         /// Do not prepare a1 in the background.
         #[arg(long)]
         no_prepare: bool,
+        /// Rebuild a space that `agentvc sync` pushed to this remote (default
+        /// origin) instead of starting an empty one: same tasks, attempts
+        /// and ids, losers included. Picks the space synced from the branch
+        /// checked out here, else the only one; see --space.
+        #[arg(long, value_name = "REMOTE", num_args = 0..=1, default_missing_value = "origin")]
+        from_remote: Option<String>,
+        /// With --from-remote: the space id (or a prefix), from `agentvc sync --list`.
+        #[arg(long, requires = "from_remote")]
+        space: Option<String>,
+        /// With --from-remote: only a space synced from the branch checked out
+        /// here; fail with not_found otherwise.
+        #[arg(long, requires = "from_remote")]
+        this_branch: bool,
+    },
+    /// Push this space's history (tasks, attempts, snapshots, reasons, runs)
+    /// to a git remote as refs/agentvc/spaces/<id>, so it outlives this
+    /// machine. Restore it elsewhere with `agentvc init --from-remote`.
+    Sync {
+        #[arg(long, default_value = "origin")]
+        remote: String,
+        /// List the spaces synced to the remote instead.
+        #[arg(long)]
+        list: bool,
+        /// Also sync after every `run`, `promote`, `abandon` and `pr` from now
+        /// on (best effort: failures are warnings).
+        #[arg(long, conflicts_with = "no_auto")]
+        auto: bool,
+        /// Stop syncing automatically (and don't sync now).
+        #[arg(long)]
+        no_auto: bool,
+        /// Overwrite the remote even if another machine synced this space
+        /// since this one did.
+        #[arg(long)]
+        force: bool,
     },
     /// Create and list tasks.
     #[command(subcommand)]
@@ -172,6 +206,9 @@ enum Cmd {
         /// Move the branch even if another attempt exported to it.
         #[arg(long)]
         force: bool,
+        /// Do not sync the space to the remote afterwards.
+        #[arg(long)]
+        no_sync: bool,
     },
     /// Fork a new attempt and run a command (usually an agent) inside its view.
     ///
@@ -201,6 +238,12 @@ enum Cmd {
         /// Start in the background and return at once; see `agentvc ps`.
         #[arg(long)]
         detach: bool,
+        /// Do not add `--settings <space>/claude-hooks.json` to a `claude`
+        /// command. By default it is added unless the command passes its own
+        /// --settings or --plugin-dir, or (outside a Claude Code cloud
+        /// session) the view's .claude settings already install the hooks.
+        #[arg(long)]
+        no_hooks: bool,
         /// The command to run, after `--`.
         #[arg(last = true, required = true)]
         command: Vec<String>,
@@ -394,7 +437,45 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
         Some(d) => d.clone(),
         None => std::env::current_dir()?,
     };
-    if let Cmd::Init { no_prepare } = cli.cmd {
+    if let Cmd::Init {
+        no_prepare,
+        from_remote: Some(remote),
+        space,
+        this_branch,
+    } = &cli.cmd
+    {
+        let opts = agentvc_core::CloneOptions {
+            remote: Some(remote.clone()),
+            space: space.clone(),
+            this_branch: *this_branch,
+        };
+        let (space, r) = agentvc_core::sync::clone_from_remote(&cwd, &opts)?;
+        let prepare = if *no_prepare {
+            json!({ "skipped": "--no-prepare" })
+        } else {
+            prepare_in_background(&space)
+        };
+        let views: Vec<_> = r.views.iter().map(|v| format!("a{v}")).collect();
+        return Ok(Out {
+            text: format!(
+                "Rebuilt space {} from {} ({}): {} tasks, {} attempts, {} snapshots\n\
+                 Views written for open attempts: {}",
+                r.space_id,
+                r.remote,
+                &r.commit[..12],
+                r.tasks,
+                r.attempts,
+                r.snapshots,
+                if views.is_empty() {
+                    "none".into()
+                } else {
+                    views.join(", ")
+                }
+            ),
+            json: json!({ "workdir": space.workdir(), "clone": r, "prepare": prepare }),
+        });
+    }
+    if let Cmd::Init { no_prepare, .. } = cli.cmd {
         let space = Space::init(&cwd)?;
         let snap = space.head_snapshot(agentvc_core::space::ROOT_ATTEMPT)?;
         let prepare = if no_prepare {
@@ -433,6 +514,79 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
     let current = || -> anyhow::Result<i64> { Ok(space.attempt_for_path(&cwd)?.id) };
 
     Ok(match cli.cmd {
+        Cmd::Sync {
+            remote,
+            list,
+            auto,
+            no_auto,
+            force,
+        } => {
+            if list {
+                let spaces = agentvc_core::sync::remote_spaces(space.workdir(), Some(&remote))?;
+                let mine = agentvc_core::sync::space_id(&space)?;
+                let mut text = String::new();
+                for s in &spaces {
+                    text += &format!(
+                        "{}{}  {}  {} attempts  {}\n",
+                        s.space_id,
+                        if s.space_id == mine {
+                            " (this space)"
+                        } else {
+                            ""
+                        },
+                        s.branch.as_deref().unwrap_or("-"),
+                        s.attempts,
+                        s.tasks.join("; ")
+                    );
+                }
+                if spaces.is_empty() {
+                    text = format!("no spaces synced to {remote}");
+                }
+                return Ok(Out {
+                    text,
+                    json: json!({ "remote": remote, "spaces": spaces, "this_space": mine }),
+                });
+            }
+            if auto {
+                space.set_meta(agentvc_core::sync::AUTO_SYNC_KEY, &remote)?;
+            }
+            if no_auto {
+                space.delete_meta(agentvc_core::sync::AUTO_SYNC_KEY)?;
+                return Ok(Out {
+                    text: "auto-sync is off".into(),
+                    json: json!({ "auto": null }),
+                });
+            }
+            let r = agentvc_core::sync::sync(
+                &space,
+                &agentvc_core::SyncOptions {
+                    remote: Some(remote),
+                    force,
+                },
+            )?;
+            let auto_note = match space.meta(agentvc_core::sync::AUTO_SYNC_KEY)? {
+                Some(r) => format!("\nauto-sync to {r} is on"),
+                None => String::new(),
+            };
+            Out {
+                text: format!(
+                    "{} space {} to {} {} at {}: {} tasks, {} attempts, {} snapshots{auto_note}",
+                    if r.unchanged {
+                        "Already synced"
+                    } else {
+                        "Synced"
+                    },
+                    r.space_id,
+                    r.remote,
+                    r.refname,
+                    &r.commit[..12],
+                    r.tasks,
+                    r.attempts,
+                    r.snapshots
+                ),
+                json: json!({ "sync": r, "auto": space.meta(agentvc_core::sync::AUTO_SYNC_KEY)? }),
+            }
+        }
         Cmd::Init { .. }
         | Cmd::Hook { .. }
         | Cmd::Hooks { .. }
@@ -557,7 +711,13 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
             status_out(space.set_status(attempt_id(&attempt)?, s, None)?)
         }
         Cmd::Abandon { attempt, reason } => {
-            status_out(space.set_status(attempt_id(&attempt)?, Status::Abandoned, Some(&reason))?)
+            let mut out = status_out(space.set_status(
+                attempt_id(&attempt)?,
+                Status::Abandoned,
+                Some(&reason),
+            )?);
+            add_sync(&mut out, agentvc_core::sync::auto_sync(&space));
+            out
         }
         Cmd::Promote { attempt } => {
             let a = space.set_status(attempt_id(&attempt)?, Status::Promoted, None)?;
@@ -576,6 +736,7 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
                 out.text += &format!("\nabandoned as lost: {}", list.join(", "));
             }
             out.json["closed_siblings"] = json!(closed);
+            add_sync(&mut out, agentvc_core::sync::auto_sync(&space));
             out
         }
         Cmd::Overview { out } => overview_out(&space, out.as_deref(), cli.json)?,
@@ -658,6 +819,7 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
             backend,
             check,
             detach,
+            no_hooks,
             command,
         } => {
             let from = match from {
@@ -673,6 +835,22 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
                 backend,
             })?;
             let a = fork.attempt.id;
+            let hooks = if no_hooks {
+                None
+            } else {
+                Some(agentvc_core::run::with_claude_hooks(
+                    &space,
+                    &fork.attempt.view_path,
+                    &command,
+                    &std::env::current_exe()?,
+                    agentvc_core::run::in_remote_claude_session(),
+                )?)
+            };
+            let command = hooks.as_ref().map_or(command, |h| h.command.clone());
+            let hooks_note = match hooks.as_ref().and_then(|h| h.settings.as_ref()) {
+                Some(p) => format!("\nhooks: added --settings {}", p.display()),
+                None => String::new(),
+            };
             // Child output would corrupt --json, and a detached run has no terminal.
             let log_to_file = detach || cli.json;
             let run = space.create_run(a, &command, check.as_deref(), log_to_file)?;
@@ -700,21 +878,28 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
                 let child = worker.spawn()?;
                 Out {
                     text: format!(
-                        "a{a} started in background (run r{}, pid {})\nview {}\nlog  {}",
+                        "a{a} started in background (run r{}, pid {})\nview {}\nlog  {}{hooks_note}",
                         run.id,
                         child.id(),
                         fork.attempt.view_path.display(),
                         log.display()
                     ),
-                    json: json!({ "attempt": fork.attempt, "run": run, "pid": child.id() }),
+                    json: json!({
+                        "attempt": fork.attempt, "run": run, "pid": child.id(), "hooks": hooks,
+                    }),
                 }
             } else {
                 let out = agentvc_core::run::execute(&space, run.id)?;
                 let code = out.run.exit_code.unwrap_or(1);
                 EXIT_OVERRIDE.store(code, Ordering::Relaxed);
-                Out {
+                let warnings: String = out
+                    .warnings
+                    .iter()
+                    .map(|w| format!("\nwarning: {w}"))
+                    .collect();
+                let mut res = Out {
                     text: format!(
-                        "a{a} {}  exit {}{}  {} ms  snapshot s{}",
+                        "a{a} {}  exit {}{}  {} ms  snapshot s{}{hooks_note}{warnings}",
                         out.attempt.status,
                         code,
                         out.run
@@ -724,21 +909,36 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
                         out.run.duration_ms.unwrap_or(0),
                         out.snapshot.id
                     ),
-                    json: json!({ "attempt": out.attempt, "run": out.run, "snapshot": out.snapshot }),
-                }
+                    json: json!({
+                        "attempt": out.attempt,
+                        "run": out.run,
+                        "snapshot": out.snapshot,
+                        "hooks": hooks,
+                        "hook_snapshots": out.hook_snapshots,
+                        "warnings": out.warnings,
+                    }),
+                };
+                add_sync(&mut res, agentvc_core::sync::auto_sync(&space));
+                res
             }
         }
         Cmd::RunWorker { run } => {
             let out = agentvc_core::run::execute(&space, run)?;
-            Out {
+            let mut res = Out {
                 text: format!(
                     "[agentvc] r{run} finished: exit {}, a{} {}",
                     out.run.exit_code.unwrap_or(-1),
                     out.attempt.id,
                     out.attempt.status
                 ),
-                json: json!({ "run": out.run }),
-            }
+                json: json!({
+                    "run": out.run,
+                    "hook_snapshots": out.hook_snapshots,
+                    "warnings": out.warnings,
+                }),
+            };
+            add_sync(&mut res, agentvc_core::sync::auto_sync(&space));
+            res
         }
         Cmd::Ps { all } => {
             let runs = space.runs(!all)?;
@@ -880,18 +1080,30 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
             remote,
             repo,
             force,
+            no_sync,
         } => {
             let opts = PrOptions {
                 branch,
                 base,
                 draft,
-                remote: Some(remote),
+                remote: Some(remote.clone()),
                 repo,
                 title,
                 force,
             };
             let r = agentvc_core::github::open_pr(&space, attempt_id(&attempt)?, &opts)?;
-            Out {
+            // The PR shows only the winner; the attempts behind it go to the
+            // remote too, so they outlive this machine (#56).
+            let sync = (!no_sync).then(|| {
+                agentvc_core::sync::sync(
+                    &space,
+                    &agentvc_core::SyncOptions {
+                        remote: Some(remote),
+                        force: false,
+                    },
+                )
+            });
+            let mut out = Out {
                 text: format!(
                     "{} PR #{}: {}\n{} -> {} ({})",
                     if r.updated { "Updated" } else { "Opened" },
@@ -902,9 +1114,37 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
                     &r.export.commit[..12]
                 ),
                 json: json!({ "pr": r }),
-            }
+            };
+            add_sync(&mut out, sync);
+            out
         }
     })
+}
+
+/// Report a sync that ran after a command: a line of text and `sync` in the
+/// JSON. A failed sync is a warning, never the command's failure.
+fn add_sync(out: &mut Out, sync: Option<agentvc_core::Result<agentvc_core::SyncResult>>) {
+    match sync {
+        None => {}
+        Some(Ok(r)) => {
+            if !r.unchanged {
+                out.text += &format!(
+                    "\nsynced space {} to {} ({})",
+                    r.space_id,
+                    r.remote,
+                    &r.commit[..12]
+                );
+            }
+            out.json["sync"] = json!(r);
+        }
+        Some(Err(e)) => {
+            out.text += &format!(
+                "\nwarning: could not sync the space ({}): {e}; run `agentvc sync`",
+                e.code()
+            );
+            out.json["sync"] = json!({ "error": { "code": e.code(), "message": e.to_string() } });
+        }
+    }
 }
 
 fn overview_out(
@@ -1104,13 +1344,31 @@ fn hooks_cmd(cwd: &std::path::Path, user: bool, uninstall: bool) -> anyhow::Resu
     } else {
         agentvc_core::hooks::install(&path, &exe)?;
     }
+    // Claude Code cloud sessions read .claude/settings.json only, so the hooks
+    // in settings.local.json never fire there (#57).
+    let remote_note =
+        (!uninstall && !user && agentvc_core::run::in_remote_claude_session()).then(|| {
+            format!(
+                "This is a Claude Code cloud session (CLAUDE_CODE_REMOTE is set), which \
+                 ignores .claude/settings.local.json. `agentvc run -- claude ...` loads the \
+                 hooks with --settings for you; to start claude yourself, run \
+                 `claude --settings {} ...`.",
+                path.display()
+            )
+        });
+    let mut text = format!(
+        "{} Claude Code hooks in {}",
+        if uninstall { "Removed" } else { "Installed" },
+        path.display()
+    );
+    if let Some(n) = &remote_note {
+        text += &format!("\n{n}");
+    }
     Ok(Out {
-        text: format!(
-            "{} Claude Code hooks in {}",
-            if uninstall { "Removed" } else { "Installed" },
-            path.display()
-        ),
-        json: json!({ "settings": path, "installed": !uninstall, "exe": exe }),
+        text,
+        json: json!({
+            "settings": path, "installed": !uninstall, "exe": exe, "remote_note": remote_note,
+        }),
     })
 }
 

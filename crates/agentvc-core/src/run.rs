@@ -3,7 +3,8 @@
 //! snapshot of the view when it finishes.
 
 use std::fs::{self, OpenOptions};
-use std::path::PathBuf;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Instant;
 
@@ -37,6 +38,92 @@ pub struct RunOutcome {
     pub run: Run,
     pub attempt: Attempt,
     pub snapshot: Snapshot,
+    /// For Claude Code commands: how many snapshots its hooks recorded.
+    pub hook_snapshots: Option<i64>,
+    /// Things that went quietly wrong, such as hooks that never fired.
+    pub warnings: Vec<String>,
+}
+
+/// Settings file, inside the space, that `agentvc run` passes to Claude Code
+/// with `--settings` so its hooks fire where `settings.local.json` is ignored.
+pub const CLAUDE_HOOKS_FILE: &str = "claude-hooks.json";
+
+/// What [`with_claude_hooks`] decided for a command.
+#[derive(Clone, Debug, Serialize)]
+pub struct HookInjection {
+    /// The command to run, with `--settings <file>` added when `settings` is set.
+    pub command: Vec<String>,
+    /// The settings file that was added, if any.
+    pub settings: Option<PathBuf>,
+    /// Why nothing was added, for Claude Code commands that were left alone.
+    pub skipped: Option<String>,
+}
+
+/// Whether `program` starts Claude Code.
+pub fn is_claude_code(program: &str) -> bool {
+    Path::new(program)
+        .file_name()
+        .is_some_and(|n| n == "claude" || n == "claude.exe")
+}
+
+/// Whether this process runs inside a Claude Code cloud session, which only
+/// reads `.claude/settings.json` (not `settings.local.json`).
+pub fn in_remote_claude_session() -> bool {
+    std::env::var_os("CLAUDE_CODE_REMOTE").is_some_and(|v| !v.is_empty() && v != "false")
+}
+
+/// Make sure a Claude Code command loads agentvc's hooks.
+///
+/// Claude Code sessions in the cloud ignore `.claude/settings.local.json`,
+/// where `agentvc hooks` installs them, so the attempt would only get its
+/// `run-exit` snapshot. For a `claude` command this writes the hooks into
+/// `.agentvc/claude-hooks.json` and adds `--settings <that file>`, unless
+/// the command already passes `--settings` or `--plugin-dir`, or (outside a
+/// cloud session) the view's own settings already install the hooks.
+/// Other commands are returned unchanged.
+pub fn with_claude_hooks(
+    space: &Space,
+    view: &Path,
+    command: &[String],
+    exe: &Path,
+    remote: bool,
+) -> Result<HookInjection> {
+    let unchanged = |why: Option<String>| HookInjection {
+        command: command.to_vec(),
+        settings: None,
+        skipped: why,
+    };
+    let Some((program, args)) = command.split_first() else {
+        return Ok(unchanged(None));
+    };
+    if !is_claude_code(program) {
+        return Ok(unchanged(None));
+    }
+    for flag in ["--settings", "--plugin-dir"] {
+        if args
+            .iter()
+            .any(|a| a == flag || a.starts_with(&format!("{flag}=")))
+        {
+            return Ok(unchanged(Some(format!("the command passes {flag}"))));
+        }
+    }
+    if !remote {
+        for f in [".claude/settings.local.json", ".claude/settings.json"] {
+            if crate::hooks::installed_in(&view.join(f)) {
+                return Ok(unchanged(Some(format!("hooks are installed in {f}"))));
+            }
+        }
+    }
+    let path = space.workdir().join(SPACE_DIR).join(CLAUDE_HOOKS_FILE);
+    crate::hooks::write_standalone(&path, exe)?;
+    let mut cmd = vec![program.clone(), "--settings".into()];
+    cmd.push(path.to_string_lossy().into_owned());
+    cmd.extend(args.iter().cloned());
+    Ok(HookInjection {
+        command: cmd,
+        settings: Some(path),
+        skipped: None,
+    })
 }
 
 /// Environment variables set for the command, so agents and hooks can find
@@ -291,6 +378,35 @@ pub fn execute(space: &Space, run_id: i64) -> Result<RunOutcome> {
         None => space.attempt(attempt.id)?,
     };
 
+    let mut warnings = Vec::new();
+    let hook_snapshots = if is_claude_code(program) && spawn_error.is_none() {
+        let n: i64 = space.db.query_row(
+            "SELECT COUNT(*) FROM snapshots
+             WHERE attempt_id = ?1 AND json_extract(meta, '$.hook') IS NOT NULL",
+            params![attempt.id],
+            |r| r.get(0),
+        )?;
+        if n == 0 {
+            warnings.push(format!(
+                "Claude Code ran in a{} but its hooks recorded no snapshots, so the \
+                 attempt has no per-tool-call history. Let `agentvc run` add them (drop \
+                 --no-hooks), or pass claude `--settings` with a file that has agentvc's \
+                 hooks (see `agentvc hooks`)",
+                attempt.id,
+            ));
+        }
+        Some(n)
+    } else {
+        None
+    };
+    if let Some(p) = &run.log_path {
+        if let Ok(mut f) = OpenOptions::new().append(true).open(p) {
+            for w in &warnings {
+                let _ = writeln!(f, "[agentvc] warning: {w}");
+            }
+        }
+    }
+
     if let Some(e) = spawn_error {
         return Err(Error::Spawn {
             program: program.clone(),
@@ -301,6 +417,8 @@ pub fn execute(space: &Space, run_id: i64) -> Result<RunOutcome> {
         run: space.run(run_id)?,
         attempt,
         snapshot,
+        hook_snapshots,
+        warnings,
     })
 }
 
@@ -396,6 +514,89 @@ mod tests {
         assert_eq!(err.code(), "spawn_failed");
         assert_eq!(space.run(run.id).unwrap().exit_code, Some(127));
         assert_eq!(space.attempt(a).unwrap().status, Status::Failed);
+    }
+
+    /// A fake `claude` that records its arguments in `$AGENTVC_VIEW/args`.
+    fn fake_claude(dir: &Path) -> PathBuf {
+        let bin = dir.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        let path = bin.join("claude");
+        fs::write(
+            &path,
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$AGENTVC_VIEW/args\"\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        path
+    }
+
+    #[test]
+    fn claude_commands_get_the_hooks_settings() {
+        let (tmp, space, a) = space_with_attempt();
+        let view = space.attempt(a).unwrap().view_path;
+        let claude = fake_claude(tmp.path()).to_string_lossy().into_owned();
+        let exe = Path::new("/opt/agentvc");
+        let cmd = vec![claude.clone(), "-p".into(), "hi".into()];
+
+        let inj = with_claude_hooks(&space, &view, &cmd, exe, true).unwrap();
+        let settings = inj.settings.clone().expect("settings added");
+        assert_eq!(inj.command[1], "--settings");
+        assert_eq!(inj.command[2], settings.to_string_lossy());
+        assert_eq!(&inj.command[3..], &cmd[1..]);
+        assert!(crate::hooks::installed_in(&settings));
+
+        // Other commands, explicit --settings and --plugin-dir are left alone.
+        let other = with_claude_hooks(&space, &view, &sh("true"), exe, true).unwrap();
+        assert_eq!(other.command, sh("true"));
+        assert!(other.skipped.is_none());
+        let own = vec![claude.clone(), "--settings=x.json".into()];
+        let r = with_claude_hooks(&space, &view, &own, exe, true).unwrap();
+        assert_eq!(r.command, own);
+        assert!(r.skipped.unwrap().contains("--settings"));
+
+        // Locally, hooks installed in the view's settings are enough...
+        crate::hooks::install(&view.join(".claude/settings.local.json"), exe).unwrap();
+        let r = with_claude_hooks(&space, &view, &cmd, exe, false).unwrap();
+        assert_eq!(r.command, cmd);
+        assert!(r.skipped.unwrap().contains("settings.local.json"));
+        // ...but a cloud session ignores that file.
+        let r = with_claude_hooks(&space, &view, &cmd, exe, true).unwrap();
+        assert!(r.settings.is_some());
+
+        // The fake claude saw the flag.
+        let run = space.create_run(a, &inj.command, None, true).unwrap();
+        let out = execute(&space, run.id).unwrap();
+        let args = fs::read_to_string(view.join("args")).unwrap();
+        assert!(args.starts_with("--settings\n"), "{args}");
+        // It never ran the hook, so the run warns.
+        assert_eq!(out.hook_snapshots, Some(0));
+        assert_eq!(out.warnings.len(), 1, "{:?}", out.warnings);
+        let log = fs::read_to_string(out.run.log_path.unwrap()).unwrap();
+        assert!(log.contains("warning: Claude Code ran"), "{log}");
+    }
+
+    #[test]
+    fn no_warning_when_hooks_snapshot_or_command_is_not_claude() {
+        let (_tmp, space, a) = space_with_attempt();
+        let run = space.create_run(a, &sh("true"), None, true).unwrap();
+        let out = execute(&space, run.id).unwrap();
+        assert_eq!(out.hook_snapshots, None);
+        assert!(out.warnings.is_empty());
+
+        // A hook snapshot during the run silences the warning.
+        let (tmp, space, a) = space_with_attempt();
+        let claude = fake_claude(tmp.path()).to_string_lossy().into_owned();
+        space
+            .snapshot_with(a, "stop", Some(serde_json::json!({ "hook": "stop" })), true)
+            .unwrap();
+        let run = space.create_run(a, &[claude], None, true).unwrap();
+        let out = execute(&space, run.id).unwrap();
+        assert_eq!(out.hook_snapshots, Some(1));
+        assert!(out.warnings.is_empty());
     }
 
     #[test]

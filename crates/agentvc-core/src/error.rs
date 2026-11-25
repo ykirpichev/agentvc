@@ -56,6 +56,18 @@ pub enum Error {
     },
     #[error("the root attempt a1 is the host checkout; update it with git, not agentvc rebase")]
     RootAttempt,
+    #[error(
+        "{refname} on {remote} moved to {tip} since this space last synced (another machine \
+         continued it); clone it with `agentvc init --from-remote` elsewhere, or pass --force \
+         to overwrite"
+    )]
+    SyncConflict {
+        refname: String,
+        remote: String,
+        tip: String,
+    },
+    #[error("several spaces match on the remote: {}; pass --space <id>", ids.join(", "))]
+    AmbiguousSpace { ids: Vec<String> },
     #[error("io error at {path}: {source}")]
     Io {
         path: PathBuf,
@@ -98,6 +110,8 @@ impl Error {
             Error::ViewUnmounted { .. } => "view_unmounted",
             Error::Conflict { .. } => "conflict",
             Error::RootAttempt => "root_attempt",
+            Error::SyncConflict { .. } => "sync_conflict",
+            Error::AmbiguousSpace { .. } => "ambiguous_space",
             Error::Io { .. } => "io",
             Error::Spawn { .. } => "spawn_failed",
             Error::Db(_) => "db",
@@ -118,6 +132,10 @@ impl Error {
                 "onto": onto,
                 "paths": paths,
             })),
+            Error::AmbiguousSpace { ids } => Some(serde_json::json!({ "spaces": ids })),
+            Error::SyncConflict { refname, tip, .. } => {
+                Some(serde_json::json!({ "ref": refname, "tip": tip }))
+            }
             _ => None,
         }
     }

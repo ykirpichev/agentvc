@@ -189,6 +189,35 @@ pub fn install(path: &Path, exe: &Path) -> Result<Value> {
     Ok(settings)
 }
 
+/// Whether the Claude Code settings file at `path` has our hooks.
+pub fn installed_in(path: &Path) -> bool {
+    let Ok(settings) = read_settings(path) else {
+        return false;
+    };
+    let Some(hooks) = settings.get("hooks").and_then(Value::as_object) else {
+        return false;
+    };
+    hooks
+        .values()
+        .filter_map(Value::as_array)
+        .flatten()
+        .filter_map(|g| g.get("hooks").and_then(Value::as_array))
+        .flatten()
+        .filter_map(|h| h.get("command").and_then(Value::as_str))
+        .any(is_ours)
+}
+
+/// Write a settings file at `path` that holds only our hooks, for
+/// `claude --settings <path>`. Replaces whatever was there.
+pub fn write_standalone(path: &Path, exe: &Path) -> Result<Value> {
+    match fs::remove_file(path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e).at(path),
+    }
+    install(path, exe)
+}
+
 /// Remove our hooks from the settings file at `path`.
 pub fn uninstall(path: &Path) -> Result<Value> {
     let mut settings = read_settings(path)?;
@@ -234,6 +263,19 @@ mod tests {
         let v = uninstall(&path).unwrap();
         assert_eq!(v["hooks"]["PostToolUse"].as_array().unwrap().len(), 1);
         assert!(v["hooks"].get("Stop").is_none());
+    }
+
+    #[test]
+    fn installed_in_and_standalone() {
+        let tmp = crate::testutil::tempdir();
+        let path = tmp.path().join("hooks.json");
+        assert!(!installed_in(&path));
+        fs::write(&path, r#"{"model":"x"}"#).unwrap();
+        let v = write_standalone(&path, Path::new("/bin/agentvc")).unwrap();
+        assert!(v.get("model").is_none(), "{v}");
+        assert!(installed_in(&path));
+        uninstall(&path).unwrap();
+        assert!(!installed_in(&path));
     }
 
     #[test]

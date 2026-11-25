@@ -15,6 +15,7 @@ pub mod rebase;
 pub mod run;
 pub mod snapshot;
 pub mod space;
+pub mod sync;
 pub mod view;
 
 #[cfg(test)]
@@ -28,6 +29,7 @@ pub use rebase::{GitBase, RebaseOptions, RebaseResult};
 pub use space::{
     Attempt, ForkRequest, ForkResult, Ref, Snapshot, SnapshotResult, Space, Status, Task,
 };
+pub use sync::{CloneOptions, CloneResult, RemoteSpace, SyncOptions, SyncResult};
 
 /// Version of the on-disk format written by this build.
 pub const FORMAT_VERSION: u32 = 1;

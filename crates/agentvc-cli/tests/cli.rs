@@ -508,6 +508,42 @@ fn pr_pushes_branch_and_opens_pr_with_rejected_attempts() {
     let commit = v["pr"]["export"]["commit"].as_str().unwrap().to_string();
     assert_eq!(git(&remote, &["rev-parse", "agentvc/a2"]), commit);
 
+    // The whole space went to the remote too, losers included (#56).
+    let sync_ref = v["sync"]["ref"].as_str().unwrap().to_string();
+    assert!(sync_ref.starts_with("refs/agentvc/spaces/"), "{v}");
+    assert_eq!(
+        git(&remote, &["rev-parse", &sync_ref]),
+        v["sync"]["commit"].as_str().unwrap()
+    );
+    // Another machine rebuilds the same attempt tree from it.
+    git(&w, &["push", "-q", "origin", "main"]);
+    let other = tmp.path().join("other");
+    git(
+        tmp.path(),
+        &[
+            "clone",
+            "-q",
+            remote.to_str().unwrap(),
+            other.to_str().unwrap(),
+        ],
+    );
+    let v = agentvc(&other, &["init", "--from-remote", "--no-prepare"]);
+    assert_eq!(v["ok"], true, "{v}");
+    let strip = |mut v: Value| {
+        for a in v["attempts"].as_array_mut().unwrap() {
+            a.as_object_mut().unwrap().remove("view_path");
+            a.as_object_mut().unwrap().remove("backend");
+        }
+        v
+    };
+    assert_eq!(
+        strip(agentvc(&other, &["log"])),
+        strip(agentvc(&w, &["log"]))
+    );
+    let v = agentvc(&other, &["show", "a3"]);
+    assert_eq!(v["attempt"]["reason"], "lost to a2");
+    assert_eq!(v["snapshots"].as_array().unwrap().len(), 1);
+
     {
         let log = log.lock().unwrap();
         let (_, _, body) = log.iter().find(|(m, _, _)| m == "POST").unwrap();
