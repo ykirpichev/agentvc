@@ -10,6 +10,7 @@ Status: early. Milestone M1 (core model and views) is in progress.
 - Design: [docs/design.md](docs/design.md)
 - Core library: [crates/agentvc-core](crates/agentvc-core)
 - CLI: [crates/agentvc-cli](crates/agentvc-cli)
+- MCP server: [crates/agentvc-mcp](crates/agentvc-mcp)
 - Review UI: [ui](ui)
 
 ## Try it
@@ -42,6 +43,58 @@ Record `tests` and `cost` with `snapshot --meta` and they show up in the PR body
 Every command takes `--json` and returns one JSON object; errors carry a
 stable `error.code`. Benchmark forks against `git worktree` with
 `scripts/bench-fork.sh <repo>`.
+
+## MCP server
+
+`agentvc mcp` serves the agentvc commands to coding agents over the Model
+Context Protocol (stdio). Tools: `task_new`, `task_list`, `fork`, `snapshot`,
+`mark`, `abandon`, `promote`, `log`, `show`, `diff`, `path`, `run`, `ps`, `pr`.
+Each one runs the matching command with `--json` and returns the same JSON,
+with `isError` set and the stable `error.code` (for example `no_space`) on
+failure. Resources: `agentvc://tree` (attempts of the current task) and
+`agentvc://attempt/aN` (metadata, snapshots and changed files).
+
+Commands run in the directory the server starts in, or `--space DIR`. That
+picks the space and the "current attempt", so start it inside a view to make
+`fork` and `snapshot` default to that attempt. Differences from the CLI
+defaults: `fork` and `run` use actor `agent`, `snapshot` uses trigger `mcp`,
+and `run` detaches unless `detach: false`.
+
+Claude Code (run in the repo):
+
+```sh
+claude mcp add agentvc -- agentvc mcp
+```
+
+Claude Desktop (`claude_desktop_config.json`; Desktop has no working
+directory, so pass the space):
+
+```json
+{
+  "mcpServers": {
+    "agentvc": {
+      "command": "/path/to/agentvc",
+      "args": ["mcp", "--space", "/path/to/your/repo"]
+    }
+  }
+}
+```
+
+Cursor (`.cursor/mcp.json` in the repo):
+
+```json
+{
+  "mcpServers": {
+    "agentvc": {
+      "command": "agentvc",
+      "args": ["mcp", "--space", "${workspaceFolder}"]
+    }
+  }
+}
+```
+
+Try it by hand with the MCP inspector:
+`npx @modelcontextprotocol/inspector agentvc mcp`.
 
 ## Build
 

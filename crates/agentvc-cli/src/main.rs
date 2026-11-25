@@ -176,6 +176,16 @@ enum Cmd {
         #[arg(long)]
         uninstall: bool,
     },
+    /// Serve the agentvc tools to coding agents over MCP (stdio).
+    ///
+    /// Each tool runs the matching command with `--json` and returns its
+    /// JSON. Commands run in --space (or -C, or the current directory), which
+    /// picks the space and the current attempt.
+    Mcp {
+        /// Directory to run commands in. Defaults to -C or the current directory.
+        #[arg(long, value_name = "DIR")]
+        space: Option<PathBuf>,
+    },
     /// Hook handler called by Claude Code; reads the hook JSON on stdin.
     /// Always exits 0 so a hook can never break an agent session.
     Hook {
@@ -207,6 +217,9 @@ struct Out {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    if let Cmd::Mcp { space } = &cli.cmd {
+        return mcp(space.as_ref().or(cli.dir.as_ref()));
+    }
     let as_json = cli.json;
     match run(cli) {
         Ok(out) => {
@@ -237,6 +250,26 @@ fn main() -> ExitCode {
             } else {
                 eprintln!("error[{code}]: {message}");
             }
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// `agentvc mcp`: serve until stdin closes. A missing space is not an error
+/// here; tools report `no_space` when called.
+fn mcp(dir: Option<&PathBuf>) -> ExitCode {
+    let started = (|| -> std::io::Result<()> {
+        let cwd = std::env::current_dir()?;
+        let dir = match dir {
+            Some(d) => cwd.join(d),
+            None => cwd,
+        };
+        agentvc_mcp::Server::new(std::env::current_exe()?, dir).serve_stdio()
+    })();
+    match started {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("agentvc mcp: {e}");
             ExitCode::FAILURE
         }
     }
@@ -290,7 +323,7 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
     let current = || -> anyhow::Result<i64> { Ok(space.attempt_for_path(&cwd)?.id) };
 
     Ok(match cli.cmd {
-        Cmd::Init | Cmd::Hook { .. } | Cmd::Hooks { .. } => unreachable!(),
+        Cmd::Init | Cmd::Hook { .. } | Cmd::Hooks { .. } | Cmd::Mcp { .. } => unreachable!(),
         Cmd::Task(TaskCmd::New { goal, criteria }) => {
             let t = space.create_task(&goal, criteria.as_deref())?;
             Out {
