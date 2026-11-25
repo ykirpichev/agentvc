@@ -1,6 +1,8 @@
 {
   "name": "agentvc",
-  "owner": { "name": "agentvc" },
+  "owner": {
+    "name": "agentvc"
+  },
   "metadata": {
     "description": "Claude Code plugins for agentvc, agent-first version control."
   },
@@ -9,6 +11,11 @@
       "name": "agentvc",
       "source": "./integrations/claude-code",
       "description": "Snapshot every edit into an agentvc attempt, drive the attempt tree over MCP, and fork, compare and promote attempts with slash commands."
+    },
+    {
+      "name": "agentvc-panel",
+      "source": "./integrations/claude-desktop",
+      "description": "A pane beside the chat showing agentvc tasks, each task's attempt tree, and the agents running now."
     }
   ]
 }

@@ -64,6 +64,19 @@ stable `error.code`. Benchmark forks against `git worktree` with
 - `copy`: plain copy, the fallback. `--json` output says why in
   `fork.backend_reason`.
 
+## Side panel in Claude
+
+`integrations/claude-desktop` is a Claude Code plugin that shows the attempt
+tree and running agents in a pane beside the chat (desktop app Code tab or
+terminal), read live from agentvcd:
+
+```
+/plugin install agentvc-panel --marketplace ykirpichev/agentvc
+```
+
+See [its README](integrations/claude-desktop/README.md) for the desktop app
+steps and options.
+
 ## MCP server
 
 `agentvc mcp` serves the agentvc commands to coding agents over the Model
