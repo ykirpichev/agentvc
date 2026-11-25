@@ -21,6 +21,7 @@ pub const MAX_FILE_BYTES: usize = 2 * 1024 * 1024;
 pub(crate) fn routes() -> Router<AppState> {
     Router::new()
         .route("/space", get(space_info))
+        .route("/overview", get(overview))
         .route("/tasks", get(list_tasks))
         .route("/tasks/{id}", get(get_task))
         .route("/attempts", get(list_attempts))
@@ -148,6 +149,12 @@ async fn space_info(State(st): State<AppState>) -> ApiResult<SpaceInfo> {
         format_version: agentvc_core::FORMAT_VERSION,
         daemon_version: env!("CARGO_PKG_VERSION"),
     }))
+}
+
+/// The whole-space summary that `agentvc overview` writes, for side panels
+/// and other dashboards that want one request instead of many.
+async fn overview(State(st): State<AppState>) -> ApiResult<agentvc_core::Overview> {
+    Ok(Json(st.with_space(|s| s.overview()).await?))
 }
 
 // ---- tasks ----------------------------------------------------------------

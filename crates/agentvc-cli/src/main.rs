@@ -205,6 +205,16 @@ enum Cmd {
         #[arg(last = true, required = true)]
         command: Vec<String>,
     },
+    /// Summarize the whole space as one JSON document: tasks, attempt trees,
+    /// statuses and reasons, latest runs and PRs (schema agentvc.overview/1).
+    ///
+    /// Used by dashboards outside the daemon, such as the Claude project
+    /// artifact; see docs/overview.md.
+    Overview {
+        /// Write the document to this file (pretty JSON) instead of printing it.
+        #[arg(long, value_name = "FILE")]
+        out: Option<PathBuf>,
+    },
     /// List runs that have not finished (or all with --all).
     Ps {
         #[arg(long)]
@@ -568,6 +578,7 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
             out.json["closed_siblings"] = json!(closed);
             out
         }
+        Cmd::Overview { out } => overview_out(&space, out.as_deref(), cli.json)?,
         Cmd::Log { task } => {
             let task = task.map(|t| parse_id(&t, 't', "task")).transpose()?;
             let attempts = space.attempts(task)?;
@@ -890,6 +901,56 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
                 json: json!({ "pr": r }),
             }
         }
+    })
+}
+
+fn overview_out(
+    space: &Space,
+    out: Option<&std::path::Path>,
+    as_json: bool,
+) -> anyhow::Result<Out> {
+    let o = space.overview()?;
+    let mut text = String::new();
+    for t in &o.tasks {
+        let c = &t.counts;
+        text += &format!(
+            "{}  {}  {}  ({} attempts{}{})\n",
+            t.id,
+            serde_json::to_value(t.state)?.as_str().unwrap_or_default(),
+            t.goal,
+            c.total,
+            if c.running > 0 {
+                format!(", {} running", c.running)
+            } else {
+                String::new()
+            },
+            t.winner
+                .as_ref()
+                .map(|w| format!(", winner {w}"))
+                .unwrap_or_default(),
+        );
+    }
+    if o.tasks.is_empty() {
+        text = "no tasks".into();
+    }
+    let Some(path) = out else {
+        // Plain `agentvc overview --json` prints the document itself under
+        // "overview"; text mode prints one line per task.
+        return Ok(Out {
+            text: if as_json { String::new() } else { text },
+            json: json!({ "overview": o }),
+        });
+    };
+    let body = serde_json::to_string_pretty(&o)?;
+    std::fs::write(path, &body).map_err(|e| anyhow::anyhow!("writing {}: {e}", path.display()))?;
+    Ok(Out {
+        text: format!("{text}\nWrote {} ({} bytes)", path.display(), body.len()),
+        json: json!({
+            "written": path,
+            "bytes": body.len(),
+            "tasks": o.tasks.len(),
+            "attempts": o.space.counts.total,
+        }),
     })
 }
 
