@@ -16,6 +16,10 @@ use crate::objects::{Mode, ObjectStore, Oid, TreeEntry};
 /// Directory names never captured in a snapshot, at any depth.
 pub const ALWAYS_SKIPPED: &[&str] = &[".git", ".agentvc"];
 
+/// Files (relative to the view root) never captured: machine-local settings
+/// such as the Claude Code hook config written by `agentvc hooks`.
+pub const ALWAYS_SKIPPED_FILES: &[&str] = &[".claude/settings.local.json"];
+
 /// Capture `dir` into `store` and return the root tree id.
 pub fn capture(store: &ObjectStore, dir: &Path) -> Result<Oid> {
     let mut files: BTreeMap<PathBuf, (Mode, Oid)> = BTreeMap::new();
@@ -27,9 +31,16 @@ pub fn capture(store: &ObjectStore, dir: &Path) -> Result<Oid> {
         .require_git(false)
         .parents(false)
         .follow_links(false)
-        .filter_entry(|e| {
-            !(e.file_type().is_some_and(|t| t.is_dir())
-                && ALWAYS_SKIPPED.iter().any(|s| e.file_name() == *s))
+        .filter_entry({
+            let root = dir.to_path_buf();
+            move |e| {
+                let is_dir = e.file_type().is_some_and(|t| t.is_dir());
+                if is_dir && ALWAYS_SKIPPED.iter().any(|s| e.file_name() == *s) {
+                    return false;
+                }
+                let rel = e.path().strip_prefix(&root).unwrap_or(e.path());
+                !ALWAYS_SKIPPED_FILES.iter().any(|f| rel == Path::new(f))
+            }
         })
         .build();
     for entry in walker {
@@ -225,6 +236,8 @@ mod tests {
         fs::write(work.join("src/lib.rs"), "fn a() {}\n").unwrap();
         fs::write(work.join("src/nested/x.txt"), "x\n").unwrap();
         fs::write(work.join(".gitignore"), "target/\n").unwrap();
+        fs::create_dir_all(work.join(".claude")).unwrap();
+        fs::write(work.join(".claude/settings.local.json"), "{}").unwrap();
         fs::create_dir_all(work.join("target")).unwrap();
         fs::write(work.join("target/big.bin"), "ignored").unwrap();
         fs::create_dir_all(work.join(".git")).unwrap();

@@ -126,6 +126,22 @@ enum Cmd {
     },
     #[command(hide = true)]
     RunWorker { run: i64 },
+    /// Install or remove Claude Code hooks that snapshot attempts per tool call.
+    Hooks {
+        /// Write ~/.claude/settings.json instead of this repo's
+        /// .claude/settings.local.json.
+        #[arg(long)]
+        user: bool,
+        /// Remove agentvc's hooks instead of installing them.
+        #[arg(long)]
+        uninstall: bool,
+    },
+    /// Hook handler called by Claude Code; reads the hook JSON on stdin.
+    /// Always exits 0 so a hook can never break an agent session.
+    Hook {
+        #[arg(value_parser = ["post-tool-use", "stop", "subagent-stop"])]
+        event: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -225,11 +241,16 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
             json: json!({ "workdir": space.workdir(), "attempt": 1, "snapshot": snap }),
         });
     }
+    match &cli.cmd {
+        Cmd::Hook { event } => return Ok(run_hook(event, &cwd, cli.json)),
+        Cmd::Hooks { user, uninstall } => return hooks_cmd(&cwd, *user, *uninstall),
+        _ => {}
+    }
     let space = Space::discover(&cwd)?;
     let current = || -> anyhow::Result<i64> { Ok(space.attempt_for_path(&cwd)?.id) };
 
     Ok(match cli.cmd {
-        Cmd::Init => unreachable!(),
+        Cmd::Init | Cmd::Hook { .. } | Cmd::Hooks { .. } => unreachable!(),
         Cmd::Task(TaskCmd::New { goal, criteria }) => {
             let t = space.create_task(&goal, criteria.as_deref())?;
             Out {
@@ -615,4 +636,53 @@ fn render_children(attempts: &[Attempt], parent: i64, prefix: &str, out: &mut St
         let next = format!("{prefix}{}", if last { "   " } else { "│  " });
         render_children(attempts, k.id, &next, out);
     }
+}
+
+fn run_hook(event: &str, cwd: &std::path::Path, as_json: bool) -> Out {
+    use std::io::Read;
+    let mut raw = String::new();
+    let _ = std::io::stdin().read_to_string(&mut raw);
+    let input: Value = serde_json::from_str(&raw).unwrap_or(json!({}));
+    let result = agentvc_core::hooks::handle(event, &input, cwd);
+    let json = match &result {
+        Ok(o) => json!({ "hook": o }),
+        Err(e) => {
+            json!({ "hook": { "result": "error", "code": e.code(), "message": e.to_string() } })
+        }
+    };
+    if let Err(e) = &result {
+        // Surface hook failures without failing the agent's tool call.
+        eprintln!("agentvc hook {event}: {e}");
+    }
+    Out {
+        // Claude Code shows hook stdout in transcripts; stay quiet in text mode.
+        text: String::new(),
+        json: if as_json { json } else { Value::Null },
+    }
+}
+
+fn hooks_cmd(cwd: &std::path::Path, user: bool, uninstall: bool) -> anyhow::Result<Out> {
+    let path = if user {
+        let home = std::env::var_os("HOME").ok_or_else(|| anyhow::anyhow!("HOME is not set"))?;
+        PathBuf::from(home).join(".claude/settings.json")
+    } else {
+        let root = Space::discover(cwd)
+            .map(|s| s.workdir().to_path_buf())
+            .unwrap_or_else(|_| cwd.to_path_buf());
+        root.join(".claude/settings.local.json")
+    };
+    let exe = std::env::current_exe()?;
+    if uninstall {
+        agentvc_core::hooks::uninstall(&path)?;
+    } else {
+        agentvc_core::hooks::install(&path, &exe)?;
+    }
+    Ok(Out {
+        text: format!(
+            "{} Claude Code hooks in {}",
+            if uninstall { "Removed" } else { "Installed" },
+            path.display()
+        ),
+        json: json!({ "settings": path, "installed": !uninstall, "exe": exe }),
+    })
 }
