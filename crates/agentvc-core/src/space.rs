@@ -608,6 +608,17 @@ impl Space {
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
 
+    /// Snapshots of every attempt with an id above `after_id`, oldest first.
+    /// Lets watchers (the daemon's event stream) pick up new work cheaply.
+    pub fn snapshots_after(&self, after_id: i64) -> Result<Vec<Snapshot>> {
+        let mut stmt = self.db.prepare(&format!(
+            "SELECT {} FROM snapshots WHERE id > ?1 ORDER BY id",
+            Self::SNAPSHOT_COLS
+        ))?;
+        let rows = stmt.query_map(params![after_id], Self::row_to_snapshot)?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
     /// The latest snapshot of an attempt. A freshly forked attempt with no
     /// snapshot of its own reports its parent snapshot.
     pub fn head_snapshot(&self, attempt_id: i64) -> Result<Snapshot> {
