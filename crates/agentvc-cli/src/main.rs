@@ -6,7 +6,8 @@
 //! with status 1. Nothing ever prompts for input.
 
 use std::path::PathBuf;
-use std::process::ExitCode;
+use std::process::{ExitCode, Stdio};
+use std::sync::atomic::{AtomicI32, Ordering};
 
 use agentvc_core::snapshot::ChangeKind;
 use agentvc_core::{Attempt, Error, ExportOptions, ForkRequest, PrOptions, Ref, Space, Status};
@@ -129,6 +130,58 @@ enum Cmd {
         #[arg(long)]
         force: bool,
     },
+    /// Fork a new attempt and run a command (usually an agent) inside its view.
+    ///
+    /// The view is snapshotted when the command exits. With --check, the
+    /// attempt is marked passed or failed by the check's exit code; without
+    /// it, a non-zero exit marks it failed. In text mode `agentvc run` exits
+    /// with the command's exit code.
+    Run {
+        /// Task this attempt works on (tN or N).
+        #[arg(long)]
+        task: Option<String>,
+        /// What to fork from: aN or sN. Defaults to the attempt of the current directory.
+        #[arg(long)]
+        from: Option<String>,
+        #[arg(long, default_value = "agent")]
+        actor: String,
+        #[arg(long)]
+        model: Option<String>,
+        #[arg(long)]
+        prompt: Option<String>,
+        /// Shell command run in the view afterwards to judge the attempt.
+        #[arg(long)]
+        check: Option<String>,
+        /// Start in the background and return at once; see `agentvc ps`.
+        #[arg(long)]
+        detach: bool,
+        /// The command to run, after `--`.
+        #[arg(last = true, required = true)]
+        command: Vec<String>,
+    },
+    /// List runs that have not finished (or all with --all).
+    Ps {
+        #[arg(long)]
+        all: bool,
+    },
+    #[command(hide = true)]
+    RunWorker { run: i64 },
+    /// Install or remove Claude Code hooks that snapshot attempts per tool call.
+    Hooks {
+        /// Write ~/.claude/settings.json instead of this repo's
+        /// .claude/settings.local.json.
+        #[arg(long)]
+        user: bool,
+        /// Remove agentvc's hooks instead of installing them.
+        #[arg(long)]
+        uninstall: bool,
+    },
+    /// Hook handler called by Claude Code; reads the hook JSON on stdin.
+    /// Always exits 0 so a hook can never break an agent session.
+    Hook {
+        #[arg(value_parser = ["post-tool-use", "stop", "subagent-stop"])]
+        event: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -144,6 +197,9 @@ enum TaskCmd {
 }
 
 /// Output of a command: JSON for `--json`, text otherwise.
+/// Exit code to use in text mode instead of 0 (set by `run`).
+static EXIT_OVERRIDE: AtomicI32 = AtomicI32::new(0);
+
 struct Out {
     json: Value,
     text: String,
@@ -163,7 +219,10 @@ fn main() -> ExitCode {
             } else if !out.text.is_empty() {
                 println!("{}", out.text.trim_end());
             }
-            ExitCode::SUCCESS
+            match EXIT_OVERRIDE.load(Ordering::Relaxed) {
+                c if c > 0 && !as_json => ExitCode::from(c.min(255) as u8),
+                _ => ExitCode::SUCCESS,
+            }
         }
         Err(e) => {
             let (code, message) = match e.downcast_ref::<Error>() {
@@ -222,11 +281,16 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
             json: json!({ "workdir": space.workdir(), "attempt": 1, "snapshot": snap }),
         });
     }
+    match &cli.cmd {
+        Cmd::Hook { event } => return Ok(run_hook(event, &cwd, cli.json)),
+        Cmd::Hooks { user, uninstall } => return hooks_cmd(&cwd, *user, *uninstall),
+        _ => {}
+    }
     let space = Space::discover(&cwd)?;
     let current = || -> anyhow::Result<i64> { Ok(space.attempt_for_path(&cwd)?.id) };
 
     Ok(match cli.cmd {
-        Cmd::Init => unreachable!(),
+        Cmd::Init | Cmd::Hook { .. } | Cmd::Hooks { .. } => unreachable!(),
         Cmd::Task(TaskCmd::New { goal, criteria }) => {
             let t = space.create_task(&goal, criteria.as_deref())?;
             Out {
@@ -419,6 +483,126 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
                 json: json!({ "from": from.to_string(), "to": to.to_string(), "changes": changes }),
             }
         }
+        Cmd::Run {
+            task,
+            from,
+            actor,
+            model,
+            prompt,
+            check,
+            detach,
+            command,
+        } => {
+            let from = match from {
+                Some(f) => parse_ref(&f)?,
+                None => Ref::Attempt(current()?),
+            };
+            let fork = space.fork(&ForkRequest {
+                task_id: task.map(|t| parse_id(&t, 't', "task")).transpose()?,
+                from: Some(from),
+                actor,
+                model,
+                prompt,
+            })?;
+            let a = fork.attempt.id;
+            // Child output would corrupt --json, and a detached run has no terminal.
+            let log_to_file = detach || cli.json;
+            let run = space.create_run(a, &command, check.as_deref(), log_to_file)?;
+            if detach {
+                let log = run.log_path.clone().expect("detached runs log to a file");
+                let f = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&log)?;
+                let mut worker = std::process::Command::new(std::env::current_exe()?);
+                worker
+                    .arg("-C")
+                    .arg(space.workdir())
+                    .arg("run-worker")
+                    .arg(run.id.to_string())
+                    .stdin(Stdio::null())
+                    .stdout(f.try_clone()?)
+                    .stderr(f);
+                #[cfg(unix)]
+                {
+                    use std::os::unix::process::CommandExt;
+                    // Own process group, so closing the terminal doesn't stop it.
+                    worker.process_group(0);
+                }
+                let child = worker.spawn()?;
+                Out {
+                    text: format!(
+                        "a{a} started in background (run r{}, pid {})\nview {}\nlog  {}",
+                        run.id,
+                        child.id(),
+                        fork.attempt.view_path.display(),
+                        log.display()
+                    ),
+                    json: json!({ "attempt": fork.attempt, "run": run, "pid": child.id() }),
+                }
+            } else {
+                let out = agentvc_core::run::execute(&space, run.id)?;
+                let code = out.run.exit_code.unwrap_or(1);
+                EXIT_OVERRIDE.store(code, Ordering::Relaxed);
+                Out {
+                    text: format!(
+                        "a{a} {}  exit {}{}  {} ms  snapshot s{}",
+                        out.attempt.status,
+                        code,
+                        out.run
+                            .check_exit_code
+                            .map(|c| format!(", check {c}"))
+                            .unwrap_or_default(),
+                        out.run.duration_ms.unwrap_or(0),
+                        out.snapshot.id
+                    ),
+                    json: json!({ "attempt": out.attempt, "run": out.run, "snapshot": out.snapshot }),
+                }
+            }
+        }
+        Cmd::RunWorker { run } => {
+            let out = agentvc_core::run::execute(&space, run)?;
+            Out {
+                text: format!(
+                    "[agentvc] r{run} finished: exit {}, a{} {}",
+                    out.run.exit_code.unwrap_or(-1),
+                    out.attempt.id,
+                    out.attempt.status
+                ),
+                json: json!({ "run": out.run }),
+            }
+        }
+        Cmd::Ps { all } => {
+            let runs = space.runs(!all)?;
+            let mut text = String::new();
+            for r in &runs {
+                let state = match (r.exit_code, r.alive) {
+                    (Some(c), _) => format!("exit {c}"),
+                    (None, Some(true)) => "running".to_string(),
+                    _ => "lost".to_string(),
+                };
+                text += &format!(
+                    "r{}  a{}  {:<8}  pid {}  {}\n",
+                    r.id,
+                    r.attempt_id,
+                    state,
+                    r.pid.map(|p| p.to_string()).unwrap_or("-".into()),
+                    r.command.join(" ")
+                );
+            }
+            if runs.is_empty() {
+                text = if all {
+                    "no runs"
+                } else {
+                    "no running attempts"
+                }
+                .into();
+            }
+            Out {
+                text,
+                json: json!({ "runs": runs }),
+            }
+        }
         Cmd::Path { attempt } => {
             let a = space.attempt(attempt_id(&attempt)?)?;
             Out {
@@ -554,4 +738,53 @@ fn render_children(attempts: &[Attempt], parent: i64, prefix: &str, out: &mut St
         let next = format!("{prefix}{}", if last { "   " } else { "│  " });
         render_children(attempts, k.id, &next, out);
     }
+}
+
+fn run_hook(event: &str, cwd: &std::path::Path, as_json: bool) -> Out {
+    use std::io::Read;
+    let mut raw = String::new();
+    let _ = std::io::stdin().read_to_string(&mut raw);
+    let input: Value = serde_json::from_str(&raw).unwrap_or(json!({}));
+    let result = agentvc_core::hooks::handle(event, &input, cwd);
+    let json = match &result {
+        Ok(o) => json!({ "hook": o }),
+        Err(e) => {
+            json!({ "hook": { "result": "error", "code": e.code(), "message": e.to_string() } })
+        }
+    };
+    if let Err(e) = &result {
+        // Surface hook failures without failing the agent's tool call.
+        eprintln!("agentvc hook {event}: {e}");
+    }
+    Out {
+        // Claude Code shows hook stdout in transcripts; stay quiet in text mode.
+        text: String::new(),
+        json: if as_json { json } else { Value::Null },
+    }
+}
+
+fn hooks_cmd(cwd: &std::path::Path, user: bool, uninstall: bool) -> anyhow::Result<Out> {
+    let path = if user {
+        let home = std::env::var_os("HOME").ok_or_else(|| anyhow::anyhow!("HOME is not set"))?;
+        PathBuf::from(home).join(".claude/settings.json")
+    } else {
+        let root = Space::discover(cwd)
+            .map(|s| s.workdir().to_path_buf())
+            .unwrap_or_else(|_| cwd.to_path_buf());
+        root.join(".claude/settings.local.json")
+    };
+    let exe = std::env::current_exe()?;
+    if uninstall {
+        agentvc_core::hooks::uninstall(&path)?;
+    } else {
+        agentvc_core::hooks::install(&path, &exe)?;
+    }
+    Ok(Out {
+        text: format!(
+            "{} Claude Code hooks in {}",
+            if uninstall { "Removed" } else { "Installed" },
+            path.display()
+        ),
+        json: json!({ "settings": path, "installed": !uninstall, "exe": exe }),
+    })
 }

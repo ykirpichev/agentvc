@@ -42,6 +42,12 @@ pub enum Error {
         #[source]
         source: std::io::Error,
     },
+    #[error("could not start {program:?}: {source}")]
+    Spawn {
+        program: String,
+        #[source]
+        source: std::io::Error,
+    },
     #[error("database error: {0}")]
     Db(#[from] rusqlite::Error),
     #[error("walk error: {0}")]
@@ -69,6 +75,7 @@ impl Error {
             Error::NoToken => "no_token",
             Error::GitHub { .. } => "github",
             Error::Io { .. } => "io",
+            Error::Spawn { .. } => "spawn_failed",
             Error::Db(_) => "db",
             Error::Walk(_) => "walk",
         }

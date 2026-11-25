@@ -10,6 +10,7 @@ publish.workspace = true
 flate2 = "1.1.11"
 hex = "0.4.3"
 ignore = "0.4.30"
+libc = "0.2.191"
 reflink-copy = "0.1.33"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 serde = { version = "1.0.229", features = ["derive"] }
