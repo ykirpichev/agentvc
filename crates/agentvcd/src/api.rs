@@ -1,4 +1,4 @@
-//! Read-only JSON API over the space.
+//! JSON API over the space. Reads live here; review actions in `review.rs`.
 
 use std::collections::BTreeMap;
 
@@ -13,7 +13,7 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::{events, AppState};
+use crate::{events, review, AppState};
 
 /// Files larger than this are listed but their content is not sent.
 pub const MAX_FILE_BYTES: usize = 2 * 1024 * 1024;
@@ -30,6 +30,7 @@ pub(crate) fn routes() -> Router<AppState> {
         .route("/diff", get(diff))
         .route("/file", get(file))
         .route("/events", get(events::websocket))
+        .merge(review::routes())
         .fallback(|| async {
             ApiError::new(
                 StatusCode::NOT_FOUND,
@@ -86,7 +87,7 @@ impl IntoResponse for ApiError {
     }
 }
 
-type ApiResult<T> = Result<Json<T>, ApiError>;
+pub(crate) type ApiResult<T> = Result<Json<T>, ApiError>;
 
 fn parse_ref(s: &str) -> Result<Ref, ApiError> {
     s.parse::<Ref>().map_err(ApiError::from)
@@ -101,7 +102,7 @@ fn parse_task_id(s: &str) -> Result<i64, ApiError> {
 }
 
 /// Accepts `a3` or `3`.
-fn parse_attempt_id(s: &str) -> Result<i64, ApiError> {
+pub(crate) fn parse_attempt_id(s: &str) -> Result<i64, ApiError> {
     s.strip_prefix('a')
         .unwrap_or(s)
         .parse()
@@ -143,16 +144,16 @@ async fn space_info(State(st): State<AppState>) -> ApiResult<SpaceInfo> {
 /// Number of attempts per status.
 #[derive(Default, Serialize)]
 pub struct StatusCounts {
-    total: usize,
-    exploring: usize,
-    passed: usize,
-    failed: usize,
-    abandoned: usize,
-    promoted: usize,
+    pub(crate) total: usize,
+    pub(crate) exploring: usize,
+    pub(crate) passed: usize,
+    pub(crate) failed: usize,
+    pub(crate) abandoned: usize,
+    pub(crate) promoted: usize,
 }
 
 impl StatusCounts {
-    fn add(&mut self, a: &Attempt) {
+    pub(crate) fn add(&mut self, a: &Attempt) {
         use agentvc_core::Status::*;
         self.total += 1;
         *match a.status {
@@ -405,7 +406,11 @@ fn mode_name(m: Mode) -> &'static str {
 }
 
 /// Find `path` in a stored tree by walking one directory per component.
-fn lookup(s: &Space, tree: &Oid, path: &str) -> agentvc_core::Result<Option<(Mode, Oid)>> {
+pub(crate) fn lookup(
+    s: &Space,
+    tree: &Oid,
+    path: &str,
+) -> agentvc_core::Result<Option<(Mode, Oid)>> {
     let mut cur = *tree;
     let parts: Vec<&str> = path.split('/').filter(|p| !p.is_empty()).collect();
     for (i, part) in parts.iter().enumerate() {

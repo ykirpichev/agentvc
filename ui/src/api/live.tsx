@@ -15,9 +15,16 @@ interface LiveState {
   revision: number
   /** Newest first, capped. */
   recent: ReceivedEvent[]
+  /** Refetch everything now, e.g. right after this client wrote. */
+  refresh: () => void
 }
 
-const LiveContext = createContext<LiveState>({ connection: 'connecting', revision: 0, recent: [] })
+const LiveContext = createContext<LiveState>({
+  connection: 'connecting',
+  revision: 0,
+  recent: [],
+  refresh: () => {},
+})
 
 const MAX_RECENT = 200
 
@@ -71,7 +78,10 @@ export function LiveProvider({ children }: { children: ReactNode }) {
     }
   }, [])
 
-  const value = useMemo(() => ({ connection, revision, recent }), [connection, revision, recent])
+  const value = useMemo(
+    () => ({ connection, revision, recent, refresh: () => setRevision((r) => r + 1) }),
+    [connection, revision, recent],
+  )
   return <LiveContext.Provider value={value}>{children}</LiveContext.Provider>
 }
 

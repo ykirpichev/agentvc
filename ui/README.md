@@ -29,13 +29,28 @@ embed it, so build the UI before `cargo build --release`.
 | `src/keyboard/` | Shortcut framework: `useHotkeys` (keys, `mod+k`, sequences like `g i`, scoped dialogs) and `useListNavigation` (j/k/enter) |
 | `src/theme/` | Light, dark and system themes, persisted per browser |
 | `src/components/` | Shell, command palette, shortcut overlay, diff view, shared bits |
-| `src/pages/` | Inbox, Tasks, Task (attempt tree), Attempt (file diffs), Live |
+| `src/pages/` | Inbox, Tasks, Task (attempt tree), Compare (2 to 4 attempts side by side), Attempt (file diffs), Live |
+| `src/lib/align.ts` | Patience line diff and the multi-way alignment behind Compare |
+| `src/components/ReviewActions.tsx` | Pick winner, abandon and mark, with their dialogs |
 
 ## Keyboard
 
 `?` lists every shortcut for the current page. Global: `g i` / `g t` / `g l`
 to switch screens, `⌘K` or `/` to jump anywhere, `⇧T` to switch theme. Lists:
 `j` / `k` to move, `enter` to open, `u` to go up a level.
+
+Review: on a task, `space` selects attempts and `c` compares them (with none
+selected, `c` compares the best open attempts); `e` folds an abandoned branch.
+In Compare, `h` / `l` or `1`-`4` focus a column, `j` / `k` move between files,
+`o` folds a file and `i` shows files identical in all attempts. Anywhere an
+attempt is focused: `p` picks it as the winner, `x` abandons it with a reason,
+`m p` / `m f` mark it passed or failed.
+
+Compare renders a 5,000-line file in four columns (about 30,000 diff lines) in
+roughly 40 to 50 ms from data to first paint: the first screen renders at
+once, the rest follows as an interruptible transition, and off-screen chunks
+skip layout with `content-visibility`. The `cmp-loaded` and `cmp-rendered`
+performance marks bracket that time.
 
 ## Checks
 
