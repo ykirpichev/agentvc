@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use agentvc_core::snapshot::ChangeKind;
-use agentvc_core::{Attempt, Error, ForkRequest, Ref, Space, Status};
+use agentvc_core::{Attempt, Error, ExportOptions, ForkRequest, PrOptions, Ref, Space, Status};
 use clap::{Parser, Subcommand};
 use serde_json::{json, Value};
 
@@ -89,6 +89,46 @@ enum Cmd {
     Diff { a: String, b: Option<String> },
     /// Print the view directory of an attempt.
     Path { attempt: String },
+    /// Write an attempt's latest state as a commit on a branch of the host git
+    /// repo, without touching the working tree, index or checked-out branch.
+    Export {
+        attempt: String,
+        /// Branch to create.
+        #[arg(long)]
+        branch: String,
+        /// Commit message. Defaults to the task goal.
+        #[arg(long, short = 'm')]
+        message: Option<String>,
+        /// Commit to parent on. Defaults to the HEAD recorded at init.
+        #[arg(long)]
+        base: Option<String>,
+        /// Move the branch if it already exists.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Export an attempt, push its branch and open (or update) a GitHub PR.
+    Pr {
+        attempt: String,
+        /// Branch the PR merges into. Defaults to the repo's default branch.
+        #[arg(long)]
+        base: Option<String>,
+        /// Branch to push. Defaults to agentvc/aN.
+        #[arg(long)]
+        branch: Option<String>,
+        #[arg(long)]
+        draft: bool,
+        /// PR title and commit subject. Defaults to the task goal.
+        #[arg(long)]
+        title: Option<String>,
+        #[arg(long, default_value = "origin")]
+        remote: String,
+        /// GitHub repository as owner/name. Defaults to the remote's.
+        #[arg(long)]
+        repo: Option<String>,
+        /// Move the branch even if another attempt exported to it.
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -384,6 +424,68 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
             Out {
                 text: a.view_path.display().to_string(),
                 json: json!({ "attempt": a.id, "path": a.view_path }),
+            }
+        }
+        Cmd::Export {
+            attempt,
+            branch,
+            message,
+            base,
+            force,
+        } => {
+            let opts = ExportOptions {
+                branch,
+                base,
+                message,
+                force,
+            };
+            let r = agentvc_core::export::export(&space, attempt_id(&attempt)?, &opts)?;
+            Out {
+                text: format!(
+                    "a{} (s{}) -> {} at {}{}",
+                    r.attempt,
+                    r.snapshot.id,
+                    r.branch,
+                    &r.commit[..12],
+                    r.parent
+                        .as_ref()
+                        .map(|p| format!(", parent {}", &p[..12]))
+                        .unwrap_or_else(|| ", root commit".into())
+                ),
+                json: json!({ "export": r }),
+            }
+        }
+        Cmd::Pr {
+            attempt,
+            base,
+            branch,
+            draft,
+            title,
+            remote,
+            repo,
+            force,
+        } => {
+            let opts = PrOptions {
+                branch,
+                base,
+                draft,
+                remote: Some(remote),
+                repo,
+                title,
+                force,
+            };
+            let r = agentvc_core::github::open_pr(&space, attempt_id(&attempt)?, &opts)?;
+            Out {
+                text: format!(
+                    "{} PR #{}: {}\n{} -> {} ({})",
+                    if r.updated { "Updated" } else { "Opened" },
+                    r.number,
+                    r.url,
+                    r.export.branch,
+                    r.base,
+                    &r.export.commit[..12]
+                ),
+                json: json!({ "pr": r }),
             }
         }
     })

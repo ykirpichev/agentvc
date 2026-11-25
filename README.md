@@ -28,7 +28,12 @@ agentvc snapshot a2 --meta tests=pass         # record state with metadata
 agentvc diff a2 a3                            # files that differ between two attempts
 agentvc promote a2                            # pick the winner; a3 becomes abandoned (lost to a2)
 agentvc log --task t1                         # the attempt tree
+agentvc export a2 --branch parser-2x          # a2 as a commit on a branch; worktree untouched
+agentvc pr a2 --draft                         # push agentvc/a2 and open a PR listing rejected attempts
 ```
+
+`agentvc pr` reads a token from `GITHUB_TOKEN`, `GH_TOKEN` or `gh auth token`.
+Record `tests` and `cost` with `snapshot --meta` and they show up in the PR body.
 
 Every command takes `--json` and returns one JSON object; errors carry a
 stable `error.code`. Benchmark forks against `git worktree` with

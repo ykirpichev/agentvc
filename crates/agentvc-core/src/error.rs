@@ -18,6 +18,24 @@ pub enum Error {
     BadObject(String),
     #[error("path {0} is not inside any attempt view")]
     NotInView(PathBuf),
+    #[error("{0} is not inside a git repository")]
+    NotGitRepo(PathBuf),
+    #[error("the space at {workdir} is in subdirectory {prefix:?} of its git repository; export needs the space at the repository root")]
+    NotRepoRoot { workdir: PathBuf, prefix: String },
+    #[error("invalid branch name {0:?}")]
+    BadBranch(String),
+    #[error("branch {0} already exists; pass --force to move it")]
+    BranchExists(String),
+    #[error("branch {0} is checked out in the host repository; export to another branch")]
+    BranchCheckedOut(String),
+    #[error("git {cmd} failed: {stderr}")]
+    Git { cmd: String, stderr: String },
+    #[error("cannot tell the GitHub repository from remote URL {0:?}; pass --repo owner/name")]
+    BadRemote(String),
+    #[error("no GitHub token: set GITHUB_TOKEN or GH_TOKEN, or sign in with `gh auth login`")]
+    NoToken,
+    #[error("GitHub API returned {status}: {message}")]
+    GitHub { status: u16, message: String },
     #[error("io error at {path}: {source}")]
     Io {
         path: PathBuf,
@@ -41,6 +59,15 @@ impl Error {
             Error::AttemptClosed { .. } => "attempt_closed",
             Error::BadObject(_) => "bad_object",
             Error::NotInView(_) => "not_in_view",
+            Error::NotGitRepo(_) => "not_git_repo",
+            Error::NotRepoRoot { .. } => "not_repo_root",
+            Error::BadBranch(_) => "bad_branch",
+            Error::BranchExists(_) => "branch_exists",
+            Error::BranchCheckedOut(_) => "branch_checked_out",
+            Error::Git { .. } => "git",
+            Error::BadRemote(_) => "bad_remote",
+            Error::NoToken => "no_token",
+            Error::GitHub { .. } => "github",
             Error::Io { .. } => "io",
             Error::Db(_) => "db",
             Error::Walk(_) => "walk",

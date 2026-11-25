@@ -64,6 +64,16 @@ CREATE TABLE IF NOT EXISTS operations (
     payload TEXT NOT NULL,
     created_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS exports (
+    id INTEGER PRIMARY KEY,
+    attempt_id INTEGER NOT NULL REFERENCES attempts(id),
+    snapshot_id INTEGER NOT NULL REFERENCES snapshots(id),
+    branch TEXT NOT NULL,
+    commit_id TEXT NOT NULL,
+    parent TEXT,
+    pr_url TEXT,
+    created_at INTEGER NOT NULL
+);
 CREATE INDEX IF NOT EXISTS attempts_task ON attempts(task_id);
 CREATE INDEX IF NOT EXISTS snapshots_attempt ON snapshots(attempt_id);
 "#;
@@ -204,11 +214,11 @@ pub struct SnapshotResult {
 
 pub struct Space {
     workdir: PathBuf,
-    db: Connection,
+    pub(crate) db: Connection,
     objects: ObjectStore,
 }
 
-fn now() -> i64 {
+pub(crate) fn now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -240,6 +250,11 @@ impl Space {
             params![ROOT_ATTEMPT, workdir.to_string_lossy(), now()],
         )?;
         space.snapshot(ROOT_ATTEMPT, "init", None)?;
+        // Remember the host repo's HEAD, so exports are parented on the commit
+        // the attempts actually started from.
+        if let Some(head) = crate::export::host_head(&workdir) {
+            space.set_meta(crate::export::IMPORT_BASE_KEY, &head)?;
+        }
         space.record("human", "init", serde_json::json!({ "workdir": workdir }))?;
         Ok(space)
     }
@@ -269,6 +284,25 @@ impl Space {
         })
     }
 
+    /// A value from the space's key/value metadata.
+    pub fn meta(&self, key: &str) -> Result<Option<String>> {
+        Ok(self
+            .db
+            .query_row("SELECT value FROM meta WHERE key = ?1", params![key], |r| {
+                r.get(0)
+            })
+            .optional()?)
+    }
+
+    pub fn set_meta(&self, key: &str, value: &str) -> Result<()> {
+        self.db.execute(
+            "INSERT INTO meta (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![key, value],
+        )?;
+        Ok(())
+    }
+
     pub fn workdir(&self) -> &Path {
         &self.workdir
     }
@@ -281,7 +315,7 @@ impl Space {
         self.workdir.join(SPACE_DIR).join("views")
     }
 
-    fn record(&self, actor: &str, kind: &str, payload: serde_json::Value) -> Result<()> {
+    pub(crate) fn record(&self, actor: &str, kind: &str, payload: serde_json::Value) -> Result<()> {
         self.db.execute(
             "INSERT INTO operations (actor, kind, payload, created_at) VALUES (?1, ?2, ?3, ?4)",
             params![actor, kind, payload.to_string(), now()],
