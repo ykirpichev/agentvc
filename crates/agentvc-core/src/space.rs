@@ -544,6 +544,8 @@ impl Space {
                 (self.attempt(snap.attempt_id)?, snap)
             }
         };
+        // A fork without a task works on its parent's task.
+        let task_id = req.task_id.or(parent_attempt.task_id);
 
         let created = now();
         self.db.execute(
@@ -551,7 +553,7 @@ impl Space {
                                    status, view_path, backend, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'exploring', '', 'pending', ?7)",
             params![
-                req.task_id,
+                task_id,
                 parent_attempt.id,
                 parent_snapshot.id,
                 req.actor,
@@ -1014,6 +1016,14 @@ mod tests {
             space.attempt_for_path(space.workdir()).unwrap().id,
             ROOT_ATTEMPT
         );
+        // A fork of a task's attempt stays on that task unless told otherwise.
+        let child = space
+            .fork(&ForkRequest {
+                from: Some(Ref::Attempt(a.attempt.id)),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(child.attempt.task_id, Some(task.id));
     }
 
     #[test]
