@@ -1,0 +1,179 @@
+#!/usr/bin/env bash
+# Entry point for everything the agentvc Claude Code plugin runs:
+#
+#   agentvc-plugin hook <event>      hook handler (always exits 0)
+#   agentvc-plugin mcp               the agentvc MCP server
+#   agentvc-plugin slash <cmd> ...   output of a slash command (attempt,
+#                                    attempts, compare, promote)
+#
+# Environment:
+#   AGENTVC_BIN     agentvc binary to run (default: `agentvc` on PATH)
+#   AGENTVC_UI_URL  review UI base URL (default: http://localhost:7420)
+set -uo pipefail
+
+ui=${AGENTVC_UI_URL:-http://localhost:7420}
+ui=${ui%/}
+
+find_bin() {
+  if [ -n "${AGENTVC_BIN:-}" ]; then
+    [ -x "$AGENTVC_BIN" ] && { echo "$AGENTVC_BIN"; return 0; }
+    return 1
+  fi
+  command -v agentvc 2>/dev/null
+}
+
+# Hooks installed by `agentvc hooks` (settings files) already snapshot each
+# tool call. When they are present, the plugin's hooks stand down so a turn
+# is not recorded twice.
+settings_have_hooks() {
+  local f
+  for f in "${CLAUDE_PROJECT_DIR:-$PWD}/.claude/settings.local.json" \
+           "${CLAUDE_PROJECT_DIR:-$PWD}/.claude/settings.json" \
+           "${HOME:-/nonexistent}/.claude/settings.json"; do
+    [ -f "$f" ] && grep -Eq 'agentvc[^"]* hook (post-tool-use|stop|subagent-stop)"' "$f" && return 0
+  done
+  return 1
+}
+
+cmd_hook() {
+  local event=${1:-}
+  if [ -z "${AGENTVC_PLUGIN_FORCE_HOOKS:-}" ] && settings_have_hooks; then
+    cat >/dev/null
+    exit 0
+  fi
+  local bin
+  if ! bin=$(find_bin); then
+    # Never break the agent's session over a missing binary.
+    cat >/dev/null
+    echo "agentvc plugin: agentvc not found (install it or set AGENTVC_BIN); not snapshotting" >&2
+    exit 0
+  fi
+  "$bin" hook "$event"
+  exit 0
+}
+
+cmd_mcp() {
+  local bin
+  if ! bin=$(find_bin); then
+    echo "agentvc plugin: agentvc not found on PATH; install it or set AGENTVC_BIN" >&2
+    exit 1
+  fi
+  exec "$bin" mcp --space "${CLAUDE_PROJECT_DIR:-$PWD}"
+}
+
+# ---- slash commands -------------------------------------------------------
+
+ui_note() {
+  if command -v curl >/dev/null 2>&1 && ! curl -fsS -m 1 -o /dev/null "$ui/api/space" 2>/dev/null; then
+    echo "(The review UI is not running: start it with \`agentvcd\`.)"
+  fi
+}
+
+# Print the attempt or task id (number only) from text like "a12" or "12".
+num() { local x=${1#[atAT]}; [[ "$x" =~ ^[0-9]+$ ]] && echo "$x"; }
+
+slash_attempt() {
+  # /attempt [--from aN|sN] [--task tN] [note...]
+  local args=() note=()
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --from|--task|--model) args+=("$1" "${2:-}"); shift 2 || shift ;;
+      *) note+=("$1"); shift ;;
+    esac
+  done
+  [ ${#note[@]} -gt 0 ] && args+=(--prompt "${note[*]}")
+  local out
+  if ! out=$("$AGENTVC" fork --actor agent:claude-code "${args[@]}" 2>&1); then
+    echo "agentvc fork failed:"
+    echo "$out"
+    return 1
+  fi
+  echo "$out"
+  local id view
+  id=$(printf '%s\n' "$out" | sed -n '1s/^a\([0-9][0-9]*\) forked.*/\1/p')
+  view=$(printf '%s\n' "$out" | sed -n '2p')
+  [ -n "$id" ] || return 0
+  echo
+  echo "Attempt: a$id"
+  echo "View:    $view"
+  echo "Review:  $ui/attempts/$id"
+  ui_note
+}
+
+slash_attempts() {
+  # /attempts [tN]
+  local args=() link="$ui/tasks" t
+  if [ -n "${1:-}" ] && t=$(num "$1"); then
+    args=(--task "t$t"); link="$ui/tasks/$t"
+  fi
+  "$AGENTVC" log "${args[@]}" 2>&1 || return 1
+  echo
+  echo "Review: $link"
+  ui_note
+}
+
+slash_compare() {
+  # /compare aX aY [aZ...]
+  local ids=() x
+  for x in "$@"; do
+    x=$(num "$x") || { echo "not an attempt id: $x"; return 1; }
+    ids+=("$x")
+  done
+  if [ ${#ids[@]} -lt 2 ] || [ ${#ids[@]} -gt 4 ]; then
+    echo "usage: /compare aX aY [up to 4 attempts]"
+    "$AGENTVC" log 2>&1
+    return 1
+  fi
+  "$AGENTVC" diff "a${ids[0]}" "a${ids[1]}" 2>&1 || return 1
+  local joined
+  joined=$(IFS=,; echo "${ids[*]}")
+  echo
+  for x in "${ids[@]}"; do
+    echo "a$x view: $("$AGENTVC" path "a$x" 2>&1)"
+  done
+  echo
+  echo "Compare in the review UI: $ui/compare?a=$joined"
+  ui_note
+}
+
+slash_promote() {
+  # /promote aN
+  local id
+  if [ $# -ne 1 ] || ! id=$(num "$1"); then
+    echo "usage: /promote aN"
+    "$AGENTVC" log 2>&1
+    return 1
+  fi
+  "$AGENTVC" promote "a$id" 2>&1 || return 1
+  echo
+  echo "Review: $ui/attempts/$id"
+  echo "Ship it with: agentvc pr a$id"
+  ui_note
+}
+
+cmd_slash() {
+  local which=${1:-}; shift || true
+  if ! AGENTVC=$(find_bin); then
+    echo "agentvc is not installed (or not on PATH). Install it, or set AGENTVC_BIN."
+    exit 0
+  fi
+  # $ARGUMENTS arrives as one word; split it.
+  # shellcheck disable=SC2206
+  local argv=($*)
+  case $which in
+    attempt) slash_attempt "${argv[@]}" ;;
+    attempts) slash_attempts "${argv[@]}" ;;
+    compare) slash_compare "${argv[@]}" ;;
+    promote) slash_promote "${argv[@]}" ;;
+    *) echo "unknown command: $which"; exit 2 ;;
+  esac
+  # Slash command output is shown to the model; keep exit 0 so it always is.
+  exit 0
+}
+
+case ${1:-} in
+  hook) shift; cmd_hook "$@" ;;
+  mcp) shift; cmd_mcp "$@" ;;
+  slash) shift; cmd_slash "$@" ;;
+  *) echo "usage: agentvc-plugin hook <event> | mcp | slash <command> [args]" >&2; exit 2 ;;
+esac

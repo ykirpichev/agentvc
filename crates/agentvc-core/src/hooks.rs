@@ -50,7 +50,11 @@ pub fn handle(event: &str, input: &Value, fallback_cwd: &Path) -> Result<HookOut
         Err(Error::NoSpace(_)) => return skipped("not in an agentvc space"),
         Err(e) => return Err(e),
     };
-    let attempt = match space.attempt_for_path(&cwd) {
+    // An edit names the file it touched; snapshot the view that holds that
+    // file, so an agent whose shell sits in another directory still records
+    // its work in the right attempt.
+    let target = edited_dir(input).unwrap_or(cwd);
+    let attempt = match space.attempt_for_path(&target) {
         Ok(a) => a,
         Err(Error::NotInView(_)) => return skipped("not in an attempt view"),
         Err(e) => return Err(e),
@@ -78,6 +82,17 @@ pub fn handle(event: &str, input: &Value, fallback_cwd: &Path) -> Result<HookOut
         Some(meta),
         always,
     )?))
+}
+
+/// The directory of the file an editing tool call wrote, when the hook input
+/// names one by absolute path and that directory exists.
+fn edited_dir(input: &Value) -> Option<PathBuf> {
+    let tool_input = input.get("tool_input")?;
+    let file = ["file_path", "notebook_path"]
+        .iter()
+        .find_map(|k| tool_input.get(*k).and_then(Value::as_str))?;
+    let dir = Path::new(file).parent()?;
+    (dir.is_absolute() && dir.is_dir()).then(|| dir.to_path_buf())
 }
 
 /// Whether a hook command was written by us.
@@ -268,6 +283,28 @@ mod tests {
             handle("stop", &input(&a.view_path), Path::new("/")).unwrap(),
             HookOutcome::Skipped { .. }
         ));
+    }
+
+    #[test]
+    fn handle_follows_the_edited_file_into_its_view() {
+        let tmp = crate::testutil::tempdir();
+        fs::write(tmp.path().join("f"), "1").unwrap();
+        let space = Space::init(tmp.path()).unwrap();
+        let a = space.fork(&ForkRequest::default()).unwrap().attempt;
+        let file = a.view_path.join("f");
+        fs::write(&file, "2").unwrap();
+        // The shell is still in the main checkout (the root attempt).
+        let input = json!({
+            "tool_name": "Edit",
+            "cwd": tmp.path(),
+            "tool_input": { "file_path": file },
+        });
+        let HookOutcome::Snapshot(r) = handle("post-tool-use", &input, Path::new("/")).unwrap()
+        else {
+            panic!("expected a snapshot");
+        };
+        assert_eq!(r.snapshot.attempt_id, a.id);
+        assert!(!r.unchanged);
     }
 
     #[test]

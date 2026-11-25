@@ -1,0 +1,27 @@
+{
+  "description": "Snapshot the agentvc attempt an agent works in after each editing tool call and at the end of each turn. Outside an agentvc space the hooks do nothing.",
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit|Bash",
+        "hooks": [
+          { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/agentvc-plugin\" hook post-tool-use" }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/agentvc-plugin\" hook stop" }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/agentvc-plugin\" hook subagent-stop" }
+        ]
+      }
+    ]
+  }
+}
