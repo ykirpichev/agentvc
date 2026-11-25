@@ -4,16 +4,16 @@ use std::collections::BTreeMap;
 
 use agentvc_core::objects::{Mode, Oid};
 use agentvc_core::snapshot::FileChange;
-use agentvc_core::{Attempt, Error, Ref, Snapshot, Space, Task};
+use agentvc_core::{Attempt, Error, GitBase, Ref, Snapshot, Space, Task};
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::{events, review, AppState};
+use crate::{events, rebase, review, AppState};
 
 /// Files larger than this are listed but their content is not sent.
 pub const MAX_FILE_BYTES: usize = 2 * 1024 * 1024;
@@ -31,6 +31,7 @@ pub(crate) fn routes() -> Router<AppState> {
         .route("/diff", get(diff))
         .route("/file", get(file))
         .route("/events", get(events::websocket))
+        .route("/attempts/{id}/rebase", post(rebase::rebase))
         .merge(review::routes())
         .fallback(|| async {
             ApiError::new(
@@ -49,6 +50,8 @@ pub struct ApiError {
     status: StatusCode,
     code: &'static str,
     message: String,
+    /// Extra fields merged into the error object, e.g. conflict `paths`.
+    details: Option<serde_json::Value>,
 }
 
 impl ApiError {
@@ -57,6 +60,7 @@ impl ApiError {
             status,
             code,
             message,
+            details: None,
         }
     }
 
@@ -74,16 +78,23 @@ impl From<Error> for ApiError {
         let status = match &e {
             Error::NotFound { .. } => StatusCode::NOT_FOUND,
             Error::BadRef(_) => StatusCode::BAD_REQUEST,
-            Error::AttemptClosed { .. } => StatusCode::CONFLICT,
+            Error::AttemptClosed { .. } | Error::Conflict { .. } => StatusCode::CONFLICT,
+            Error::RootAttempt => StatusCode::BAD_REQUEST,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         };
-        ApiError::new(status, e.code(), e.to_string())
+        let mut err = ApiError::new(status, e.code(), e.to_string());
+        err.details = e.details();
+        err
     }
 }
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        let body = json!({ "error": { "code": self.code, "message": self.message } });
+        let mut err = json!({ "code": self.code, "message": self.message });
+        if let (Some(m), Some(serde_json::Value::Object(d))) = (err.as_object_mut(), self.details) {
+            m.extend(d);
+        }
+        let body = json!({ "error": err });
         (self.status, Json(body)).into_response()
     }
 }
@@ -258,6 +269,10 @@ struct AttemptDetail {
     head: Option<Snapshot>,
     snapshot_count: usize,
     children: Vec<i64>,
+    /// The attempt's own latest rebase: its diffs compare against this.
+    git_base: Option<GitBase>,
+    /// The git commit the head is based on (what `pr` parents on).
+    base_commit: Option<String>,
 }
 
 async fn get_attempt(
@@ -280,11 +295,18 @@ async fn get_attempt(
                 .filter(|a| a.parent_attempt == Some(id))
                 .map(|a| a.id)
                 .collect();
+            let git_base = s.own_git_base(id)?;
+            let base_commit = match &head {
+                Some(h) => s.git_base_commit(h)?,
+                None => None,
+            };
             Ok(AttemptDetail {
                 attempt,
                 head,
                 snapshot_count,
                 children,
+                git_base,
+                base_commit,
             })
         })
         .await?;
@@ -314,29 +336,73 @@ async fn get_snapshot(State(st): State<AppState>, Path(id): Path<String>) -> Api
 
 #[derive(Deserialize)]
 struct DiffQuery {
-    /// Base. Defaults to the snapshot `b` was forked from (for `aN`) or the
-    /// previous snapshot of the same attempt (for `sN`).
+    /// Base: `aN`, `sN` or `git:<commit>` (a commit an attempt was rebased
+    /// onto). Defaults to the commit `b` was rebased onto, else the snapshot
+    /// it was forked from (for `aN`), or the previous snapshot of the same
+    /// attempt (for `sN`).
     a: Option<String>,
     b: String,
 }
 
 #[derive(Serialize)]
 struct DiffResponse {
-    a: Snapshot,
+    /// The base snapshot; null when the base is a git commit.
+    a: Option<Snapshot>,
     b: Snapshot,
+    /// The base as a ref the file endpoint accepts (`sN` or `git:<commit>`).
+    a_ref: String,
+    b_ref: String,
     changes: Vec<FileChange>,
 }
 
+/// One side of a diff: a snapshot or the tree of a rebased-onto commit.
+pub(crate) enum Side {
+    Snap(Snapshot),
+    Git(GitBase),
+}
+
+impl Side {
+    fn tree(&self) -> &str {
+        match self {
+            Side::Snap(s) => &s.tree,
+            Side::Git(g) => &g.tree,
+        }
+    }
+
+    fn label(&self) -> String {
+        match self {
+            Side::Snap(s) => format!("s{}", s.id),
+            Side::Git(g) => format!("git:{}", g.commit),
+        }
+    }
+}
+
+/// Resolve `aN`, `sN` or `git:<commit>`.
+fn resolve_side(s: &Space, r: &str) -> Result<Side, ApiError> {
+    if let Some(commit) = r.strip_prefix("git:") {
+        return s.git_base_by_commit(commit)?.map(Side::Git).ok_or_else(|| {
+            ApiError::from(Error::NotFound {
+                kind: "rebase base",
+                id: r.to_string(),
+            })
+        });
+    }
+    Ok(Side::Snap(s.resolve(parse_ref(r)?)?))
+}
+
 /// The default base for `b`, when the caller gives none.
-fn base_of(s: &Space, b: Ref) -> agentvc_core::Result<Snapshot> {
+fn base_of(s: &Space, b: Ref) -> agentvc_core::Result<Side> {
     let no_base = || Error::NotFound {
         kind: "base snapshot of",
         id: b.to_string(),
     };
     match b {
         Ref::Attempt(id) => {
+            if let Some(g) = s.own_git_base(id)? {
+                return Ok(Side::Git(g));
+            }
             let p = s.attempt(id)?.parent_snapshot.ok_or_else(no_base)?;
-            s.snapshot_by_id(p)
+            s.snapshot_by_id(p).map(Side::Snap)
         }
         Ref::Snapshot(id) => {
             let snap = s.snapshot_by_id(id)?;
@@ -345,10 +411,11 @@ fn base_of(s: &Space, b: Ref) -> agentvc_core::Result<Snapshot> {
                 .into_iter()
                 .rfind(|x| x.id < id);
             match prev {
-                Some(p) => Ok(p),
+                Some(p) => Ok(Side::Snap(p)),
                 None => {
                     let parent = s.attempt(snap.attempt_id)?.parent_snapshot;
                     s.snapshot_by_id(parent.ok_or_else(no_base)?)
+                        .map(Side::Snap)
                 }
             }
         }
@@ -357,22 +424,33 @@ fn base_of(s: &Space, b: Ref) -> agentvc_core::Result<Snapshot> {
 
 async fn diff(State(st): State<AppState>, Query(q): Query<DiffQuery>) -> ApiResult<DiffResponse> {
     let b = parse_ref(&q.b)?;
-    let a = q.a.as_deref().map(parse_ref).transpose()?;
     let out = st
         .with_space(move |s| {
             let sb = s.resolve(b)?;
-            let sa = match a {
-                Some(a) => s.resolve(a)?,
+            let sa = match &q.a {
+                Some(a) => match resolve_side(s, a) {
+                    Ok(side) => side,
+                    Err(e) => return Ok(Err(e)),
+                },
                 None => base_of(s, b)?,
             };
-            let changes = s.diff(Ref::Snapshot(sa.id), Ref::Snapshot(sb.id))?;
-            Ok(DiffResponse {
-                a: sa,
+            let changes = agentvc_core::snapshot::diff(
+                s.objects(),
+                &Oid::from_hex(sa.tree())?,
+                &Oid::from_hex(&sb.tree)?,
+            )?;
+            Ok(Ok(DiffResponse {
+                a_ref: sa.label(),
+                b_ref: format!("s{}", sb.id),
+                a: match sa {
+                    Side::Snap(x) => Some(x),
+                    Side::Git(_) => None,
+                },
                 b: sb,
                 changes,
-            })
+            }))
         })
-        .await?;
+        .await??;
     Ok(Json(out))
 }
 
@@ -389,7 +467,8 @@ struct FileQuery {
 struct FileResponse {
     #[serde(rename = "ref")]
     r#ref: String,
-    snapshot: i64,
+    /// The snapshot read, or null for a `git:<commit>` ref.
+    snapshot: Option<i64>,
     path: String,
     /// `file`, `executable` or `symlink`.
     mode: &'static str,
@@ -441,11 +520,13 @@ pub(crate) fn lookup(
 }
 
 async fn file(State(st): State<AppState>, Query(q): Query<FileQuery>) -> ApiResult<FileResponse> {
-    let r = parse_ref(&q.r#ref)?;
     let out = st
         .with_space(move |s| {
-            let snap = s.resolve(r)?;
-            let tree = Oid::from_hex(&snap.tree)?;
+            let side = match resolve_side(s, &q.r#ref) {
+                Ok(side) => side,
+                Err(e) => return Ok(Err(e)),
+            };
+            let tree = Oid::from_hex(side.tree())?;
             let not_found = || Error::NotFound {
                 kind: "file",
                 id: format!("{}:{}", q.r#ref, q.path),
@@ -459,9 +540,12 @@ async fn file(State(st): State<AppState>, Query(q): Query<FileQuery>) -> ApiResu
             } else {
                 String::from_utf8(data).ok()
             };
-            Ok(FileResponse {
+            Ok(Ok(FileResponse {
                 r#ref: q.r#ref,
-                snapshot: snap.id,
+                snapshot: match side {
+                    Side::Snap(x) => Some(x.id),
+                    Side::Git(_) => None,
+                },
                 path: q.path,
                 mode: mode_name(mode),
                 oid: oid.to_hex(),
@@ -469,8 +553,8 @@ async fn file(State(st): State<AppState>, Query(q): Query<FileQuery>) -> ApiResu
                 binary: !too_large && text.is_none(),
                 too_large,
                 content: text,
-            })
+            }))
         })
-        .await?;
+        .await??;
     Ok(Json(out))
 }

@@ -11,6 +11,7 @@ Status: early. Milestone M1 (core model and views) is in progress.
 - Core library: [crates/agentvc-core](crates/agentvc-core)
 - CLI: [crates/agentvc-cli](crates/agentvc-cli)
 - MCP server: [crates/agentvc-mcp](crates/agentvc-mcp)
+- Claude Code plugin: [integrations/claude-code](integrations/claude-code)
 - Review UI: [ui](ui)
 
 ## Try it
@@ -31,6 +32,7 @@ agentvc run --task t1 --actor agent:claude --check "cargo test" -- claude -p "ma
                                               # fork + run an agent in the view; check decides passed/failed
 agentvc run --detach --task t1 -- <agent cmd> # same, in the background; see `agentvc ps`
 agentvc hooks                                 # Claude Code hooks: snapshot after every edit, inside any view
+                                              # (or install the Claude Code plugin: integrations/claude-code)
 agentvc promote a2                            # pick the winner; a3 becomes abandoned (lost to a2)
 agentvc log --task t1                         # the attempt tree
 agentvc rebase a2                             # main moved? merge a2 onto origin/main first
@@ -85,11 +87,16 @@ picks the space and the "current attempt", so start it inside a view to make
 defaults: `fork` and `run` use actor `agent`, `snapshot` uses trigger `mcp`,
 and `run` detaches unless `detach: false`.
 
-Claude Code (run in the repo):
+Claude Code: install the plugin, which bundles the MCP server with the hooks,
+slash commands and a skill. See
+[integrations/claude-code](integrations/claude-code/README.md):
 
 ```sh
-claude mcp add agentvc -- agentvc mcp
+claude plugin marketplace add ykirpichev/agentvc
+claude plugin install agentvc@agentvc
 ```
+
+Or just the MCP server, run in the repo: `claude mcp add agentvc -- agentvc mcp`.
 
 Claude Desktop (`claude_desktop_config.json`; Desktop has no working
 directory, so pass the space):

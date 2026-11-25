@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "agentvc": {
+      "command": "${CLAUDE_PLUGIN_ROOT}/bin/agentvc-plugin",
+      "args": ["mcp"]
+    }
+  }
+}

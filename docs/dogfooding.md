@@ -21,6 +21,12 @@ The script is idempotent. It:
 
 Put `target/release` on your `PATH`, or alias `agentvc` to it.
 
+Instead of step 3 you can install the Claude Code plugin
+([integrations/claude-code](../integrations/claude-code/README.md)), which adds the MCP
+tools, `/attempt`, `/attempts`, `/compare` and `/promote` on top of the same hooks. Its
+hooks stand down while the `agentvc hooks` ones are installed, so run
+`agentvc hooks --uninstall` after installing it.
+
 ## The loop for each piece of work
 
 ```sh

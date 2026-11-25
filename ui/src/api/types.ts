@@ -76,6 +76,19 @@ export interface AttemptDetail {
   head: Snapshot | null
   snapshot_count: number
   children: number[]
+  /** The attempt's own latest rebase; its diffs compare against this commit. */
+  git_base: GitBase | null
+  /** The git commit the head is based on (what `agentvc pr` parents on). */
+  base_commit: string | null
+}
+
+/** A commit an attempt was rebased onto. */
+export interface GitBase {
+  attempt_id: number
+  snapshot_id: number
+  commit: string
+  tree: string
+  created_at: Timestamp
 }
 
 export type ChangeKind = 'added' | 'modified' | 'removed'
@@ -86,14 +99,17 @@ export interface FileChange {
 }
 
 export interface DiffResponse {
-  a: Snapshot
+  /** Null when the base is a git commit (`a_ref` is then `git:<commit>`). */
+  a: Snapshot | null
   b: Snapshot
+  a_ref: Ref
+  b_ref: Ref
   changes: FileChange[]
 }
 
 export interface FileResponse {
   ref: string
-  snapshot: number
+  snapshot: number | null
   path: string
   mode: 'file' | 'executable' | 'symlink'
   oid: string
@@ -103,8 +119,11 @@ export interface FileResponse {
   content: string | null
 }
 
-/** `aN` (latest state of an attempt) or `sN` (one snapshot). */
-export type Ref = `a${number}` | `s${number}`
+/**
+ * `aN` (latest state of an attempt), `sN` (one snapshot), or `git:<commit>`
+ * (a commit an attempt was rebased onto).
+ */
+export type Ref = `a${number}` | `s${number}` | `git:${string}`
 
 export type DaemonEvent =
   | { type: 'hello'; workdir: string }
@@ -115,7 +134,8 @@ export type DaemonEvent =
   | { type: 'resync' }
 
 export interface ApiErrorBody {
-  error: { code: string; message: string }
+  /** Some codes carry more fields, e.g. `conflict` has `paths` and `onto`. */
+  error: { code: string; message: string; [key: string]: unknown }
 }
 
 // ---- review endpoints (crates/agentvcd/src/review.rs) ----------------------
@@ -216,4 +236,33 @@ export interface StopResponse {
   run: number
   pid: number
   signal: string
+}
+
+// ---- rebase (crates/agentvcd/src/rebase.rs) -------------------------------
+
+export interface RebaseResult {
+  attempt: number
+  onto: string
+  /** What `onto` was resolved from, e.g. `origin/main`. */
+  onto_ref: string
+  from: string | null
+  /** False when the attempt was already based on `onto`. */
+  rebased: boolean
+  snapshot: Snapshot | null
+  changes: FileChange[]
+  /** Files left with conflict markers (only with keep_conflicts). */
+  conflicts: string[]
+  view_updated: boolean
+  status: Status
+}
+
+export interface RebaseResponse {
+  rebase: RebaseResult
+  attempt: Attempt
+}
+
+export interface RebaseOptions {
+  onto?: string
+  keep_conflicts?: boolean
+  no_fetch?: boolean
 }

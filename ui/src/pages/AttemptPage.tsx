@@ -1,6 +1,7 @@
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router'
 import { api, ref } from '../api/client'
 import type { AttemptDetail, Ref } from '../api/types'
+import { ActionButtons, useAttemptActions } from '../components/ReviewActions'
 import { useResource } from '../api/useResource'
 import { AttemptMeta } from '../components/AttemptMeta'
 import { ChangeList } from '../components/ChangeList'
@@ -28,9 +29,13 @@ function AttemptView({ detail }: { detail: AttemptDetail }) {
   const navigate = useNavigate()
   const [params, setParams] = useSearchParams()
   const snapshots = useResource(`snapshots:${attempt.id}`, () => api.snapshots(attempt.id))
+  const siblings = useResource(attempt.task_id ? `attempts:t${attempt.task_id}` : null, () =>
+    api.attempts(attempt.task_id ?? undefined),
+  )
+  const actions = useAttemptActions(attempt, siblings.data ?? [], { group: 'Attempt' })
 
-  // Compare against the fork point; the root attempt has none, so it shows
-  // each snapshot against the one before.
+  // Compare against the commit it was rebased onto, else the fork point; the
+  // root attempt has neither, so it shows each snapshot against the one before.
   const snapParam = params.get('snap')
   const headRef: Ref | null = snapParam
     ? ref.snapshot(Number(snapParam))
@@ -39,7 +44,14 @@ function AttemptView({ detail }: { detail: AttemptDetail }) {
       : head
         ? ref.snapshot(head.id)
         : null
-  const baseRef: Ref | undefined = attempt.parent_snapshot ? ref.snapshot(attempt.parent_snapshot) : undefined
+  // A snapshot from before the rebase still compares with the fork point.
+  const gitBase =
+    detail.git_base && !(snapParam && Number(snapParam) < detail.git_base.snapshot_id) ? detail.git_base : null
+  const baseRef: Ref | undefined = gitBase
+    ? ref.git(gitBase.commit)
+    : attempt.parent_snapshot
+      ? ref.snapshot(attempt.parent_snapshot)
+      : undefined
   const diff = useResource(headRef ? `diff:${baseRef}..${headRef}` : null, () => api.diff(headRef!, baseRef))
   const changes = diff.data?.changes ?? []
 
@@ -104,21 +116,37 @@ function AttemptView({ detail }: { detail: AttemptDetail }) {
             </select>
           </label>
         )}
+        <ActionButtons actions={actions} />
       </PageHeader>
       <AttemptMeta
         attempt={attempt}
         extra={
-          <div>
-            <dt>Snapshots</dt>
-            <dd>{detail.snapshot_count}</dd>
-          </div>
+          <>
+            <div>
+              <dt>Snapshots</dt>
+              <dd>{detail.snapshot_count}</dd>
+            </div>
+            {detail.base_commit && (
+              <div>
+                <dt>Based on</dt>
+                <dd title={detail.base_commit}>
+                  <code>{detail.base_commit.slice(0, 7)}</code>
+                  {gitBase && <span className="rebased-tag">rebased</span>}
+                </dd>
+              </div>
+            )}
+          </>
         }
       />
 
       {diff.error && <ErrorNote error={diff.error} />}
       {diff.data && changes.length === 0 && (
         <Empty title="No changes">
-          {baseRef ? `Identical to ${baseRef}, where it was forked from.` : 'Nothing changed in this snapshot.'}
+          {gitBase
+            ? `Identical to ${gitBase.commit.slice(0, 7)}, the commit it was rebased onto.`
+            : baseRef
+              ? `Identical to ${baseRef}, where it was forked from.`
+              : 'Nothing changed in this snapshot.'}
         </Empty>
       )}
       {diff.data && changes.length > 0 && (
@@ -126,7 +154,7 @@ function AttemptView({ detail }: { detail: AttemptDetail }) {
           <aside className="panel files">
             <div className="panel-head">
               <span>
-                {diff.data.a && `s${diff.data.a.id}`} → s{diff.data.b.id}
+                {refLabel(diff.data.a_ref)} → s{diff.data.b.id}
               </span>
               <span className="muted">{changes.length} files</span>
             </div>
@@ -138,7 +166,7 @@ function AttemptView({ detail }: { detail: AttemptDetail }) {
           {current && (
             <DiffView
               key={current.path}
-              base={ref.snapshot(diff.data.a.id)}
+              base={diff.data.a_ref}
               head={ref.snapshot(diff.data.b.id)}
               path={current.path}
               kind={current.kind}
@@ -146,6 +174,12 @@ function AttemptView({ detail }: { detail: AttemptDetail }) {
           )}
         </div>
       )}
+      {actions.node}
     </>
   )
+}
+
+/** `git:<sha>` shortened for headers; snapshot refs as they are. */
+function refLabel(r: Ref): string {
+  return r.startsWith('git:') ? r.slice(4, 11) : r
 }
