@@ -5,6 +5,7 @@ pub mod error;
 pub mod export;
 pub mod github;
 pub mod hooks;
+pub mod index;
 pub mod objects;
 pub mod run;
 pub mod snapshot;
