@@ -105,6 +105,15 @@ async fn tasks_and_attempts() {
 
     let (_, v) = call(&app, "/api/attempts/a2/snapshots").await;
     assert_eq!(v[0]["attempt_id"], 2);
+
+    let (s, v) = call(&app, "/api/overview").await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(v["schema"], "agentvc.overview/1");
+    assert_eq!(v["tasks"][0]["id"], "t1");
+    assert_eq!(v["tasks"][0]["state"], "open");
+    assert_eq!(v["tasks"][0]["attempts"][0]["id"], "a2");
+    assert_eq!(v["tasks"][0]["attempts"][0]["changes"]["added"], 1);
+    assert_eq!(v["space"]["counts"]["total"], 2);
 }
 
 #[tokio::test]

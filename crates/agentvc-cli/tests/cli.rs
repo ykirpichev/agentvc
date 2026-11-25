@@ -107,6 +107,16 @@ fn full_attempt_flow() {
     let v = agentvc(w, &["log", "--task", "1"]);
     assert_eq!(v["attempts"].as_array().unwrap().len(), 2);
 
+    let v = agentvc(w, &["overview"]);
+    assert_eq!(v["overview"]["tasks"][0]["winner"], format!("a{a}"));
+    let out = w.join("overview.json");
+    let v = agentvc(w, &["overview", "--out", out.to_str().unwrap()]);
+    assert_eq!(v["tasks"], 1);
+    let doc: Value = serde_json::from_str(&fs::read_to_string(&out).unwrap()).unwrap();
+    assert_eq!(doc["schema"], "agentvc.overview/1");
+    assert_eq!(doc["tasks"][0]["state"], "done");
+    fs::remove_file(&out).unwrap();
+
     // The root working directory never changed.
     assert_eq!(
         fs::read_to_string(w.join("lib.rs")).unwrap(),

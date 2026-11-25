@@ -61,6 +61,13 @@ stable `error.code`. Benchmark forks against `git worktree` with
 - `copy`: plain copy, the fallback. `--json` output says why in
   `fork.backend_reason`.
 
+## Overview for dashboards
+
+`agentvc overview --out overview.json` writes the whole space (tasks, attempt
+trees, statuses, reasons, runs, PRs) as one JSON document; the daemon serves the
+same at `/api/overview`. The Claude project's **agentvc Experiments** artifact
+renders it. See [docs/overview.md](docs/overview.md).
+
 ## MCP server
 
 `agentvc mcp` serves the agentvc commands to coding agents over the Model

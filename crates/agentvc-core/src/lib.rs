@@ -9,6 +9,7 @@ pub mod index;
 pub mod objects;
 #[cfg(target_os = "linux")]
 pub mod overlay;
+pub mod overview;
 pub mod rebase;
 pub mod run;
 pub mod snapshot;
@@ -21,6 +22,7 @@ pub(crate) mod testutil;
 pub use error::{Error, Result};
 pub use export::{Export, ExportOptions, ExportResult};
 pub use github::{PrOptions, PrResult};
+pub use overview::Overview;
 pub use rebase::{GitBase, RebaseOptions, RebaseResult};
 pub use space::{
     Attempt, ForkRequest, ForkResult, Ref, Snapshot, SnapshotResult, Space, Status, Task,
