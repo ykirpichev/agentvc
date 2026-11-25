@@ -64,6 +64,16 @@ CREATE TABLE IF NOT EXISTS operations (
     payload TEXT NOT NULL,
     created_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS exports (
+    id INTEGER PRIMARY KEY,
+    attempt_id INTEGER NOT NULL REFERENCES attempts(id),
+    snapshot_id INTEGER NOT NULL REFERENCES snapshots(id),
+    branch TEXT NOT NULL,
+    commit_id TEXT NOT NULL,
+    parent TEXT,
+    pr_url TEXT,
+    created_at INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS runs (
     id INTEGER PRIMARY KEY,
     attempt_id INTEGER NOT NULL REFERENCES attempts(id),
@@ -253,6 +263,11 @@ impl Space {
             params![ROOT_ATTEMPT, workdir.to_string_lossy(), now()],
         )?;
         space.snapshot(ROOT_ATTEMPT, "init", None)?;
+        // Remember the host repo's HEAD, so exports are parented on the commit
+        // the attempts actually started from.
+        if let Some(head) = crate::export::host_head(&workdir) {
+            space.set_meta(crate::export::IMPORT_BASE_KEY, &head)?;
+        }
         space.record("human", "init", serde_json::json!({ "workdir": workdir }))?;
         Ok(space)
     }
@@ -280,6 +295,25 @@ impl Space {
             workdir,
             db,
         })
+    }
+
+    /// A value from the space's key/value metadata.
+    pub fn meta(&self, key: &str) -> Result<Option<String>> {
+        Ok(self
+            .db
+            .query_row("SELECT value FROM meta WHERE key = ?1", params![key], |r| {
+                r.get(0)
+            })
+            .optional()?)
+    }
+
+    pub fn set_meta(&self, key: &str, value: &str) -> Result<()> {
+        self.db.execute(
+            "INSERT INTO meta (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![key, value],
+        )?;
+        Ok(())
     }
 
     pub fn workdir(&self) -> &Path {
@@ -629,7 +663,13 @@ impl Space {
                 status: attempt.status.to_string(),
             });
         }
-        let tree = snapshot::capture(&self.objects, &attempt.view_path)?.to_hex();
+        let index = self
+            .workdir
+            .join(SPACE_DIR)
+            .join("index")
+            .join(format!("a{attempt_id}"));
+        let tree =
+            snapshot::capture_indexed(&self.objects, &attempt.view_path, Some(&index))?.to_hex();
         if !always {
             // A fresh fork compares against the snapshot it was forked from.
             if let Ok(last) = self.head_snapshot(attempt_id) {
