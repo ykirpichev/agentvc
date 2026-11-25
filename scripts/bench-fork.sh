@@ -33,7 +33,17 @@ tracked=$(du -sh --exclude=.git . | cut -f1)
 ignored=$(git status --ignored --porcelain 2>/dev/null | sed -n 's/^!! //p' | xargs -r du -sc 2>/dev/null | tail -1 | cut -f1)
 echo "filesystem: $fs   repo size (no .git): $tracked   ignored build/deps: $((${ignored:-0} / 1024)) MB"
 
-"$bin" init >/dev/null
+"$bin" init --no-prepare >/dev/null
+if [ "${BACKEND:-auto}" != copy ]; then
+  # What `agentvc init` starts in the background where forks use overlayfs:
+  # freeze a1 into a base layer once, off the fork path.
+  start=$(date +%s%N)
+  out=$("$bin" --json prepare a1)
+  end=$(date +%s%N)
+  if echo "$out" | grep -q '"skipped":null'; then
+    echo "agentvc prepare a1 (one-time, in the background after init): $(( (end - start) / 1000000 )) ms"
+  fi
+fi
 echo
 echo "agentvc fork (warm, includes ignored dirs):"
 for i in $(seq "$n"); do
