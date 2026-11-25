@@ -30,3 +30,23 @@ export function actorName(actor: string): string {
   const i = actor.indexOf(':')
   return i >= 0 ? actor.slice(i + 1) : actor
 }
+
+/** `$0.42`, `$12.30`, or `<$0.01`. */
+export function money(usd: number): string {
+  if (usd > 0 && usd < 0.01) return '<$0.01'
+  return '$' + usd.toFixed(2)
+}
+
+/** `42s`, `3m 05s`, `2h 10m`. */
+export function duration(seconds: number): string {
+  const s = Math.max(0, Math.round(seconds))
+  if (s < 60) return `${s}s`
+  const m = Math.floor(s / 60)
+  if (m < 60) return `${m}m ${String(s % 60).padStart(2, '0')}s`
+  const h = Math.floor(m / 60)
+  return `${h}h ${String(m % 60).padStart(2, '0')}m`
+}
+
+export function plural(n: number, noun: string): string {
+  return `${n} ${noun}${n === 1 ? '' : 's'}`
+}

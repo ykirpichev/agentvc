@@ -284,7 +284,7 @@ pub fn export(space: &Space, attempt_id: i64, opts: &ExportOptions) -> Result<Ex
             .or_else(|| repo.rev("HEAD")),
     };
 
-    let snapshot = if attempt.status.is_open() && attempt.view_path.exists() {
+    let snapshot = if attempt.status.is_open() && space.ensure_view(&attempt)? {
         space.snapshot(attempt_id, "export", None)?.snapshot
     } else {
         space.head_snapshot(attempt_id)?
@@ -430,8 +430,8 @@ mod tests {
     }
 
     /// A git repo with one commit and a space on top of it.
-    fn repo() -> (tempfile::TempDir, Space, String) {
-        let tmp = tempfile::tempdir().unwrap();
+    fn repo() -> (crate::testutil::TestDir, Space, String) {
+        let tmp = crate::testutil::tempdir();
         let w = tmp.path();
         git(w, &["init", "-q", "-b", "main"]);
         fs::create_dir_all(w.join("src")).unwrap();
@@ -621,7 +621,7 @@ mod tests {
 
     #[test]
     fn unborn_repo_gets_root_commit_and_non_repo_errors() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::testutil::tempdir();
         let w = tmp.path();
         git(w, &["init", "-q", "-b", "main"]);
         fs::write(w.join("a.txt"), "a\n").unwrap();
@@ -638,7 +638,7 @@ mod tests {
         assert_eq!(r.parent, None);
         assert_eq!(git(w, &["show", "first:a.txt"]), "a");
 
-        let plain = tempfile::tempdir().unwrap();
+        let plain = crate::testutil::tempdir();
         fs::write(plain.path().join("a.txt"), "a\n").unwrap();
         let space = Space::init(plain.path()).unwrap();
         // tempdir may sit inside some other repo on a dev machine; either

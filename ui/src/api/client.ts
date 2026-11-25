@@ -1,5 +1,9 @@
 import type {
+  ActionResponse,
   ApiErrorBody,
+  AttemptStats,
+  CompareResponse,
+  InboxItem,
   Attempt,
   AttemptDetail,
   DiffResponse,
@@ -26,10 +30,21 @@ export class ApiError extends Error {
 async function get<T>(path: string, params?: Record<string, string | undefined>): Promise<T> {
   const qs = new URLSearchParams()
   for (const [k, v] of Object.entries(params ?? {})) if (v !== undefined) qs.set(k, v)
-  const url = `/api${path}${qs.size ? `?${qs}` : ''}`
+  return request<T>(`/api${path}${qs.size ? `?${qs}` : ''}`)
+}
+
+async function post<T>(path: string, body?: unknown): Promise<T> {
+  return request<T>(`/api${path}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  })
+}
+
+async function request<T>(url: string, init: RequestInit = {}): Promise<T> {
   let res: Response
   try {
-    res = await fetch(url, { headers: { accept: 'application/json' } })
+    res = await fetch(url, { ...init, headers: { accept: 'application/json', ...init.headers } })
   } catch (e) {
     throw new ApiError(0, 'offline', `cannot reach agentvcd (${String(e)})`)
   }
@@ -53,6 +68,14 @@ export const api = {
   /** Without `a`, diffs against the snapshot `b` was forked from. */
   diff: (b: Ref, a?: Ref) => get<DiffResponse>('/diff', { a, b }),
   file: (ref: Ref, path: string) => get<FileResponse>('/file', { ref, path }),
+  taskStats: (task: number) => get<AttemptStats[]>(`/tasks/${task}/stats`),
+  inbox: () => get<InboxItem[]>('/inbox'),
+  compare: (attempts: number[]) =>
+    get<CompareResponse>('/compare', { attempts: attempts.map((a) => `a${a}`).join(',') }),
+  promote: (id: number) => post<ActionResponse>(`/attempts/${id}/promote`),
+  abandon: (id: number, reason: string) => post<ActionResponse>(`/attempts/${id}/abandon`, { reason }),
+  mark: (id: number, status: 'passed' | 'failed' | 'exploring') =>
+    post<ActionResponse>(`/attempts/${id}/mark`, { status }),
 }
 
 export const ref = {

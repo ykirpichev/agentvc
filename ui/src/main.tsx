@@ -6,6 +6,7 @@ import { App } from './App'
 import { HotkeyProvider } from './keyboard/hotkeys'
 import { ThemeProvider } from './theme/theme'
 import './styles.css'
+import './review.css'
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>

@@ -117,3 +117,74 @@ export type DaemonEvent =
 export interface ApiErrorBody {
   error: { code: string; message: string }
 }
+
+// ---- review endpoints (crates/agentvcd/src/review.rs) ----------------------
+
+export interface CheckResult {
+  passed: boolean
+  exit_code: number | null
+  snapshot: number
+}
+
+export interface AttemptStats {
+  attempt: number
+  snapshots: number
+  check: CheckResult | null
+  last_exit_code: number | null
+  cost_usd: number | null
+  tokens: number | null
+  /** Seconds from creation to the latest snapshot. */
+  duration_s: number
+  run_ms: number | null
+  summary: string | null
+  last_activity: Timestamp
+}
+
+export type InboxReason = 'ready_to_pick' | 'failed'
+
+export interface InboxItem {
+  task: Task
+  attempts: StatusCounts
+  reasons: InboxReason[]
+  best_check: 'passed' | 'failed' | null
+  candidates: number[]
+  cost_usd: number | null
+  updated_at: Timestamp
+}
+
+export type CellKind = 'unchanged' | 'added' | 'modified' | 'removed'
+
+export interface CompareCell {
+  kind: CellKind
+  oid: string | null
+  added: number
+  removed: number
+  binary: boolean
+}
+
+export interface CompareFile {
+  path: string
+  /** Every attempt has the same content here. */
+  same: boolean
+  cells: CompareCell[]
+}
+
+export interface CompareColumn {
+  attempt: Attempt
+  head: Snapshot
+  stats: AttemptStats
+  files_changed: number
+  lines_added: number
+  lines_removed: number
+}
+
+export interface CompareResponse {
+  base: Snapshot
+  columns: CompareColumn[]
+  files: CompareFile[]
+}
+
+export interface ActionResponse {
+  attempt: Attempt
+  closed_siblings: number[]
+}

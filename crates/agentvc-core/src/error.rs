@@ -36,6 +36,13 @@ pub enum Error {
     NoToken,
     #[error("GitHub API returned {status}: {message}")]
     GitHub { status: u16, message: String },
+    #[error("the {backend} view backend is not available here: {reason}")]
+    BackendUnavailable {
+        backend: &'static str,
+        reason: String,
+    },
+    #[error("the overlay view of attempt a{id} is not mounted and could not be mounted: {reason}")]
+    ViewUnmounted { id: i64, reason: String },
     #[error("io error at {path}: {source}")]
     Io {
         path: PathBuf,
@@ -74,6 +81,8 @@ impl Error {
             Error::BadRemote(_) => "bad_remote",
             Error::NoToken => "no_token",
             Error::GitHub { .. } => "github",
+            Error::BackendUnavailable { .. } => "backend_unavailable",
+            Error::ViewUnmounted { .. } => "view_unmounted",
             Error::Io { .. } => "io",
             Error::Spawn { .. } => "spawn_failed",
             Error::Db(_) => "db",

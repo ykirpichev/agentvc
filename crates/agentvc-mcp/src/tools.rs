@@ -207,6 +207,15 @@ fn fork_params() -> Vec<(&'static str, Value, bool)> {
             s("The prompt or instructions this attempt works from."),
             false,
         ),
+        (
+            "backend",
+            json!({
+                "type": "string",
+                "enum": ["auto", "reflink", "overlay", "copy"],
+                "description": "How the view is made. Defaults to auto. An overlay view in an unprivileged user namespace is visible only to agentvc processes (and what `run` starts); use copy or reflink for a view you edit directly.",
+            }),
+            false,
+        ),
     ]
 }
 
@@ -218,7 +227,8 @@ fn fork_opts(argv: &mut Argv, a: &Args) -> Result<(), BadArgs> {
             Some(a.str("actor")?.unwrap_or_else(|| DEFAULT_ACTOR.into())),
         )
         .opt("model", a.str("model")?)
-        .opt("prompt", a.str("prompt")?);
+        .opt("prompt", a.str("prompt")?)
+        .opt("backend", a.str("backend")?);
     Ok(())
 }
 
@@ -536,6 +546,10 @@ mod tests {
         assert_eq!(
             argv("fork", json!({ "task": "t1", "from": 1 })).unwrap(),
             ["fork", "--task=t1", "--from=1", "--actor=agent"]
+        );
+        assert_eq!(
+            argv("fork", json!({ "backend": "copy" })).unwrap(),
+            ["fork", "--actor=agent", "--backend=copy"]
         );
     }
 
