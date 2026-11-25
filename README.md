@@ -43,6 +43,21 @@ Every command takes `--json` and returns one JSON object; errors carry a
 stable `error.code`. Benchmark forks against `git worktree` with
 `scripts/bench-fork.sh <repo>`.
 
+### How views are made
+
+`fork` and `run` pick the fastest backend that works (`--backend` forces one):
+
+- `reflink` (btrfs, XFS, APFS): every file is cloned, which costs metadata only.
+- `overlay` (Linux without reflinks, e.g. ext4): the view is an overlayfs
+  mount over frozen layers of the parent. The first fork from a parent copies
+  it once into a base layer; later forks write only what changed since, so
+  they take tens of milliseconds. Mounted with `mount(2)` as root,
+  `fuse-overlayfs` if installed, or else inside an unprivileged user
+  namespace, where only agentvc processes (and what `agentvc run` starts) see
+  the view. Views are remounted on demand after a reboot (`agentvc path aN`).
+- `copy`: plain copy, the fallback. `--json` output says why in
+  `fork.backend_reason`.
+
 ## Build
 
 ```sh

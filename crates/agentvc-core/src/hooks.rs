@@ -195,7 +195,7 @@ mod tests {
 
     #[test]
     fn install_is_idempotent_and_keeps_other_settings() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::testutil::tempdir();
         let path = tmp.path().join(".claude/settings.json");
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(
@@ -223,7 +223,7 @@ mod tests {
 
     #[test]
     fn handle_snapshots_the_attempt_of_cwd() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::testutil::tempdir();
         fs::write(tmp.path().join("f"), "1").unwrap();
         let space = Space::init(tmp.path()).unwrap();
         let a = space
@@ -272,7 +272,7 @@ mod tests {
 
     #[test]
     fn handle_outside_space_is_skipped() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::testutil::tempdir();
         let out = handle("stop", &json!({ "cwd": tmp.path() }), Path::new("/")).unwrap();
         assert!(matches!(out, HookOutcome::Skipped { .. }));
     }

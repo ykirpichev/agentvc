@@ -7,10 +7,15 @@ pub mod github;
 pub mod hooks;
 pub mod index;
 pub mod objects;
+#[cfg(target_os = "linux")]
+pub mod overlay;
 pub mod run;
 pub mod snapshot;
 pub mod space;
 pub mod view;
+
+#[cfg(test)]
+pub(crate) mod testutil;
 
 pub use error::{Error, Result};
 pub use export::{Export, ExportOptions, ExportResult};
