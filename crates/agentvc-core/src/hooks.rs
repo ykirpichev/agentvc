@@ -84,6 +84,25 @@ pub fn handle(event: &str, input: &Value, fallback_cwd: &Path) -> Result<HookOut
     )?))
 }
 
+/// After an edit that snapshotted, a one-time note for the agent when
+/// another open attempt changes the same file (#94).
+pub fn overlap_notice(event: &str, input: &Value, fallback_cwd: &Path) -> Option<String> {
+    if event != "post-tool-use" {
+        return None;
+    }
+    let file = ["file_path", "notebook_path"]
+        .iter()
+        .find_map(|k| input.get("tool_input")?.get(*k)?.as_str())?;
+    let dir = edited_dir(input)?;
+    let space = Space::discover(&dir)
+        .or_else(|_| Space::discover(fallback_cwd))
+        .ok()?;
+    let attempt = space.attempt_for_path(&dir).ok()?;
+    let rel = Path::new(file).strip_prefix(&attempt.view_path).ok()?;
+    let rel = rel.to_str()?.replace('\\', "/");
+    space.overlap_notice(attempt.id, &rel).ok().flatten()
+}
+
 /// The directory of the file an editing tool call wrote, when the hook input
 /// names one by absolute path and that directory exists.
 fn edited_dir(input: &Value) -> Option<PathBuf> {

@@ -171,6 +171,27 @@ enum Cmd {
     /// Create and list tasks.
     #[command(subcommand)]
     Task(TaskCmd),
+    /// Open attempts of other tasks that change the same files as aN (or
+    /// every such pair), and which of those files would conflict if both
+    /// landed. Catch a conflict while both are still open.
+    Overlaps { attempt: Option<String> },
+    /// Resolve conflict hunks in an attempt's view without editing markers
+    /// by hand: take ours (the attempt), theirs (main, or the source of a
+    /// take), both, or the base, for every hunk or for --hunk N. Records a
+    /// `resolve` snapshot once no conflict of the attempt is left.
+    Resolve {
+        attempt: String,
+        /// Conflicted files.
+        #[arg(required = true)]
+        paths: Vec<String>,
+        /// ours (mine), theirs (main), both, both-theirs-first or base.
+        #[arg(long)]
+        take: String,
+        /// Only these hunks (numbered from 1, as `conflicts show` lists
+        /// them). Repeatable.
+        #[arg(long = "hunk", value_name = "N")]
+        hunks: Vec<usize>,
+    },
     /// Stacked branches that belong to this worktree only, so each editor
     /// window has its own stack (#107). Works in any git worktree; no space
     /// needed.
@@ -548,6 +569,10 @@ enum Cmd {
         /// mark the attempt exploring; fix them, then `snapshot`.
         #[arg(long)]
         keep_conflicts: bool,
+        /// Only report what the rebase would do (files that merge cleanly,
+        /// are auto-resolved or conflict); change nothing.
+        #[arg(long)]
+        preview: bool,
         /// Report git's conflicts as they are, without the resolution
         /// strategies (`agentvc config merge.strategy`).
         #[arg(long)]
@@ -777,6 +802,17 @@ enum Cmd {
 
 #[derive(Subcommand)]
 enum ConflictsCmd {
+    /// Open conflicts of an attempt (default: the current view's), left by
+    /// `rebase`, `take` or `merge` with --keep-conflicts. A file whose
+    /// markers are gone counts as resolved.
+    List {
+        attempt: Option<String>,
+        /// Resolved ones too.
+        #[arg(long)]
+        all: bool,
+    },
+    /// The hunks of one conflicted file: ours, base and theirs.
+    Show { attempt: String, path: String },
     /// Re-run the merge commits of the host repository's history with the
     /// conflict resolution strategies (`agentvc config merge.strategy`) and
     /// report how many conflicts resolve and whether the result matches
@@ -1323,6 +1359,143 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
             Out {
                 text: format!("t{}  {}", t.id, t.goal),
                 json: json!({ "task": t }),
+            }
+        }
+        Cmd::Overlaps { attempt } => {
+            let id = match attempt {
+                Some(a) => Some(attempt_id(&a)?),
+                None => space
+                    .attempt_for_path(&cwd)
+                    .ok()
+                    .map(|a| a.id)
+                    .filter(|&i| i != 1),
+            };
+            let os = space.overlaps(id)?;
+            let mut text = if os.is_empty() {
+                "no open attempts of different tasks change the same files".to_string()
+            } else {
+                String::new()
+            };
+            for o in &os {
+                text += &format!(
+                    "a{} and a{} ({}{}) both change {} file{}{}\n",
+                    o.attempt,
+                    o.other,
+                    o.other_actor,
+                    o.other_task.map(|t| format!(", t{t}")).unwrap_or_default(),
+                    o.files.len(),
+                    if o.files.len() == 1 { "" } else { "s" },
+                    if o.conflicting.is_empty() {
+                        ", all merge cleanly".to_string()
+                    } else {
+                        format!(", {} would conflict", o.conflicting.len())
+                    }
+                );
+                for f in &o.files {
+                    let c = if o.conflicting.contains(f) { 'C' } else { ' ' };
+                    text += &format!("  {c}  {f}\n");
+                }
+            }
+            Out {
+                text: text.trim_end().to_string(),
+                json: json!({ "overlaps": os }),
+            }
+        }
+        Cmd::Conflicts(ConflictsCmd::List { attempt, all }) => {
+            let id = match attempt {
+                Some(a) => attempt_id(&a)?,
+                None => current()?,
+            };
+            let cs = space.conflicts(id, all)?;
+            let mut text = if cs.is_empty() {
+                format!("a{id} has no {}conflicts", if all { "" } else { "open " })
+            } else {
+                format!("a{id}: {} conflicted files", cs.len())
+            };
+            for c in &cs {
+                let hunks = if c.resolved_at.is_none() {
+                    space
+                        .conflict_file(id, &c.path)
+                        .map(|f| format!("{} hunks", f.hunks.len()))
+                        .unwrap_or_else(|_| "file missing".into())
+                } else {
+                    format!("resolved ({})", c.resolution.as_deref().unwrap_or("?"))
+                };
+                text += &format!(
+                    "\n  C  {}  ({} by {}, {} vs {}; {hunks})",
+                    c.path, c.operation, c.snapshot_id, c.ours_label, c.theirs_label
+                );
+            }
+            Out {
+                text,
+                json: json!({ "attempt": id, "conflicts": cs }),
+            }
+        }
+        Cmd::Conflicts(ConflictsCmd::Show { attempt, path }) => {
+            let id = attempt_id(&attempt)?;
+            let f = space.conflict_file(id, &path)?;
+            let mut text = format!("{}: {} conflict hunks", f.path, f.hunks.len());
+            for h in &f.hunks {
+                text += &format!(
+                    "\n\n#{} at line {}\n--- ours ({})\n{}",
+                    h.index, h.line, h.ours_label, h.ours
+                );
+                if let Some(b) = &h.base {
+                    text += &format!("--- base\n{b}");
+                }
+                text += &format!("--- theirs ({})\n{}", h.theirs_label, h.theirs);
+            }
+            Out {
+                text: text.trim_end().to_string(),
+                json: json!({ "file": f }),
+            }
+        }
+        Cmd::Resolve {
+            attempt,
+            paths,
+            take,
+            hunks,
+        } => {
+            use agentvc_core::conflicts::{HunkChoice, Take};
+            let id = attempt_id(&attempt)?;
+            let t = Take::parse(&take)
+                .filter(|t| *t != Take::Custom)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("--take is ours, theirs, both, both-theirs-first or base")
+                })?;
+            let choices: Vec<HunkChoice> = hunks
+                .iter()
+                .map(|&index| HunkChoice {
+                    index,
+                    take: t.clone(),
+                    text: None,
+                })
+                .collect();
+            let actor = space.attempt(id)?.actor;
+            let mut results = Vec::new();
+            for p in &paths {
+                results.push(space.resolve_conflict(id, p, &choices, Some(t.clone()), &actor)?);
+            }
+            let mut text = String::new();
+            for r in &results {
+                text += &format!(
+                    "{}: {} hunks resolved, {} left\n",
+                    r.path, r.resolved_hunks, r.remaining_hunks
+                );
+            }
+            match results.last() {
+                Some(r) if r.open.is_empty() => {
+                    text += &format!(
+                        "no conflicts left in a{id}; snapshot s{}",
+                        r.snapshot.as_ref().map(|s| s.id).unwrap_or_default()
+                    )
+                }
+                Some(r) => text += &format!("still open: {}", r.open.join(", ")),
+                None => {}
+            }
+            Out {
+                text: text.trim_end().to_string(),
+                json: json!({ "resolve": results }),
             }
         }
         Cmd::Conflicts(ConflictsCmd::Replay {
@@ -2425,6 +2598,7 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
             remote,
             no_fetch,
             keep_conflicts,
+            preview,
             no_auto_resolve,
         } => {
             let opts = agentvc_core::RebaseOptions {
@@ -2433,11 +2607,36 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
                 no_fetch,
                 keep_conflicts,
                 no_auto_resolve,
+                preview,
                 actor: None,
             };
             let r = agentvc_core::rebase::rebase(&space, attempt_id(&attempt)?, &opts)?;
             let short = |c: &str| c[..12.min(c.len())].to_string();
-            let text = if !r.rebased {
+            let text = if r.preview {
+                let mut t = format!(
+                    "preview: rebasing a{} onto {} ({}) would change {} files; nothing was changed",
+                    r.attempt,
+                    r.onto_ref,
+                    short(&r.onto),
+                    r.changes.len()
+                );
+                t += &resolved_text(&r.resolved);
+                if r.conflict_files.is_empty() && r.conflicts.is_empty() {
+                    t += "\nno conflicts";
+                } else {
+                    t += &format!("\n{} files would conflict:", r.conflicts.len());
+                    for p in &r.conflicts {
+                        let left = r
+                            .conflict_files
+                            .iter()
+                            .find(|f| &f.path == p)
+                            .map(|f| format!("  ({} hunks)", f.remaining))
+                            .unwrap_or_default();
+                        t += &format!("\n  C  {p}{left}");
+                    }
+                }
+                t
+            } else if !r.rebased {
                 format!(
                     "a{} is already based on {} ({})",
                     r.attempt,
@@ -2959,6 +3158,26 @@ fn attempt_status_out(st: agentvc_core::status::AttemptStatus) -> Out {
             r.pid.map(|p| p.to_string()).unwrap_or("-".into())
         );
     }
+    for o in &st.overlaps {
+        t += &format!(
+            "overlap  a{} ({}) also changes {}{}\n",
+            o.other,
+            o.other_actor,
+            o.files.join(", "),
+            if o.conflicting.is_empty() {
+                String::new()
+            } else {
+                format!("; would conflict: {}", o.conflicting.join(", "))
+            }
+        );
+    }
+    if !st.conflicts.is_empty() {
+        t += &format!(
+            "conflicts {} (`agentvc conflicts show a{} PATH`, `agentvc resolve`)\n",
+            st.conflicts.join(", "),
+            a.id
+        );
+    }
     if let Some(u) = &st.upstream {
         let base = &u.base[..12.min(u.base.len())];
         t += &if u.behind == 0 {
@@ -3262,6 +3481,12 @@ fn run_hook(event: &str, cwd: &std::path::Path, as_json: bool) -> Out {
         input = reshaped;
     }
     let result = agentvc_core::hooks::handle(event, &input, cwd);
+    let notice = match &result {
+        Ok(agentvc_core::hooks::HookOutcome::Snapshot(_)) => {
+            agentvc_core::hooks::overlap_notice(event, &input, cwd)
+        }
+        _ => None,
+    };
     let json = match &result {
         Ok(o) => json!({ "hook": o }),
         Err(e) => {
@@ -3274,9 +3499,23 @@ fn run_hook(event: &str, cwd: &std::path::Path, as_json: bool) -> Out {
     } else if let Ok(space) = Space::discover(cwd) {
         auto_gc_in_background(&space);
     }
+    let mut json = json;
+    if let Some(n) = &notice {
+        json["notice"] = json!(n);
+    }
     Out {
-        // Claude Code shows hook stdout in transcripts; stay quiet in text mode.
-        text: String::new(),
+        // Claude Code shows hook stdout in transcripts; stay quiet in text
+        // mode, except for a note it hands to the agent as context.
+        text: match &notice {
+            Some(n) => json!({
+                "hookSpecificOutput": {
+                    "hookEventName": "PostToolUse",
+                    "additionalContext": n,
+                }
+            })
+            .to_string(),
+            None => String::new(),
+        },
         json: if as_json { json } else { Value::Null },
     }
 }

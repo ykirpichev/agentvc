@@ -22,6 +22,7 @@ pub(crate) fn routes() -> Router<AppState> {
     Router::new()
         .route("/space", get(space_info))
         .route("/overview", get(overview))
+        .route("/overlaps", get(overlaps))
         .route("/tasks", get(list_tasks))
         .route("/tasks/{id}", get(get_task))
         .route("/attempts", get(list_attempts))
@@ -34,6 +35,11 @@ pub(crate) fn routes() -> Router<AppState> {
         .route("/file", get(file))
         .route("/events", get(events::websocket))
         .route("/attempts/{id}/rebase", post(rebase::rebase))
+        .route("/attempts/{id}/conflicts", get(crate::conflicts::list))
+        .route(
+            "/attempts/{id}/conflicts/resolve",
+            post(crate::conflicts::resolve),
+        )
         .route("/attempts/{id}/take", post(take::take))
         .merge(review::routes())
         .fallback(|| async {
@@ -159,6 +165,18 @@ async fn space_info(State(st): State<AppState>) -> ApiResult<SpaceInfo> {
 /// and other dashboards that want one request instead of many.
 async fn overview(State(st): State<AppState>) -> ApiResult<agentvc_core::Overview> {
     Ok(Json(st.with_space(|s| s.overview()).await?))
+}
+
+#[derive(Serialize)]
+struct OverlapsResponse {
+    overlaps: Vec<agentvc_core::overlaps::Overlap>,
+}
+
+/// Pairs of open attempts of different tasks that change the same files,
+/// for overlap badges on the live board and attempt pages (#94).
+async fn overlaps(State(st): State<AppState>) -> ApiResult<OverlapsResponse> {
+    let overlaps = st.with_space(|s| s.overlaps(None)).await?;
+    Ok(Json(OverlapsResponse { overlaps }))
 }
 
 // ---- tasks ----------------------------------------------------------------

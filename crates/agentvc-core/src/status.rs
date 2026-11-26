@@ -43,6 +43,10 @@ pub struct AttemptStatus {
     pub pr: Option<crate::feedback::PrFeedback>,
     /// `None` outside a git repo, or without a remote-tracking branch.
     pub upstream: Option<Upstream>,
+    /// Files still conflicted after a rebase, take or merge.
+    pub conflicts: Vec<String>,
+    /// Other open attempts (of other tasks) that change the same files.
+    pub overlaps: Vec<crate::overlaps::Overlap>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -152,6 +156,16 @@ impl Space {
             .filter(|r| r.attempt_id == id)
             .collect();
         Ok(AttemptStatus {
+            overlaps: if attempt.status.is_open() && id != crate::space::ROOT_ATTEMPT {
+                self.overlaps(Some(id))?
+            } else {
+                Vec::new()
+            },
+            conflicts: self
+                .conflicts(id, false)?
+                .into_iter()
+                .map(|c| c.path)
+                .collect(),
             pr_url: self.pr_url(id)?,
             landed: self.landing(id)?,
             pr: self.pr_feedback(id)?,

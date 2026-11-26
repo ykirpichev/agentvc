@@ -194,6 +194,20 @@ async fn conflict_is_409_with_paths_and_keep_conflicts_reopens() {
     let (_, after) = send(&app, "GET", "/api/attempts/2/snapshots", None).await;
     assert_eq!(before, after);
 
+    // A preview says what would conflict and changes nothing either.
+    let (s, v) = send(
+        &app,
+        "POST",
+        "/api/attempts/2/rebase",
+        Some(json!({ "onto": "main", "preview": true })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["rebase"]["preview"], true);
+    assert_eq!(v["rebase"]["conflicts"], json!(["README.md"]));
+    let (_, after) = send(&app, "GET", "/api/attempts/2/snapshots", None).await;
+    assert_eq!(before, after);
+
     let (s, v) = send(
         &app,
         "POST",
@@ -206,6 +220,29 @@ async fn conflict_is_409_with_paths_and_keep_conflicts_reopens() {
     assert_eq!(v["attempt"]["status"], "exploring");
     let (_, f) = send(&app, "GET", "/api/file?ref=a2&path=README.md", None).await;
     assert!(f["content"].as_str().unwrap().contains("<<<<<<<"), "{f}");
+
+    // The conflict is data: hunks to show, choices to resolve them.
+    let (s, v) = send(&app, "GET", "/api/attempts/2/conflicts", None).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["conflicts"][0]["path"], "README.md");
+    assert_eq!(v["conflicts"][0]["operation"], "rebase");
+    let hunks = v["files"][0]["hunks"].as_array().unwrap();
+    assert_eq!(hunks.len(), 1);
+    assert!(hunks[0]["base"].is_string(), "{v}");
+    let (s, v) = send(
+        &app,
+        "POST",
+        "/api/attempts/2/conflicts/resolve",
+        Some(json!({ "path": "README.md", "hunks": [{ "index": 1, "take": "theirs" }] })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["resolve"]["remaining_hunks"], 0);
+    assert_eq!(v["resolve"]["snapshot"]["trigger"], "resolve");
+    let (_, v) = send(&app, "GET", "/api/attempts/2/conflicts", None).await;
+    assert_eq!(v["conflicts"], json!([]));
+    let (_, f) = send(&app, "GET", "/api/file?ref=a2&path=README.md", None).await;
+    assert!(!f["content"].as_str().unwrap().contains("<<<<<<<"), "{f}");
 
     // Root attempt and bad bodies are client errors.
     let (s, v) = send(&app, "POST", "/api/attempts/1/rebase", Some(json!({}))).await;

@@ -96,6 +96,34 @@ Promoted or abandoned the wrong attempt, or forked by mistake? `agentvc op log` 
 operation with its id and `agentvc undo [id]` reverses it (siblings reopen, an undone fork's
 view is put aside, not deleted); `agentvc undo <id of the undo>` redoes.
 
+### Conflicts that are left: resolve them without an agent (#92, #93)
+
+`agentvc rebase aX --preview` says which files would merge cleanly, which a strategy
+resolves and which conflict, and changes nothing (daemon: `"preview": true`). After
+`--keep-conflicts`, each conflicted file is recorded with its three sides:
+
+```sh
+agentvc conflicts list a5                  # open conflicts; `agentvc status` shows them too
+agentvc conflicts show a5 README.md        # hunks: ours (the attempt), base, theirs (main)
+agentvc resolve a5 README.md --take theirs # or ours, both, both-theirs-first, base; --hunk N
+```
+
+Editing the markers away by hand (or by an agent) counts too. `resolve` records a
+`resolve` snapshot once nothing is open, and `export`/`pr` refuse with
+`unresolved_conflicts` while anything is. The review UI uses
+`GET /api/attempts/{id}/conflicts` and `POST /api/attempts/{id}/conflicts/resolve`
+(`{path, hunks: [{index, take, text?}]}` or `{path, all}`).
+
+### Catch conflicts early: overlapping attempts (#94)
+
+Attempts of different tasks that change the same files will conflict once one lands.
+`agentvc overlaps [aN]` lists each such pair with the shared files and marks with `C` the
+ones a trial three-way merge (after auto-resolve) says would conflict; `agentvc status`
+in a view shows them as `overlap` lines, and the daemon serves `/api/overlaps`. Agents
+hear about it as they work: the first time an edit touches a file another open attempt
+changed, the `PostToolUse` hook adds a one-line note to the agent's context (once per
+file and attempt). Siblings in one task, and an attempt's own ancestors, are not reported.
+
 ### Open PRs restack themselves when main moves
 
 `.github/workflows/restack.yml` runs `agentvc restack --all-prs --push --comment` after
