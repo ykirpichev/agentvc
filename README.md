@@ -62,7 +62,9 @@ agentvc pr --refresh a2                       # PR checks, reviews, comments and
 agentvc comments a4                           # in a follow-up fork: the review to address, with file:line
 agentvc land a2 [--onto main] [--merge]       # no GitHub? put a2 on a local branch, then `git push`
 agentvc config export.verify true             # run the repo's pre-commit/commit-msg hooks before export/pr/land
-agentvc sync                                  # push the whole space (losers too) to origin
+agentvc sync                                  # push the whole space (losers too) to origin; merges what
+                                              # another machine synced (--prefer ours|theirs on a clash)
+agentvc config user.name "Ana Lee"            # this machine's person: actions record human:ana-lee
 agentvc init --from-remote                    # elsewhere: rebuild that space, same ids
 agentvc init --from-pr 12                     # or rebuild it from the comment `agentvc pr` keeps on PR #12
 agentvc doctor [--repair]                     # check objects, db, views, layers, runs, sync; fix what is safe

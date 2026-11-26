@@ -253,8 +253,11 @@ pub fn pr_body(space: &Space, winner: &Attempt, export: &ExportResult) -> Result
 
     let meta = attempt_meta(space, winner.id)?;
     body += "## Chosen attempt\n\n";
+    let picked_by = promoted_by(space, winner.id)?
+        .map(|p| format!(" by {p}"))
+        .unwrap_or_default();
     body += &format!(
-        "**a{}** by {}, {}, exported from snapshot s{} as `{}`\n\n",
+        "**a{}** by {}, {}{picked_by}, exported from snapshot s{} as `{}`\n\n",
         winner.id,
         who(winner),
         winner.status,
@@ -726,7 +729,11 @@ impl SaveResult {
 }
 
 fn err_json(e: &Error) -> Value {
-    json!({ "code": e.code(), "message": e.to_string() })
+    let mut v = json!({ "code": e.code(), "message": e.to_string() });
+    if let (Some(Value::Object(d)), Some(o)) = (e.details(), v.as_object_mut()) {
+        o.extend(d);
+    }
+    v
 }
 
 /// Space metadata key set when the remote refused a space push, so automatic
@@ -785,6 +792,7 @@ pub fn auto_save(space: &Space) -> Option<SaveResult> {
         &crate::sync::SyncOptions {
             remote: Some(remote),
             force: false,
+            prefer: None,
         },
         None,
         refused,
@@ -955,6 +963,17 @@ fn push_refused(stderr: &str) -> bool {
         || s.contains("permission denied")
         || s.contains("not allowed")
         || s.contains("protected branch")
+}
+
+/// Who promoted attempt `id` (the latest promote that still stands).
+fn promoted_by(space: &Space, id: i64) -> Result<Option<String>> {
+    Ok(space
+        .operations(None)?
+        .into_iter()
+        .find(|o| {
+            o.kind == "attempt.promoted" && o.undone_by.is_none() && o.payload["attempt"] == id
+        })
+        .map(|o| o.actor))
 }
 
 #[cfg(test)]

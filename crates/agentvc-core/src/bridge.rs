@@ -342,7 +342,7 @@ pub fn apply(space: &Space, id: i64, opts: &ApplyOptions) -> Result<ApplyResult>
         }
     }
     space.record(
-        "human",
+        &space.human(),
         "attempt.apply",
         serde_json::json!({ "attempt": id, "snapshot": head.id, "written": written, "deleted": deleted }),
     )?;

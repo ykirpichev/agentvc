@@ -68,15 +68,37 @@ pub(crate) const TABLES: &[&str] = &[
     "operations",
 ];
 /// Metadata keys that describe this machine's sync state, not the space.
-const LOCAL_META: &[&str] = &[SYNC_COMMIT_KEY, AUTO_SYNC_KEY];
+/// `user.name` is the person on this machine, so it stays here too.
+const LOCAL_META: &[&str] = &[SYNC_COMMIT_KEY, AUTO_SYNC_KEY, "config.user.name"];
+pub(crate) fn is_local_meta(key: &str) -> bool {
+    LOCAL_META.contains(&key)
+}
+
+/// Give rows created since the last sync (and rows from before uids
+/// existed) their uid; see [`crate::syncmerge`].
+pub(crate) fn ensure_uids(space: &Space) -> Result<()> {
+    let base = match (
+        space.meta(SYNC_COMMIT_KEY)?,
+        HostRepo::open(space.workdir()),
+    ) {
+        (Some(c), Ok(repo)) => crate::syncmerge::read_doc(&repo, &c).ok(),
+        _ => None,
+    };
+    crate::syncmerge::assign_uids(space, base.as_ref())
+}
+
 pub(crate) const LOG_TAIL: u64 = 256 * 1024;
 
 #[derive(Clone, Debug, Default)]
 pub struct SyncOptions {
     /// Git remote. Defaults to `origin`.
     pub remote: Option<String>,
-    /// Push even if the remote ref moved since this space last synced.
+    /// Push even if the remote ref moved since this space last synced,
+    /// replacing what the other machine added.
     pub force: bool,
+    /// Settle values both machines changed (an attempt's status) this way
+    /// instead of failing with `sync_conflict`.
+    pub prefer: Option<crate::syncmerge::Prefer>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -90,6 +112,10 @@ pub struct SyncResult {
     pub parent: Option<String>,
     /// True when nothing changed since the last sync, so nothing was pushed.
     pub unchanged: bool,
+    /// What another machine had synced since this one last did, now merged
+    /// in here.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub merged: Option<crate::syncmerge::MergeStats>,
     pub tasks: usize,
     pub attempts: usize,
     pub snapshots: usize,
@@ -162,7 +188,7 @@ fn sql_to_json(v: ValueRef<'_>) -> Value {
     }
 }
 
-fn json_to_sql(v: &Value) -> SqlValue {
+pub(crate) fn json_to_sql(v: &Value) -> SqlValue {
     match v {
         Value::Null => SqlValue::Null,
         Value::Bool(b) => SqlValue::Integer(*b as i64),
@@ -188,7 +214,7 @@ fn dump_table(db: &Connection, table: &str) -> Result<Vec<Value>> {
     Ok(rows.collect::<std::result::Result<_, _>>()?)
 }
 
-fn columns(db: &Connection, table: &str) -> Result<HashSet<String>> {
+pub(crate) fn columns(db: &Connection, table: &str) -> Result<HashSet<String>> {
     let mut stmt = db.prepare(&format!("PRAGMA table_info({table})"))?;
     let rows = stmt.query_map([], |r| r.get::<_, String>(1))?;
     Ok(rows.collect::<std::result::Result<_, _>>()?)
@@ -360,10 +386,14 @@ pub fn sync(space: &Space, opts: &SyncOptions) -> Result<SyncResult> {
 
     let parent = remote_tip(&repo, &remote, &refname)?;
     let last = space.meta(SYNC_COMMIT_KEY)?;
+    ensure_uids(space)?;
+    let mut merged = None;
+    // The previous sync, as a second parent when we merged past it.
+    let mut also = None;
     if let Some(tip) = &parent {
         repo.git(&["fetch", "--quiet", "--no-tags", &remote, &refname], None)?;
-        // The remote moved past what we last synced: someone else continued
-        // this space. Overwriting would hide their attempts.
+        // The remote moved past what we last synced: another machine
+        // continued this space. Merge its additions in rather than hide them.
         let ours = last.as_ref().is_some_and(|l| {
             l == tip
                 || repo
@@ -371,11 +401,26 @@ pub fn sync(space: &Space, opts: &SyncOptions) -> Result<SyncResult> {
                     .is_ok()
         });
         if !ours && !opts.force {
-            return Err(Error::SyncConflict {
-                refname,
-                remote,
-                tip: tip.clone(),
-            });
+            let base = match &last {
+                Some(l) => Some(crate::syncmerge::read_doc(&repo, l)?),
+                None => None,
+            };
+            let theirs = crate::syncmerge::read_doc(&repo, tip)?;
+            if theirs["format"].as_u64() != Some(DUMP_FORMAT as u64) {
+                return Err(Error::BadObject(format!(
+                    "{tip}:space.json (unknown format {})",
+                    theirs["format"]
+                )));
+            }
+            merged = Some(crate::syncmerge::merge(
+                space,
+                &repo,
+                tip,
+                base.as_ref(),
+                &theirs,
+                opts.prefer,
+            )?);
+            also = last.clone();
         }
     }
 
@@ -386,6 +431,32 @@ pub fn sync(space: &Space, opts: &SyncOptions) -> Result<SyncResult> {
     let objects_copied = crate::export::copy_tree_objects(space, &tree, &repo.objects_dir()?)?;
 
     let tree_hex = tree.to_hex();
+    // The merge brought nothing new and nothing changed here since the last
+    // sync: the remote already has everything. Adopt its commit rather than
+    // push one that differs only in this machine's ids and paths.
+    if let (Some(m), Some(l), Some(tip)) = (&merged, &last, &parent) {
+        let same_here = repo
+            .git(&["rev-parse", &format!("{l}^{{tree}}")], None)
+            .ok()
+            == Some(tree_hex.clone());
+        if m.rows == 0 && m.updated == 0 && same_here {
+            repo.git(&["update-ref", &refname, tip], None)?;
+            space.set_meta(SYNC_COMMIT_KEY, tip)?;
+            return Ok(SyncResult {
+                space_id: id,
+                remote,
+                refname,
+                commit: tip.clone(),
+                parent: parent.clone(),
+                unchanged: true,
+                merged,
+                tasks,
+                attempts,
+                snapshots,
+                objects_copied,
+            });
+        }
+    }
     if let Some(tip) = &parent {
         if repo
             .git(&["rev-parse", &format!("{tip}^{{tree}}")], None)
@@ -401,6 +472,7 @@ pub fn sync(space: &Space, opts: &SyncOptions) -> Result<SyncResult> {
                 commit: tip.clone(),
                 parent: parent.clone(),
                 unchanged: true,
+                merged,
                 tasks,
                 attempts,
                 snapshots,
@@ -417,6 +489,9 @@ pub fn sync(space: &Space, opts: &SyncOptions) -> Result<SyncResult> {
     if let Some(p) = &parent {
         args.extend(["-p", p.as_str()]);
     }
+    if let Some(l) = &also {
+        args.extend(["-p", l.as_str()]);
+    }
     args.extend(["-F", "-"]);
     let commit = repo.git_env(&args, Some(&message), &identity_env(&repo))?;
     let spec = format!("{}{commit}:{refname}", if opts.force { "+" } else { "" });
@@ -432,6 +507,7 @@ pub fn sync(space: &Space, opts: &SyncOptions) -> Result<SyncResult> {
         commit,
         parent,
         unchanged: false,
+        merged,
         tasks,
         attempts,
         snapshots,
@@ -724,6 +800,8 @@ fn restore(
 
     let runs_dir = dir.join("runs");
     insert_rows(&space, doc)?;
+    // Rows synced before uids existed get the uid every machine derives.
+    crate::syncmerge::assign_uids(&space, Some(doc))?;
     space.set_meta(SPACE_ID_KEY, &picked.space_id)?;
     space.set_meta(SYNC_COMMIT_KEY, &picked.commit)?;
     repo.git(&["update-ref", &picked.refname, &picked.commit], None)?;
@@ -747,7 +825,7 @@ fn restore(
 
     let count = |t: &str| doc["tables"][t].as_array().map_or(0, Vec::len);
     space.record(
-        "human",
+        &space.human(),
         "space.clone",
         json!({ "remote": remote, "ref": picked.refname, "commit": picked.commit }),
     )?;
@@ -1013,10 +1091,230 @@ mod tests {
         copy.create_task("more", None).unwrap();
         let next = sync(&copy, &SyncOptions::default()).unwrap();
         assert_eq!(next.parent.as_deref(), Some(&*r.commit));
-        // ...and the original, now behind, refuses to overwrite it.
+        // ...and the original, now behind, merges it in instead of
+        // overwriting it (#77).
         space.create_task("stale", None).unwrap();
-        let err = sync(&space, &SyncOptions::default()).unwrap_err();
+        let merged = sync(&space, &SyncOptions::default()).unwrap();
+        assert_eq!(merged.merged.as_ref().unwrap().tasks, 1);
+        assert_eq!(goals(&space), ["goal", "more", "stale"]);
+    }
+
+    /// Attempts as (actor, status), sorted: what both machines must agree on
+    /// whatever ids they gave them.
+    fn outline(space: &Space) -> Vec<(String, String)> {
+        let mut v: Vec<_> = space
+            .attempts(None)
+            .unwrap()
+            .into_iter()
+            .map(|a| (a.actor, a.status.as_str().to_string()))
+            .collect();
+        v.sort();
+        v
+    }
+
+    fn goals(space: &Space) -> Vec<String> {
+        let mut v: Vec<_> = space.tasks().unwrap().into_iter().map(|t| t.goal).collect();
+        v.sort();
+        v
+    }
+
+    fn fork_as(space: &Space, task: i64, actor: &str, file: &str) -> i64 {
+        let a = space
+            .fork(&ForkRequest {
+                task_id: Some(task),
+                actor: actor.into(),
+                backend: crate::view::BackendChoice::Copy,
+                ..Default::default()
+            })
+            .unwrap()
+            .attempt;
+        fs::write(a.view_path.join(file), format!("{actor}\n")).unwrap();
+        space.snapshot(a.id, "manual", None).unwrap();
+        a.id
+    }
+
+    /// The id `space` gives the attempt by `actor`.
+    fn by_actor(space: &Space, actor: &str) -> i64 {
+        space
+            .attempts(None)
+            .unwrap()
+            .into_iter()
+            .find(|a| a.actor == actor)
+            .unwrap()
+            .id
+    }
+
+    /// Two machines restore one space; each adds attempts and a task and
+    /// abandons a different attempt; they sync in either order. Both end
+    /// with the union, no --force.
+    #[test]
+    fn two_machines_merge_in_either_order() {
+        for a_first in [true, false] {
+            let (tmp, bare) = remote();
+            let a = checkout(&tmp, &bare, "a");
+            let sa = busy_space(&a);
+            fork_as(&sa, 1, "agent:c", "c.rs");
+            fork_as(&sa, 1, "agent:d", "d.rs");
+            sync(&sa, &SyncOptions::default()).unwrap();
+            let b = checkout(&tmp, &bare, "b");
+            let (sb, _) = clone_from_remote(&b, &CloneOptions::default()).unwrap();
+
+            // Same ids on both machines for the new work: they collide.
+            let on_a = fork_as(&sa, 1, "agent:from-a", "a.rs");
+            sa.set_status(
+                by_actor(&sa, "agent:c"),
+                Status::Abandoned,
+                Some("a says no"),
+            )
+            .unwrap();
+            let on_b = fork_as(&sb, 1, "agent:from-b", "b.rs");
+            assert_eq!(on_a, on_b);
+            sb.set_status(
+                by_actor(&sb, "agent:d"),
+                Status::Abandoned,
+                Some("b says no"),
+            )
+            .unwrap();
+            sb.create_task("b's task", None).unwrap();
+
+            let (first, second) = if a_first { (&sa, &sb) } else { (&sb, &sa) };
+            assert!(sync(first, &SyncOptions::default())
+                .unwrap()
+                .merged
+                .is_none());
+            let r = sync(second, &SyncOptions::default()).unwrap();
+            let m = r.merged.unwrap();
+            assert_eq!(m.attempts, 1, "{m:?}");
+            let again = sync(first, &SyncOptions::default()).unwrap();
+            assert!(again.merged.is_some());
+            // Settled: both are up to date now.
+            assert!(sync(second, &SyncOptions::default()).unwrap().unchanged);
+
+            assert_eq!(outline(&sa), outline(&sb));
+            assert_eq!(goals(&sa), goals(&sb));
+            assert_eq!(goals(&sa), ["b's task", "goal"]);
+            // The other machine's operations are history here, not undoable.
+            let foreign = sa
+                .operations(None)
+                .unwrap()
+                .into_iter()
+                .filter(|o| o.payload.get("merged_from").is_some())
+                .collect::<Vec<_>>();
+            assert!(!foreign.is_empty() && foreign.iter().all(|o| !o.undoable));
+            let o = outline(&sa);
+            assert!(o.contains(&("agent:c".into(), "abandoned".into())), "{o:?}");
+            assert!(o.contains(&("agent:d".into(), "abandoned".into())), "{o:?}");
+            assert_eq!(o.len(), 7, "{o:?}");
+            // The other machine's attempt came with its files and a view.
+            for (space, actor, file) in
+                [(&sa, "agent:from-b", "b.rs"), (&sb, "agent:from-a", "a.rs")]
+            {
+                let id = by_actor(space, actor);
+                assert_ne!(id, on_a, "renumbered past the local attempt");
+                let v = space.attempt(id).unwrap().view_path;
+                assert_eq!(
+                    fs::read_to_string(v.join(file)).unwrap(),
+                    format!("{actor}\n")
+                );
+                let changes = space
+                    .diff(
+                        crate::space::Ref::Snapshot(1),
+                        crate::space::Ref::Attempt(id),
+                    )
+                    .unwrap();
+                assert!(changes.iter().any(|c| c.path == file));
+            }
+        }
+    }
+
+    #[test]
+    fn same_attempt_status_conflict_names_both_values() {
+        let (tmp, bare) = remote();
+        let a = checkout(&tmp, &bare, "a");
+        let sa = busy_space(&a);
+        let c = fork_as(&sa, 1, "agent:c", "c.rs");
+        sync(&sa, &SyncOptions::default()).unwrap();
+        let b = checkout(&tmp, &bare, "b");
+        let (sb, _) = clone_from_remote(&b, &CloneOptions::default()).unwrap();
+
+        sa.set_status(c, Status::Failed, None).unwrap();
+        fork_as(&sa, 1, "agent:more", "m.rs");
+        sb.set_status(c, Status::Abandoned, Some("dup")).unwrap();
+        sync(&sa, &SyncOptions::default()).unwrap();
+
+        let err = sync(&sb, &SyncOptions::default()).unwrap_err();
         assert_eq!(err.code(), "sync_conflict");
+        let msg = err.to_string();
+        assert!(
+            msg.contains(&format!("a{c} status is abandoned here but failed")),
+            "{msg}"
+        );
+        let d = err.details().unwrap();
+        assert_eq!(d["conflicts"][0]["what"], format!("a{c}"));
+        assert_eq!(d["conflicts"][0]["ours"], "abandoned");
+        assert_eq!(d["conflicts"][0]["theirs"], "failed");
+        // Nothing changed here.
+        assert_eq!(sb.attempts(None).unwrap().len(), 4);
+
+        let r = sync(
+            &sb,
+            &SyncOptions {
+                prefer: Some(crate::syncmerge::Prefer::Theirs),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(r.merged.unwrap().resolved.len(), 1);
+        assert_eq!(sb.attempt(c).unwrap().status, Status::Failed);
+        assert_eq!(sb.attempts(None).unwrap().len(), 5);
+        sync(&sa, &SyncOptions::default()).unwrap();
+        assert_eq!(outline(&sa), outline(&sb));
+    }
+
+    /// A space synced before uids existed: machines that restored it derive
+    /// the same uids for its rows, so merging doesn't duplicate them.
+    #[test]
+    fn spaces_synced_before_uids_migrate() {
+        let (tmp, bare) = remote();
+        let a = checkout(&tmp, &bare, "a");
+        let sa = busy_space(&a);
+        // What an older agentvc pushed: no uid anywhere.
+        let id = space_id(&sa).unwrap();
+        let mut doc = dump(&sa, &id).unwrap();
+        for t in crate::syncmerge::UID_TABLES {
+            for row in doc["tables"][*t].as_array_mut().unwrap() {
+                row.as_object_mut().unwrap().remove("uid");
+            }
+        }
+        let repo = HostRepo::open(&a).unwrap();
+        let tree = build_tree(&sa, &doc).unwrap();
+        crate::export::copy_tree_objects(&sa, &tree, &repo.objects_dir().unwrap()).unwrap();
+        let commit = repo
+            .git_env(
+                &["commit-tree", &tree.to_hex(), "-m", "old sync"],
+                None,
+                &identity_env(&repo),
+            )
+            .unwrap();
+        let refname = format!("{REF_PREFIX}{id}");
+        repo.git(
+            &["push", "-q", "origin", &format!("{commit}:{refname}")],
+            None,
+        )
+        .unwrap();
+        sa.set_meta(SYNC_COMMIT_KEY, &commit).unwrap();
+
+        let b = checkout(&tmp, &bare, "b");
+        let (sb, _) = clone_from_remote(&b, &CloneOptions::default()).unwrap();
+        fork_as(&sa, 1, "agent:new-a", "a.rs");
+        fork_as(&sb, 1, "agent:new-b", "b.rs");
+        sync(&sa, &SyncOptions::default()).unwrap();
+        sync(&sb, &SyncOptions::default()).unwrap();
+        sync(&sa, &SyncOptions::default()).unwrap();
+        assert_eq!(outline(&sa), outline(&sb));
+        assert_eq!(sa.attempts(None).unwrap().len(), 5);
+        assert_eq!(goals(&sa), ["goal"]);
+        assert_eq!(sa.tags().unwrap().len(), 1);
     }
 
     #[test]

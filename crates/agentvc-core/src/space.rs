@@ -141,6 +141,15 @@ const ADDED_COLUMNS: &[(&str, &str, &str)] = &[
     ("attempts", "closed_at", "INTEGER"),
     // When `agentvc gc` dropped the snapshot's tree; the row stays.
     ("snapshots", "pruned_at", "INTEGER"),
+    // The same on every machine a space syncs to (#77): ids are per machine.
+    ("tasks", "uid", "TEXT"),
+    ("attempts", "uid", "TEXT"),
+    ("snapshots", "uid", "TEXT"),
+    ("tags", "uid", "TEXT"),
+    ("runs", "uid", "TEXT"),
+    ("exports", "uid", "TEXT"),
+    ("git_bases", "uid", "TEXT"),
+    ("operations", "uid", "TEXT"),
 ];
 
 fn migrate(db: &Connection) -> Result<()> {
@@ -415,7 +424,11 @@ impl Space {
         if let Some(head) = crate::export::host_head(&workdir) {
             space.set_meta(crate::export::IMPORT_BASE_KEY, &head)?;
         }
-        space.record("human", "init", serde_json::json!({ "workdir": workdir }))?;
+        space.record(
+            &space.human(),
+            "init",
+            serde_json::json!({ "workdir": workdir }),
+        )?;
         Ok(space)
     }
 
@@ -505,7 +518,7 @@ impl Space {
         )?;
         let id = self.db.last_insert_rowid();
         self.record(
-            "human",
+            &self.human(),
             "task.create",
             serde_json::json!({ "task": id, "goal": goal }),
         )?;
@@ -860,9 +873,9 @@ impl Space {
 
     /// Change an attempt's outcome. Promoting an attempt that belongs to a
     /// task also closes its open siblings as `abandoned(lost to aN)`.
-    /// Recorded in the operation log as done by `human`.
+    /// Recorded in the operation log as done by [`Space::human`].
     pub fn set_status(&self, id: i64, status: Status, reason: Option<&str>) -> Result<Attempt> {
-        self.set_status_as("human", id, status, reason)
+        self.set_status_as(&self.human(), id, status, reason)
     }
 
     /// [`Space::set_status`], recorded as done by `actor` (e.g. `human:ana`).
@@ -1264,6 +1277,11 @@ mod tests {
             .unwrap()
             .attempt
             .id;
+        // `user.name` names the person here; set_status records them.
+        space
+            .set_config(crate::config::USER_NAME, &["Ana Lee".into()])
+            .unwrap();
+        assert_eq!(space.human(), "human:ana-lee");
         space.set_status(a, Status::Passed, None).unwrap();
         space
             .set_status_as("human:ana", a, Status::Abandoned, Some("no"))
@@ -1279,7 +1297,7 @@ mod tests {
         assert_eq!(
             actors,
             [
-                ("human".into(), "attempt.passed".into()),
+                ("human:ana-lee".into(), "attempt.passed".into()),
                 ("human:ana".into(), "attempt.abandoned".into())
             ]
         );

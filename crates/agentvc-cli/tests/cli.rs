@@ -532,6 +532,8 @@ fn pr_pushes_branch_and_opens_pr_with_rejected_attempts() {
             "cost=$0.55",
         ],
     );
+    // Whoever picks the winner is named in the PR body (#77).
+    agentvc(&w, &["config", "user.name", "Ana"]);
     agentvc(&w, &["promote", "a2"]);
 
     let (api, log) = fake_github();
@@ -665,7 +667,10 @@ fn pr_pushes_branch_and_opens_pr_with_rejected_attempts() {
         assert_eq!(body["title"], "make f return 2");
         let text = body["body"].as_str().unwrap();
         assert!(text.contains("unit tests pass"), "{text}");
-        assert!(text.contains("**a2** by agent:one"), "{text}");
+        assert!(
+            text.contains("**a2** by agent:one, promoted by human:ana,"),
+            "{text}"
+        );
         assert!(text.contains("- Tests: 12/12"), "{text}");
         assert!(
             text.contains("| a3 | abandoned | lost to a2 | agent:two | 9/12 | $0.55 |"),
@@ -1756,6 +1761,143 @@ fn log_filters_and_blame() {
     let text = agentvc_text(w, &["blame", "x.py", "a2", "--no-working"]);
     assert!(text.contains("agent:claude"), "{text}");
     assert!(!text.contains("three"), "{text}");
+}
+
+/// Two people on two machines share a space (#77): actions carry their
+/// names, `sync` merges what the other added, and a status both changed is
+/// a `sync_conflict` naming the attempt and both values.
+#[test]
+fn two_people_sync_one_space() {
+    let tmp = tempdir();
+    let remote = tmp.path().join("remote.git");
+    git(
+        tmp.path(),
+        &[
+            "init",
+            "-q",
+            "--bare",
+            "-b",
+            "main",
+            remote.to_str().unwrap(),
+        ],
+    );
+    let ana = tmp.path().join("ana");
+    git(
+        tmp.path(),
+        &["init", "-q", "-b", "main", ana.to_str().unwrap()],
+    );
+    git(&ana, &["config", "user.name", "Ana Lee"]);
+    std::fs::write(ana.join("lib.rs"), "fn f() {}\n").unwrap();
+    git(&ana, &["add", "-A"]);
+    git(&ana, &["commit", "-q", "-m", "base"]);
+    git(&ana, &["remote", "add", "origin", remote.to_str().unwrap()]);
+    git(&ana, &["push", "-q", "origin", "main"]);
+    assert_eq!(agentvc(&ana, &["init", "--no-prepare"])["ok"], true);
+    agentvc(&ana, &["task", "new", "goal"]);
+    for actor in ["agent:x", "agent:y"] {
+        let v = agentvc(
+            &ana,
+            &[
+                "fork",
+                "--task",
+                "t1",
+                "--from",
+                "a1",
+                "--actor",
+                actor,
+                "--backend",
+                "copy",
+            ],
+        );
+        assert_eq!(v["ok"], true, "{v}");
+    }
+    // A person forking is themselves, from git config or `user.name`.
+    let v = agentvc(
+        &ana,
+        &["fork", "--task", "t1", "--from", "a1", "--backend", "copy"],
+    );
+    assert_eq!(v["fork"]["attempt"]["actor"], "human:ana-lee", "{v}");
+    assert_eq!(agentvc(&ana, &["sync"])["ok"], true);
+
+    let bo = tmp.path().join("bo");
+    git(
+        tmp.path(),
+        &[
+            "clone",
+            "-q",
+            remote.to_str().unwrap(),
+            bo.to_str().unwrap(),
+        ],
+    );
+    let v = agentvc(&bo, &["init", "--from-remote", "--no-prepare"]);
+    assert_eq!(v["ok"], true, "{v}");
+    // Bo's name is this machine's setting; it doesn't travel with the space.
+    agentvc(&bo, &["config", "user.name", "Bo"]);
+
+    agentvc(&ana, &["abandon", "a2", "--reason", "ana: no"]);
+    agentvc(&bo, &["mark", "a3", "passed"]);
+    agentvc(
+        &bo,
+        &[
+            "fork",
+            "--task",
+            "t1",
+            "--from",
+            "a1",
+            "--actor",
+            "agent:bo",
+            "--backend",
+            "copy",
+        ],
+    );
+    assert_eq!(agentvc(&ana, &["sync"])["ok"], true);
+    let v = agentvc(&bo, &["sync"]);
+    assert!(
+        v["sync"]["git"]["merged"]["updated"].as_u64().unwrap() > 0,
+        "{v}"
+    );
+    assert_eq!(agentvc(&ana, &["sync"])["ok"], true);
+    let outline = |dir: &Path| {
+        let mut v: Vec<(String, String)> = agentvc(dir, &["log"])["attempts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| {
+                (
+                    a["actor"].as_str().unwrap().into(),
+                    a["status"].as_str().unwrap().into(),
+                )
+            })
+            .collect();
+        v.sort();
+        v
+    };
+    assert_eq!(outline(&ana), outline(&bo));
+    assert!(outline(&ana).contains(&("agent:bo".into(), "exploring".into())));
+    assert!(outline(&ana).contains(&("agent:x".into(), "abandoned".into())));
+    assert!(outline(&ana).contains(&("agent:y".into(), "passed".into())));
+    // Who did what is in the operation log on both machines.
+    let ops = agentvc(&ana, &["op", "log"]).to_string();
+    assert!(
+        ops.contains("human:ana-lee") && ops.contains("human:bo"),
+        "{ops}"
+    );
+
+    // Both close a3 differently.
+    agentvc(&ana, &["abandon", "a3", "--reason", "dup"]);
+    agentvc(&bo, &["promote", "a3"]);
+    assert_eq!(agentvc(&bo, &["sync"])["ok"], true);
+    let v = agentvc(&ana, &["sync"]);
+    assert_eq!(v["error"]["code"], "sync_conflict", "{v}");
+    assert_eq!(v["error"]["conflicts"][0]["what"], "a3");
+    assert_eq!(v["error"]["conflicts"][0]["ours"], "abandoned");
+    assert_eq!(v["error"]["conflicts"][0]["theirs"], "promoted");
+    let v = agentvc(&ana, &["sync", "--prefer", "theirs"]);
+    assert_eq!(v["ok"], true, "{v}");
+    assert_eq!(
+        agentvc(&ana, &["show", "a3"])["attempt"]["status"],
+        "promoted"
+    );
 }
 
 #[test]

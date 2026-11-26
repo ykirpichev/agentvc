@@ -703,7 +703,7 @@ fn check_git(r: &mut Report, offline: bool) -> Result<()> {
             Severity::Warning,
             "sync",
             format!(
-                "{refname} on {remote} moved to {tip} since this space last synced ({last}); another machine continued it"
+                "{refname} on {remote} moved to {tip} since this space last synced ({last}); another machine continued it, `agentvc sync` merges it in"
             ),
             None,
         ),

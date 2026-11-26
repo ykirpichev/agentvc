@@ -26,6 +26,7 @@ pub const PR_BASE: &str = "pr.base";
 pub const PR_TRAILER: &str = "pr.trailer";
 pub const PR_BODY_PREFIX: &str = "pr.body-prefix";
 pub const GIT_CAPTURE_COMMITS: &str = crate::viewgit::CAPTURE_COMMITS;
+pub const USER_NAME: &str = "user.name";
 
 pub const MERGE_STRATEGY: &str = "merge.strategy";
 pub const MERGE_FORMATTER: &str = "merge.formatter";
@@ -37,6 +38,12 @@ pub const GC_KEEP_ABANDONED: &str = "gc.keepAbandonedDays";
 pub const GC_KEEP_VIEWS: &str = "gc.keepViewsDays";
 
 pub const KEYS: &[Key] = &[
+    Key {
+        name: USER_NAME,
+        multi: false,
+        env: Some("AGENTVC_USER"),
+        about: "your name, recorded as human:<name> on what you do (default: git config user.name); stays on this machine",
+    },
     Key {
         name: PR_BRANCH,
         multi: false,
@@ -119,7 +126,7 @@ pub fn key(name: &str) -> Result<&'static Key> {
         .ok_or_else(|| Error::BadConfigKey(name.to_string()))
 }
 
-fn meta_key(name: &str) -> String {
+pub(crate) fn meta_key(name: &str) -> String {
     format!("config.{name}")
 }
 
@@ -159,6 +166,50 @@ impl Space {
             }
         }
         Ok(self.config_values(name)?.pop())
+    }
+
+    /// Who a person working here is recorded as: `human:<name>` from
+    /// `agentvc config user.name` (or `AGENTVC_USER`), else `git config
+    /// user.name`, else plain `human`.
+    pub fn human(&self) -> String {
+        let name = self.config(USER_NAME).ok().flatten().or_else(|| {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(self.workdir())
+                .args(["config", "user.name"])
+                .output()
+                .ok()
+                .filter(|o| o.status.success())
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        });
+        human_actor(name.as_deref())
+    }
+}
+
+/// `human:<name>` for a person's name, or plain `human` without one.
+/// Whitespace collapses to `-` and the name is lowercased, so the actor
+/// stays one token.
+pub fn human_actor(name: Option<&str>) -> String {
+    let name = name
+        .map(|n| {
+            n.split_whitespace()
+                .collect::<Vec<_>>()
+                .join("-")
+                .to_lowercase()
+        })
+        .filter(|n| !n.is_empty());
+    match name {
+        Some(n) => format!("human:{n}"),
+        None => "human".into(),
+    }
+}
+
+/// An actor flag as given: `human` alone means the person here, so it
+/// becomes [`Space::human`]; anything else (agents, `human:ana`) stays.
+pub fn resolve_actor(space: &Space, actor: Option<&str>) -> String {
+    match actor {
+        None | Some("human") => space.human(),
+        Some(a) => a.to_string(),
     }
 }
 

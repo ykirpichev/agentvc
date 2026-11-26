@@ -31,6 +31,7 @@ pub mod space;
 pub mod status;
 pub mod story;
 pub mod sync;
+pub mod syncmerge;
 pub mod tags;
 pub mod undo;
 pub mod view;
