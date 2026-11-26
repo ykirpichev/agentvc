@@ -406,7 +406,7 @@ pub fn take(space: &Space, into: i64, source: i64, opts: &TakeOptions) -> Result
     if !hunks.is_empty() {
         meta["hunks"] = json!(hunks);
     }
-    if keep {
+    if keep && !merge.conflicts.is_empty() {
         meta["conflicts"] = json!(merge.conflicts);
     }
     if !resolved.is_empty() {

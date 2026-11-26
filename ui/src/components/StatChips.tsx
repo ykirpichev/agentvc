@@ -18,11 +18,15 @@ export function StatChips({
   return (
     <div className={`stat-chips ${className ?? ''}`}>
       <span
-        className={`stat-chip ${check ? (check.passed ? 'chip-ok' : 'chip-bad') : 'chip-none'}`}
-        title={check ? `Check exited ${check.exit_code ?? '?'} (s${check.snapshot})` : 'No check has run'}
+        className={`stat-chip ${check ? (check.stale ? 'chip-none' : check.passed ? 'chip-ok' : 'chip-bad') : 'chip-none'}`}
+        title={
+          check
+            ? `${check.summary ?? `Check exited ${check.exit_code ?? '?'}`} (s${check.snapshot}${check.stale ? ', before the latest changes' : ''})`
+            : 'No check has run'
+        }
       >
         <Icon name="flask" size={13} />
-        {check ? (check.passed ? 'Checks pass' : 'Checks fail') : 'No checks'}
+        {check ? (check.passed ? 'Checks pass' : 'Checks fail') + (check.stale ? ' (stale)' : '') : 'No checks'}
       </span>
       {lines && (
         <span className="stat-chip" title="Lines added and removed against the common base">

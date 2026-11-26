@@ -146,6 +146,41 @@ CREATE TABLE IF NOT EXISTS conflicts (
     resolved_at INTEGER,
     resolution TEXT
 );
+CREATE TABLE IF NOT EXISTS annotations (
+    id INTEGER PRIMARY KEY,
+    attempt_id INTEGER NOT NULL REFERENCES attempts(id),
+    actor TEXT NOT NULL,
+    model TEXT,
+    cost_usd REAL,
+    tokens_in INTEGER,
+    tokens_out INTEGER,
+    note TEXT,
+    transcript TEXT,
+    session TEXT,
+    created_at INTEGER NOT NULL,
+    uid TEXT
+);
+CREATE TABLE IF NOT EXISTS checks (
+    id INTEGER PRIMARY KEY,
+    attempt_id INTEGER NOT NULL REFERENCES attempts(id),
+    snapshot_id INTEGER NOT NULL REFERENCES snapshots(id),
+    tree TEXT NOT NULL,
+    name TEXT NOT NULL,
+    command TEXT NOT NULL,
+    exit_code INTEGER NOT NULL,
+    duration_ms INTEGER NOT NULL,
+    tests_passed INTEGER,
+    tests_failed INTEGER,
+    tests_skipped INTEGER,
+    log_excerpt TEXT,
+    reused_from INTEGER,
+    actor TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    uid TEXT
+);
+CREATE INDEX IF NOT EXISTS annotations_attempt ON annotations(attempt_id);
+CREATE INDEX IF NOT EXISTS checks_attempt ON checks(attempt_id);
+CREATE INDEX IF NOT EXISTS checks_tree ON checks(tree, command);
 CREATE INDEX IF NOT EXISTS conflicts_attempt ON conflicts(attempt_id);
 CREATE INDEX IF NOT EXISTS attempts_task ON attempts(task_id);
 CREATE INDEX IF NOT EXISTS snapshots_attempt ON snapshots(attempt_id);

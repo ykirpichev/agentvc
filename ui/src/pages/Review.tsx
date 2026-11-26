@@ -18,7 +18,7 @@ import { MovePreview } from '../components/MovePreview'
 import { useToast } from '../components/Toaster'
 import { stackStale, visibleVersions } from '../core/graph'
 import { nextStep, type NextStep } from '../core/next'
-import { HELP, shortSha, statusWords, versionName, WORDS } from '../core/words'
+import { agentLine, HELP, shortSha, statusWords, testsWords, versionName, WORDS } from '../core/words'
 import { money, plural, timeAgo } from '../lib/format'
 import { CompareView } from './Compare'
 
@@ -152,8 +152,9 @@ export function TaskReview() {
                 <Link to={versionLink(a.id)} className="rv-card-name">{versionName(a)}</Link>
                 <span className={`tone tone-${s.tone}`}>{s.label}</span>
               </div>
-              <p className="rv-card-sum">{st?.summary ?? a.reason ?? a.prompt ?? 'No summary yet.'}</p>
+              <p className="rv-card-sum">{st?.summary ?? g.agent?.notes.at(-1)?.text ?? a.reason ?? a.prompt ?? 'No summary yet.'}</p>
               <p className="muted rv-card-stats">
+                {g.tests && a.status === 'promoted' ? `${testsWords(g.tests).label} · ` : ''}
                 {st?.cost_usd != null ? `${money(st.cost_usd)} · ` : ''}
                 {(g.behind ?? 0) > 0 ? `${g.behind} behind main · ` : ''}
                 {g.conflicts > 0 ? `${plural(g.conflicts, 'conflict')} · ` : ''}
@@ -263,6 +264,8 @@ export function VersionReview() {
       </div>
 
       {a.prompt && <p className="rv-prompt">{a.prompt}</p>}
+
+      <VersionFacts g={g} />
 
       <div className="rv-actions rv-actions-list">
         {isOpen && !chosen && g.conflicts === 0 && (
@@ -392,6 +395,46 @@ export function VersionReview() {
           </div>
         )}
       </section>
+    </div>
+  )
+}
+
+/** Tests and agent metadata (cost, tokens, notes, transcript), only when something was recorded. */
+function VersionFacts({ g }: { g: GraphAttempt }) {
+  const t = g.tests ? testsWords(g.tests) : null
+  const line = agentLine(g.agent, g.attempt.model)
+  const notes = g.agent?.notes ?? []
+  const transcripts = g.agent?.transcripts ?? []
+  if (!t && !line && !notes.length && !transcripts.length) return null
+  return (
+    <div className="rv-facts">
+      <p className="rv-facts-line">
+        {t && (
+          <span className={`tone tone-${t.tone}`} title={t.help}>
+            {t.label}
+          </span>
+        )}
+        {t && !g.tests!.stale && g.tests!.summary && (
+          <span className="muted">{g.tests!.summary.replace(/^(pass|fail) · /, '')}</span>
+        )}
+        {line && <span className="muted">{line}</span>}
+        {transcripts.map((tr) =>
+          /^https?:\/\//.test(tr) ? (
+            <a key={tr} href={tr} target="_blank" rel="noreferrer">
+              Transcript ↗
+            </a>
+          ) : (
+            <span key={tr} className="muted mono rv-facts-path" title={tr}>
+              transcript {tr.split('/').pop()}
+            </span>
+          ),
+        )}
+      </p>
+      {notes.map((n, i) => (
+        <p key={i} className="rv-note">
+          {n.text} <span className="muted">· {n.actor.replace(/^[a-z]+:/, '')}, {timeAgo(n.created_at)}</span>
+        </p>
+      ))}
     </div>
   )
 }

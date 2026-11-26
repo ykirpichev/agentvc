@@ -108,12 +108,37 @@ pub fn handle(event: &str, input: &Value, fallback_cwd: &Path) -> Result<HookOut
     // Tool calls that changed nothing (most Bash calls) don't add a snapshot.
     // Stop events always record one, as the boundary of an agent turn.
     let always = event != "post-tool-use";
-    Ok(HookOutcome::Snapshot(space.snapshot_with(
+    let snap = space.snapshot_with(attempt.id, &trigger, Some(meta), always)?;
+    if event == "stop" {
+        annotate_from_transcript(&space, &attempt, input);
+    }
+    Ok(HookOutcome::Snapshot(snap))
+}
+
+/// At the end of a turn, record the session's token use so far and its
+/// transcript on the attempt (#10). Best effort: a transcript that can't
+/// be read records nothing.
+fn annotate_from_transcript(space: &Space, attempt: &crate::space::Attempt, input: &Value) {
+    let (Some(session), Some(path)) = (
+        input.get("session_id").and_then(Value::as_str),
+        input.get("transcript_path").and_then(Value::as_str),
+    ) else {
+        return;
+    };
+    let Some((tin, tout)) = crate::annotate::transcript_tokens(Path::new(path)) else {
+        return;
+    };
+    let _ = space.annotate(
         attempt.id,
-        &trigger,
-        Some(meta),
-        always,
-    )?))
+        &crate::annotate::AnnotateRequest {
+            actor: attempt.actor.clone(),
+            tokens_in: Some(tin),
+            tokens_out: Some(tout),
+            transcript: Some(path.to_string()),
+            session: Some(session.to_string()),
+            ..Default::default()
+        },
+    );
 }
 
 /// After an edit that snapshotted, a one-time note for the agent when

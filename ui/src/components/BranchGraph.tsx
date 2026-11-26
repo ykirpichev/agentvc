@@ -12,7 +12,7 @@ import type { Graph, GraphAttempt, TaskSummary } from '../api/types'
 import { useResource } from '../api/useResource'
 import { embedMode, thisWorkspace } from '../core/embed'
 import { canMoveBranch, canMoveOnto, canStackOnto, layout, stackStale, type Cell, type GraphRow } from '../core/graph'
-import { shortSha, versionName } from '../core/words'
+import { agentLine, shortSha, testsWords, versionName } from '../core/words'
 import { timeAgo } from '../lib/format'
 import { branchDrop, isBranchDrag, useStackEdit } from './stackEdit'
 import { WindowStack } from './WorkspaceStacks'
@@ -323,7 +323,13 @@ function VersionRow({
       onDragLeave={onDragLeave}
       onDrop={onDrop}
       onClick={onOpen}
-      title={`a${a.id} · ${a.actor}${a.model ? ` · ${a.model}` : ''}`}
+      title={[
+        `a${a.id} · ${a.actor}${a.model ? ` · ${a.model}` : ''}`,
+        g.tests ? testsWords(g.tests).label : '',
+        agentLine(g.agent, a.model),
+      ]
+        .filter(Boolean)
+        .join('\n')}
     >
       <Gutter cells={prefix} />
       <span className={`bdot bdot-${dot}`} aria-hidden />
@@ -342,7 +348,9 @@ function VersionRow({
           </span>
         ) : null}
         {g.pr && <span className="bbadge bbadge-pr">#{g.pr.number}</span>}
-        {a.status === 'failed' && <span className="bbadge">fails</span>}
+        {(a.status === 'failed' || (a.status === 'promoted' && g.tests && !g.tests.passed && !g.tests.stale)) && (
+          <span className="bbadge">fails</span>
+        )}
         {a.status === 'exploring' && <span className="bbadge">working</span>}
         {taskLabel && <span className="bsub btask">{taskLabel}</span>}
       </span>

@@ -264,6 +264,19 @@ impl Space {
     }
 }
 
+/// The end of a run's log (the check's output and claude's result line).
+fn log_tail(p: &Path) -> String {
+    use std::io::{Read, Seek, SeekFrom};
+    let Ok(mut f) = fs::File::open(p) else {
+        return String::new();
+    };
+    let len = f.metadata().map(|m| m.len()).unwrap_or(0);
+    let _ = f.seek(SeekFrom::Start(len.saturating_sub(64 * 1024)));
+    let mut buf = Vec::new();
+    let _ = f.read_to_end(&mut buf);
+    String::from_utf8_lossy(&buf).into_owned()
+}
+
 fn exit_code_of(status: std::process::ExitStatus) -> i32 {
     if let Some(c) = status.code() {
         return c;
@@ -348,6 +361,7 @@ pub fn execute(space: &Space, run_id: i64) -> Result<RunOutcome> {
         Err(e) => (127, Some(e)),
     };
 
+    let check_start = Instant::now();
     let check_exit_code = match (&run.check_command, &spawn_error) {
         (Some(check), None) => {
             let (out, err) = stdio()?;
@@ -366,6 +380,7 @@ pub fn execute(space: &Space, run_id: i64) -> Result<RunOutcome> {
         }
         _ => None,
     };
+    let check_ms = check_start.elapsed().as_millis() as i64;
     let duration_ms = start.elapsed().as_millis() as i64;
     let meta = serde_json::json!({
         "run": run_id,
@@ -381,6 +396,30 @@ pub fn execute(space: &Space, run_id: i64) -> Result<RunOutcome> {
     // lists always has its run-exit snapshot.
     space.finish_run(run_id, exit_code, check_exit_code, duration_ms)?;
     space.record(&attempt.actor, "run.finish", meta)?;
+    let tail = run
+        .log_path
+        .as_deref()
+        .map(|p| log_tail(Path::new(p)))
+        .unwrap_or_default();
+    if let (Some(check), Some(code)) = (&run.check_command, check_exit_code) {
+        space.record_run_check(&snapshot, check, code, check_ms, &tail, &attempt.actor)?;
+    }
+    // `claude -p --output-format json` ends with its cost and usage.
+    if is_claude_code(program) {
+        if let Some(r) = crate::annotate::claude_result(&tail) {
+            space.annotate(
+                attempt.id,
+                &crate::annotate::AnnotateRequest {
+                    actor: attempt.actor.clone(),
+                    cost_usd: Some(r.cost_usd),
+                    tokens_in: r.tokens_in,
+                    tokens_out: r.tokens_out,
+                    session: Some(r.session.unwrap_or_else(|| format!("r{run_id}"))),
+                    ..Default::default()
+                },
+            )?;
+        }
+    }
 
     let verdict = match (check_exit_code, exit_code) {
         (Some(0), _) => Some((Status::Passed, None)),
@@ -504,6 +543,40 @@ mod tests {
         let out = execute(&space, run.id).unwrap();
         assert_eq!(out.attempt.status, Status::Failed);
         assert_eq!(out.attempt.reason.as_deref(), Some("check exited 1"));
+    }
+
+    // The fake `claude` is a shell script, which Windows can't run directly.
+    #[cfg(unix)]
+    #[test]
+    fn check_is_recorded_and_claude_cost_is_annotated() {
+        let (_tmp, space, a) = space_with_attempt();
+        // A fake `claude` printing the `--output-format json` result line.
+        let dir = crate::testutil::tempdir();
+        let exe = dir.path().join("claude");
+        fs::write(
+            &exe,
+            "#!/bin/sh\necho '{\"type\":\"result\",\"session_id\":\"s1\",\"total_cost_usd\":0.25,\"usage\":{\"input_tokens\":10,\"output_tokens\":5}}'\n",
+        )
+        .unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&exe, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let run = space
+            .create_run(
+                a,
+                &[exe.to_string_lossy().into_owned()],
+                Some("echo 'test result: ok. 2 passed; 0 failed; 0 ignored'"),
+                true,
+            )
+            .unwrap();
+        execute(&space, run.id).unwrap();
+        let st = &space.check_status(a).unwrap()["tests"];
+        assert!(st.check.passed && !st.stale);
+        assert_eq!(st.check.tests.unwrap().passed, 2);
+        let agent = space.agent_summary(a).unwrap();
+        assert_eq!(agent.cost_usd, Some(0.25));
+        assert_eq!(agent.tokens_out, Some(5));
     }
 
     #[test]

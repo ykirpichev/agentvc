@@ -60,6 +60,9 @@ pub struct Row {
     pub last_snapshot_at: Option<i64>,
     /// Latest value of every metadata key over the attempt's snapshots.
     pub meta: BTreeMap<String, String>,
+    /// Summed agent cost (`agentvc annotate`, #10).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cost_usd: Option<f64>,
     /// With `touched`: the attempt's changed files that matched.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub touched: Option<Vec<String>>,
@@ -182,6 +185,7 @@ impl Space {
                         snapshots: r.get(11)?,
                         last_snapshot_at: r.get(12)?,
                         meta: BTreeMap::new(),
+                        cost_usd: None,
                         touched: None,
                     },
                     prompt: r.get(9)?,
@@ -220,6 +224,22 @@ impl Space {
             }
         }
         drop(rows);
+        // Recorded checks (#11) count as metadata: `--meta tests=pass`.
+        for (id, checks) in self.all_check_status()? {
+            if let Some(&i) = wanted.get(&id) {
+                for (name, st) in checks {
+                    cands[i]
+                        .row
+                        .meta
+                        .insert(name, st.check.outcome().to_string());
+                }
+            }
+        }
+        for (id, agent) in self.agent_summaries()? {
+            if let Some(&i) = wanted.get(&id) {
+                cands[i].row.cost_usd = agent.cost_usd;
+            }
+        }
         cands.retain(|c| {
             q.meta
                 .iter()

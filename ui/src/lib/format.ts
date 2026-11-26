@@ -47,6 +47,14 @@ export function duration(seconds: number): string {
   return `${h}h ${String(m % 60).padStart(2, '0')}m`
 }
 
+/** `950`, `1.2k`, `128k`, `1.3M`. */
+export function count(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
+  if (n >= 10_000) return `${Math.floor(n / 1000)}k`
+  if (n >= 1000) return `${(n / 1000).toFixed(1)}k`
+  return String(n)
+}
+
 export function plural(n: number, noun: string): string {
   return `${n} ${noun}${n === 1 ? '' : 's'}`
 }

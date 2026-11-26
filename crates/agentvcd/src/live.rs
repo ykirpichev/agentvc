@@ -15,7 +15,7 @@ use axum::{Json, Router};
 use serde::Serialize;
 
 use crate::api::{parse_attempt_id, ApiError, ApiResult};
-use crate::review::{attempt_stats, AttemptStats};
+use crate::review::{attempt_stats_in, AttemptStats};
 use crate::AppState;
 
 /// The workdir attempt; never shown as a running agent.
@@ -116,7 +116,7 @@ fn build(s: &Space) -> agentvc_core::Result<Vec<LiveAttempt>> {
         });
         out.push(LiveAttempt {
             task_goal: a.task_id.and_then(|t| goals.get(&t).cloned()),
-            stats: attempt_stats(&a, &snaps),
+            stats: attempt_stats_in(s, &a, &snaps)?,
             head,
             files_changed: files.len(),
             files,

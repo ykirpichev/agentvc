@@ -29,12 +29,20 @@ pub(crate) fn routes() -> Router<AppState> {
 
 // ---- stats ----------------------------------------------------------------
 
-/// Outcome of the latest `agentvc run` with a check command.
+/// The latest recorded test result: `agentvc check` (#11), `run --check`,
+/// or for older spaces the `check_exit_code` of a run-exit snapshot.
 #[derive(Clone, Debug, Serialize)]
 pub struct CheckResult {
     passed: bool,
     exit_code: Option<i64>,
     snapshot: i64,
+    /// The check's name (`tests` unless named otherwise).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    /// Recorded on an older state than the attempt's head.
+    stale: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    summary: Option<String>,
 }
 
 /// Numbers a reviewer weighs, gathered from snapshot metadata.
@@ -57,6 +65,9 @@ pub struct AttemptStats {
     /// The agent's latest self-reported summary.
     summary: Option<String>,
     last_activity: i64,
+    /// Annotations (`agentvc annotate`, #10), when there are any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    agent: Option<agentvc_core::annotate::AgentSummary>,
 }
 
 /// A number, or a string holding one (`agentvc snapshot --meta k=v` stores
@@ -75,6 +86,46 @@ fn as_i64(v: Option<&Value>) -> Option<i64> {
         Value::String(s) => s.trim().parse().ok(),
         _ => None,
     }
+}
+
+/// [`attempt_stats`] with what `agentvc check` and `agentvc annotate`
+/// recorded folded in: their checks win over run-exit metadata, their cost
+/// and tokens add to what snapshots report.
+pub(crate) fn attempt_stats_in(
+    s: &Space,
+    a: &Attempt,
+    snaps: &[Snapshot],
+) -> agentvc_core::Result<AttemptStats> {
+    let mut st = attempt_stats(a, snaps);
+    let mut checks = s.check_status(a.id)?;
+    if let Some(c) = checks
+        .remove(agentvc_core::check::DEFAULT_NAME)
+        .or_else(|| checks.into_values().max_by_key(|c| c.check.id))
+    {
+        st.check = Some(CheckResult {
+            passed: c.check.passed,
+            exit_code: Some(c.check.exit_code.into()),
+            snapshot: c.check.snapshot_id,
+            summary: Some(c.check.line()),
+            name: Some(c.check.name),
+            stale: c.stale,
+        });
+    }
+    let agent = s.agent_summary(a.id)?;
+    if !agent.is_empty() {
+        if let Some(c) = agent.cost_usd {
+            *st.cost_usd.get_or_insert(0.0) += c;
+        }
+        if let Some(t) = agent
+            .tokens_in
+            .map(|i| i + agent.tokens_out.unwrap_or(0))
+            .or(agent.tokens_out)
+        {
+            *st.tokens.get_or_insert(0) += t;
+        }
+        st.agent = Some(agent);
+    }
+    Ok(st)
 }
 
 pub(crate) fn attempt_stats(a: &Attempt, snaps: &[Snapshot]) -> AttemptStats {
@@ -106,6 +157,9 @@ pub(crate) fn attempt_stats(a: &Attempt, snaps: &[Snapshot]) -> AttemptStats {
                     passed: code == 0,
                     exit_code: Some(code),
                     snapshot: s.id,
+                    name: None,
+                    stale: false,
+                    summary: None,
                 });
             }
         }
@@ -117,7 +171,7 @@ pub(crate) fn attempt_stats(a: &Attempt, snaps: &[Snapshot]) -> AttemptStats {
 fn stats_for(s: &Space, attempts: &[Attempt]) -> agentvc_core::Result<Vec<AttemptStats>> {
     attempts
         .iter()
-        .map(|a| Ok(attempt_stats(a, &s.snapshots(a.id)?)))
+        .map(|a| attempt_stats_in(s, a, &s.snapshots(a.id)?))
         .collect()
 }
 
@@ -614,7 +668,7 @@ fn build_compare(s: &Space, ids: &[i64]) -> agentvc_core::Result<CompareResponse
         .zip(totals)
         .map(
             |((attempt, head), (files_changed, lines_added, lines_removed))| {
-                let stats = attempt_stats(&attempt, &s.snapshots(attempt.id)?);
+                let stats = attempt_stats_in(s, &attempt, &s.snapshots(attempt.id)?)?;
                 Ok(CompareColumn {
                     attempt,
                     head,

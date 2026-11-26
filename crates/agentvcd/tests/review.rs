@@ -140,6 +140,81 @@ async fn stats_from_snapshot_meta() {
 }
 
 #[tokio::test]
+async fn stats_and_graph_carry_checks_and_annotations() {
+    let tmp = fixture();
+    {
+        let space = Space::discover(tmp.path()).unwrap();
+        space
+            .annotate(
+                3,
+                &agentvc_core::annotate::AnnotateRequest {
+                    actor: "agent:two".into(),
+                    cost_usd: Some(0.25),
+                    tokens_in: Some(100),
+                    tokens_out: Some(20),
+                    note: Some("kept keep.txt tidy".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let opts = |cmd: &str| agentvc_core::check::CheckOptions {
+            actor: "agent:two".into(),
+            name: "tests".into(),
+            command: cmd.into(),
+            junit: vec![],
+            force: false,
+            mark: false,
+        };
+        space
+            .run_check(
+                3,
+                &opts("echo 'test result: ok. 4 passed; 0 failed; 0 ignored'"),
+            )
+            .unwrap();
+        // A later change makes the result stale.
+        let v = space.attempt(3).unwrap().view_path;
+        fs::write(v.join("more.txt"), "x\n").unwrap();
+        space.snapshot(3, "tool", None).unwrap();
+    }
+    let app = app(tmp.path());
+    let (_, v) = send(&app, "GET", "/api/tasks/t1/stats", None).await;
+    let a3 = v
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["attempt"] == 3)
+        .unwrap();
+    assert_eq!(a3["cost_usd"], 0.75);
+    assert_eq!(a3["tokens"], 120);
+    assert_eq!(a3["check"]["passed"], true);
+    assert_eq!(a3["check"]["stale"], true);
+    assert_eq!(a3["check"]["name"], "tests");
+    assert_eq!(a3["agent"]["notes"][0]["text"], "kept keep.txt tidy");
+
+    let (_, g) = send(&app, "GET", "/api/graph", None).await;
+    let g3 = g["attempts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["attempt"]["id"] == 3)
+        .unwrap();
+    assert_eq!(g3["tests"]["passed"], true);
+    assert_eq!(g3["tests"]["stale"], true);
+    assert!(g3["tests"]["summary"]
+        .as_str()
+        .unwrap()
+        .contains("4 passed"));
+    assert_eq!(g3["agent"]["cost_usd"], 0.25);
+    let g4 = g["attempts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["attempt"]["id"] == 4)
+        .unwrap();
+    assert!(g4.get("tests").is_none() && g4.get("agent").is_none());
+}
+
+#[tokio::test]
 async fn inbox_lists_tasks_waiting_for_a_pick() {
     let tmp = fixture();
     let app = app(tmp.path());

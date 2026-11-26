@@ -51,6 +51,10 @@ pub struct ImportRecord {
     pub exports: Vec<i64>,
     pub git_bases: Vec<i64>,
     pub tags: Vec<i64>,
+    #[serde(default)]
+    pub annotations: Vec<i64>,
+    #[serde(default)]
+    pub checks: Vec<i64>,
 }
 
 /// What [`merge_bundle`] did with one space.
@@ -113,6 +117,8 @@ fn remove_rows(space: &Space, rec: &ImportRecord) -> Result<()> {
         }
         Ok(())
     };
+    del("annotations", &rec.annotations)?;
+    del("checks", &rec.checks)?;
     del("tags", &rec.tags)?;
     del("git_bases", &rec.git_bases)?;
     del("exports", &rec.exports)?;
@@ -304,7 +310,14 @@ pub fn merge_bundle(
     // Tables nothing else points at: fresh ids by offset.
     let mut run_ids: BTreeMap<i64, i64> = BTreeMap::new();
     let short = &space_id[..space_id.len().min(8)];
-    for table in ["tags", "runs", "exports", "git_bases"] {
+    for table in [
+        "tags",
+        "runs",
+        "exports",
+        "git_bases",
+        "annotations",
+        "checks",
+    ] {
         let base = max_id(space, table)?;
         for (i, r) in rows(table).into_iter().enumerate() {
             let mut o = r.as_object().cloned().unwrap_or_default();
@@ -325,6 +338,10 @@ pub fn merge_bundle(
                     remap(&r["snapshot_id"], &ids.snapshots),
                 );
             }
+            if table == "checks" {
+                // Points at the other space's check ids.
+                set(&mut o, "reused_from", Value::Null);
+            }
             if table == "tags" {
                 // Tag names are unique per space.
                 let name = r["name"].as_str().unwrap_or_default();
@@ -334,6 +351,8 @@ pub fn merge_bundle(
                 "tags" => rec.tags.push(id),
                 "runs" => rec.runs.push(id),
                 "exports" => rec.exports.push(id),
+                "annotations" => rec.annotations.push(id),
+                "checks" => rec.checks.push(id),
                 _ => rec.git_bases.push(id),
             }
             tables.entry(table).or_default().push(Value::Object(o));

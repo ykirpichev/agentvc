@@ -334,6 +334,82 @@ pub static TOOLS: &[Tool] = &[
         },
     },
     Tool {
+        name: "annotate",
+        title: "Annotate attempt",
+        description: "Record agent metadata on an attempt: model, cost in dollars, tokens, a note, the transcript's path or URL. Repeatable; cost and tokens add up. Returns {annotation, agent} where agent is the attempt's summed metadata.",
+        read_only: false,
+        destructive: false,
+        open_world: false,
+        params: || {
+            let n = |d: &str| json!({ "type": "number", "description": d });
+            vec![
+                ("attempt", s("Attempt id, for example \"a3\". Defaults to the attempt of the server's directory."), false),
+                ("model", s("Model that did the work."), false),
+                ("cost_usd", n("Cost in dollars, for example 0.42."), false),
+                ("tokens_in", n("Input tokens."), false),
+                ("tokens_out", n("Output tokens."), false),
+                ("note", s("A note on the attempt."), false),
+                ("transcript", s("Path or URL of the transcript."), false),
+            ]
+        },
+        argv: |a| {
+            let mut argv = Argv::new(&["annotate"]);
+            argv.opt("model", a.str("model")?)
+                .opt("note", a.str("note")?)
+                .opt("transcript", a.str("transcript")?);
+            for key in ["cost_usd", "tokens_in", "tokens_out"] {
+                match a.get(key) {
+                    None => {}
+                    Some(Value::Number(n)) => {
+                        argv.opt(&key.replace('_', "-"), Some(n.to_string()));
+                    }
+                    Some(_) => return Err(BadArgs(format!("{key} must be a number"))),
+                }
+            }
+            Ok(argv.pos(a.str("attempt")?).done())
+        },
+    },
+    Tool {
+        name: "check",
+        title: "Check attempt",
+        description: "Run a test command in an attempt's view and record the result on its snapshot: pass/fail, duration, test counts and the end of the output. The same tree and command reuse an earlier result unless force is set. Marks an open attempt passed or failed. Returns {check, cached, status}.",
+        read_only: false,
+        destructive: false,
+        open_world: false,
+        params: || {
+            vec![
+                ("command", s("Shell command, for example \"cargo test --workspace\"."), true),
+                ("attempt", s("Attempt id, for example \"a3\". Defaults to the attempt of the server's directory."), false),
+                ("name", s("What the result is called. Defaults to \"tests\"."), false),
+                (
+                    "junit",
+                    json!({ "type": "array", "items": { "type": "string" },
+                            "description": "JUnit XML files (globs, relative to the view) to count tests from." }),
+                    false,
+                ),
+                ("force", b("Run even if this tree already has a result."), false),
+            ]
+        },
+        argv: |a| {
+            let command = a.req("command")?;
+            let mut argv = Argv::new(&["check"]);
+            argv.opt("name", a.str("name")?)
+                .flag("force", a.bool("force")?);
+            for j in a.strings("junit")? {
+                argv.opt("junit", Some(j));
+            }
+            let mut out = argv.done();
+            if let Some(at) = a.str("attempt")? {
+                if at.starts_with('-') {
+                    return Err(BadArgs(format!("bad attempt {at:?}")));
+                }
+                out.push(at);
+            }
+            out.extend(["--".to_string(), command]);
+            Ok(out)
+        },
+    },
+    Tool {
         name: "mark",
         title: "Mark attempt",
         description: "Mark an attempt passed, failed or exploring. It stays open. Returns {attempt}.",
@@ -851,6 +927,30 @@ mod tests {
             argv("snapshot", json!({})).unwrap(),
             ["snapshot", "--trigger=mcp"]
         );
+    }
+
+    #[test]
+    fn annotate_and_check_argv() {
+        assert_eq!(
+            argv(
+                "annotate",
+                json!({ "attempt": "a2", "cost_usd": 0.42, "tokens_in": 10, "note": "n" })
+            )
+            .unwrap(),
+            [
+                "annotate",
+                "--note=n",
+                "--cost-usd=0.42",
+                "--tokens-in=10",
+                "--",
+                "a2"
+            ]
+        );
+        assert_eq!(
+            argv("check", json!({ "attempt": "a2", "command": "cargo test" })).unwrap(),
+            ["check", "a2", "--", "cargo test"]
+        );
+        assert!(argv("check", json!({ "attempt": "-x", "command": "true" })).is_err());
     }
 
     #[test]

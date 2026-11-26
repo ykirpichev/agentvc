@@ -28,7 +28,7 @@ import {
 } from './model'
 import type { ConflictHunk, GraphAttempt, HunkTake, WorkspaceInfo, WsOp } from './shared/api/types'
 import { stackStale } from './shared/core/graph'
-import { HELP, WORDS, shortSha, statusWords, versionName } from './shared/core/words'
+import { HELP, WORDS, agentLine, shortSha, statusWords, testsWords, versionName } from './shared/core/words'
 
 const PANE = 'agentvc'
 const TITLE = 'agentvc'
@@ -514,6 +514,16 @@ function VersionDetail($: $, { el, board, ui, detail, g }: { el: El; board: Agen
           {parent ? ` · stacked on ${versionName(parent.attempt)}` : g.base_commit ? ` · on ${shortSha(g.base_commit)}` : ''}
           {g.pr ? ` · PR #${g.pr.number}${g.pr.state && g.pr.state !== 'open' ? ` (${g.pr.state})` : ''}` : ''}
         </Text>
+        {(g.tests || agentLine(g.agent, a.model)) && (
+          <Text dimColor size="caption" wrap="wrap">
+            {[g.tests ? testsWords(g.tests).label : '', agentLine(g.agent, a.model)].filter(Boolean).join(' · ')}
+          </Text>
+        )}
+        {(g.agent?.notes ?? []).map((n, i) => (
+          <Text key={`note${i}`} dimColor size="caption" wrap="wrap">
+            {n.text}
+          </Text>
+        ))}
       </Box>
       {Conflicts($, { el, sel: { kind: 'version', id: a.id }, detail, mine: name })}
       {ui.pick?.kind === 'version' && ui.pick.id === a.id ? (

@@ -261,6 +261,60 @@ enum Cmd {
         #[arg(long = "meta", value_name = "KEY=VALUE")]
         meta: Vec<String>,
     },
+    /// Record agent metadata on an attempt: model, cost, tokens, a note,
+    /// where the transcript is. Repeatable; `show` and `log` sum the cost
+    /// and tokens. Works on closed attempts too. Claude Code runs record
+    /// tokens and the transcript by themselves (Stop hook), and the cost
+    /// with `claude -p --output-format json`.
+    Annotate {
+        /// Attempt (aN). Defaults to the attempt of the current directory.
+        attempt: Option<String>,
+        #[arg(long)]
+        model: Option<String>,
+        /// Dollars, e.g. 0.42.
+        #[arg(long)]
+        cost_usd: Option<f64>,
+        #[arg(long)]
+        tokens_in: Option<i64>,
+        #[arg(long)]
+        tokens_out: Option<i64>,
+        #[arg(long)]
+        note: Option<String>,
+        /// Path or URL of the agent's transcript.
+        #[arg(long, value_name = "PATH|URL")]
+        transcript: Option<String>,
+        /// Who records it. Defaults to the attempt's actor inside its view,
+        /// else you (`human:<name>`).
+        #[arg(long)]
+        actor: Option<String>,
+    },
+    /// Run a test command in an attempt's view and record the result on
+    /// its snapshot: pass/fail, duration, test counts (cargo test, pytest
+    /// or --junit) and the end of the output. The same tree and command
+    /// reuse an earlier result. An open attempt is marked passed or failed;
+    /// a promoted one keeps its status (re-test it after `rebase`).
+    Check {
+        /// Attempt (aN). Defaults to the attempt of the current directory.
+        attempt: Option<String>,
+        /// What the result is called (the PR body's "Tests" line is `tests`).
+        #[arg(long, default_value = "tests")]
+        name: String,
+        /// JUnit XML files to count tests from, relative to the view
+        /// (globs; repeatable).
+        #[arg(long, value_name = "GLOB")]
+        junit: Vec<String>,
+        /// Run even if this tree already has a result for the command.
+        #[arg(long)]
+        force: bool,
+        /// Leave the attempt's status alone.
+        #[arg(long)]
+        no_mark: bool,
+        #[arg(long)]
+        actor: Option<String>,
+        /// The command, after `--`. One argument is run as a shell script.
+        #[arg(last = true, required = true)]
+        command: Vec<String>,
+    },
     /// Mark an attempt as passed or failed (it stays open).
     Mark {
         attempt: String,
@@ -1743,6 +1797,97 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
                 json: json!({ "snapshot": r.snapshot, "unchanged": r.unchanged }),
             }
         }
+        Cmd::Annotate {
+            attempt,
+            model,
+            cost_usd,
+            tokens_in,
+            tokens_out,
+            note,
+            transcript,
+            actor,
+        } => {
+            let id = match attempt {
+                Some(a) => attempt_id(&a)?,
+                None => current()?,
+            };
+            let actor = actor.unwrap_or_else(|| default_actor(&space, id, &cwd));
+            let a = space.annotate(
+                id,
+                &agentvc_core::annotate::AnnotateRequest {
+                    actor,
+                    model,
+                    cost_usd,
+                    tokens_in,
+                    tokens_out,
+                    note,
+                    transcript,
+                    session: None,
+                },
+            )?;
+            let agent = space.agent_summary(id)?;
+            let line = agent.line();
+            Out {
+                text: if line.is_empty() {
+                    format!("a{id} annotated")
+                } else {
+                    format!("a{id}  {line}")
+                },
+                json: json!({ "annotation": a, "agent": agent }),
+            }
+        }
+        Cmd::Check {
+            attempt,
+            name,
+            junit,
+            force,
+            no_mark,
+            actor,
+            command,
+        } => {
+            let id = match attempt {
+                Some(a) => attempt_id(&a)?,
+                None => current()?,
+            };
+            let actor = actor.unwrap_or_else(|| default_actor(&space, id, &cwd));
+            let r = space.run_check(
+                id,
+                &agentvc_core::check::CheckOptions {
+                    actor,
+                    name,
+                    command: shell_join(&command),
+                    junit,
+                    force,
+                    mark: !no_mark,
+                },
+            )?;
+            let c = &r.check;
+            let mut text = format!(
+                "a{id}  {} {}  on s{}{}",
+                c.name,
+                c.line(),
+                c.snapshot_id,
+                if r.cached { " (cached)" } else { "" }
+            );
+            if !c.passed {
+                if let Some(e) = &c.log_excerpt {
+                    let tail: Vec<&str> = e.lines().rev().take(10).collect();
+                    for l in tail.iter().rev() {
+                        text += &format!("\n  | {l}");
+                    }
+                }
+            }
+            if let Some(p) = &r.log_path {
+                text += &format!("\nlog {p}");
+            }
+            Out {
+                text,
+                json: json!({
+                    "check": r.check, "cached": r.cached, "log_path": r.log_path,
+                    "status": r.status,
+                }),
+            }
+        }
         Cmd::Mark { attempt, status } => {
             let s = Status::parse(&status).expect("clap validated");
             status_out(space.set_status(attempt_id(&attempt)?, s, None)?)
@@ -1896,7 +2041,7 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
             if !filtered {
                 let attempts = space.attempts(task)?;
                 Out {
-                    text: render_tree(&attempts),
+                    text: render_tree(&attempts, &attempt_badges(&space)?),
                     json: json!({ "attempts": attempts }),
                 }
             } else {
@@ -2224,9 +2369,36 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
                         .unwrap_or_default()
                 );
             }
+            let agent = space.agent_summary(a.id)?;
+            let checks = space.check_status(a.id)?;
+            let mut extra = String::new();
+            if !agent.is_empty() {
+                let line = agent.line();
+                if !line.is_empty() {
+                    extra += &format!("agent   {line}\n");
+                }
+                if agent.models.len() > 1 {
+                    extra += &format!("models  {}\n", agent.models.join(", "));
+                }
+                for n in &agent.notes {
+                    extra += &format!("note    {} ({})\n", n.text, n.actor);
+                }
+                for t in &agent.transcripts {
+                    extra += &format!("transcript {t}\n");
+                }
+            }
+            for (name, st) in &checks {
+                extra += &format!("check   {name}: {}\n", st.text());
+            }
+            if let Some(i) = text.find("view    ") {
+                text.insert_str(i, &extra);
+            }
             Out {
                 text,
-                json: json!({ "attempt": a, "snapshots": snaps }),
+                json: json!({
+                    "attempt": a, "snapshots": snaps, "agent": agent,
+                    "checks": checks.into_values().collect::<Vec<_>>(),
+                }),
             }
         }
         Cmd::Diff {
@@ -3414,6 +3586,36 @@ fn overview_out(
     })
 }
 
+/// Who records metadata when `--actor` is not given: the attempt's actor
+/// when run from inside its view (an agent), else the person.
+fn default_actor(space: &Space, id: i64, cwd: &std::path::Path) -> String {
+    match space.attempt_for_path(cwd) {
+        Ok(a) if a.id == id => a.actor,
+        _ => space.human(),
+    }
+}
+
+/// A command from argv, for `sh -c`: one argument is a script as is, more
+/// are quoted where needed.
+fn shell_join(args: &[String]) -> String {
+    if let [one] = args {
+        return one.clone();
+    }
+    args.iter()
+        .map(|a| {
+            if !a.is_empty()
+                && a.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "-_./=:,+@%".contains(c))
+            {
+                a.clone()
+            } else {
+                format!("'{}'", a.replace('\'', "'\\''"))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn status_out(a: Attempt) -> Out {
     Out {
         text: format!(
@@ -3449,7 +3651,29 @@ fn describe(a: &Attempt) -> String {
 
 /// Render attempts as a tree by parent attempt. Attempts whose parent is not
 /// in the list are shown as roots.
-fn render_tree(attempts: &[Attempt]) -> String {
+/// Per attempt, what `log` adds after it: check results and summed cost,
+/// e.g. `tests:pass $0.42` (`tests:pass?` when recorded on an older tree).
+fn attempt_badges(space: &Space) -> anyhow::Result<std::collections::BTreeMap<i64, String>> {
+    let mut out: std::collections::BTreeMap<i64, Vec<String>> = Default::default();
+    for (id, checks) in space.all_check_status()? {
+        for (name, st) in checks {
+            let stale = if st.stale { "?" } else { "" };
+            out.entry(id)
+                .or_default()
+                .push(format!("{name}:{}{stale}", st.check.outcome()));
+        }
+    }
+    for (id, agent) in space.agent_summaries()? {
+        if let Some(c) = agent.cost_usd {
+            out.entry(id)
+                .or_default()
+                .push(agentvc_core::annotate::format_cost(c));
+        }
+    }
+    Ok(out.into_iter().map(|(k, v)| (k, v.join(" "))).collect())
+}
+
+fn render_tree(attempts: &[Attempt], badges: &std::collections::BTreeMap<i64, String>) -> String {
     let ids: std::collections::HashSet<i64> = attempts.iter().map(|a| a.id).collect();
     let mut out = String::new();
     for root in attempts
@@ -3457,8 +3681,11 @@ fn render_tree(attempts: &[Attempt]) -> String {
         .filter(|a| a.parent_attempt.is_none_or(|p| !ids.contains(&p)))
     {
         out += &describe(root);
+        if let Some(b) = badges.get(&root.id) {
+            out += &format!("  {b}");
+        }
         out.push('\n');
-        render_children(attempts, root.id, "", &mut out);
+        render_children(attempts, badges, root.id, "", &mut out);
     }
     if out.is_empty() {
         out = "no attempts".into();
@@ -3466,7 +3693,13 @@ fn render_tree(attempts: &[Attempt]) -> String {
     out
 }
 
-fn render_children(attempts: &[Attempt], parent: i64, prefix: &str, out: &mut String) {
+fn render_children(
+    attempts: &[Attempt],
+    badges: &std::collections::BTreeMap<i64, String>,
+    parent: i64,
+    prefix: &str,
+    out: &mut String,
+) {
     let kids: Vec<_> = attempts
         .iter()
         .filter(|a| a.parent_attempt == Some(parent))
@@ -3476,9 +3709,12 @@ fn render_children(attempts: &[Attempt], parent: i64, prefix: &str, out: &mut St
         out.push_str(prefix);
         out.push_str(if last { "└─ " } else { "├─ " });
         out.push_str(&describe(k));
+        if let Some(b) = badges.get(&k.id) {
+            out.push_str(&format!("  {b}"));
+        }
         out.push('\n');
         let next = format!("{prefix}{}", if last { "   " } else { "│  " });
-        render_children(attempts, k.id, &next, out);
+        render_children(attempts, badges, k.id, &next, out);
     }
 }
 
