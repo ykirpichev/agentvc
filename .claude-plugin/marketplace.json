@@ -15,7 +15,7 @@
     {
       "name": "agentvc-panel",
       "source": "./integrations/claude-desktop",
-      "description": "A pane beside the chat showing agentvc tasks, each task's attempt tree, and the agents running now."
+      "description": "The review UI's branch tree in a pane beside the chat: main, each window's stack, agent versions, with move, restack, conflicts and diffs."
     }
   ]
 }

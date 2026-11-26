@@ -207,3 +207,67 @@ async fn list_edit_queue_and_events() {
     assert_eq!(s, StatusCode::CONFLICT, "{v}");
     assert_eq!(v["error"]["code"], "request_not_queued");
 }
+
+/// A branch's diff reads files at its base and tip, commits no rebase
+/// recorded; anything that is not a commit id stays not found.
+#[tokio::test]
+async fn files_at_a_branch_base_and_tip() {
+    let (_tmp, main, _w2) = fixture();
+    let config = Config::new(&main);
+    let app = agentvcd::router(AppState::start(&config).unwrap());
+
+    let (_, v) = send(&app, "GET", "/api/workspaces", None).await;
+    let w2id = v["workspaces"][1]["id"].as_str().unwrap().to_string();
+    let (s, d) = send(
+        &app,
+        "GET",
+        &format!("/api/workspaces/{w2id}/branches/b2"),
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{d}");
+    let (base, tip) = (d["base"].as_str().unwrap(), d["tip"].as_str().unwrap());
+
+    // b1.txt is there at b2's base (b1's tip); b2.txt only at its tip.
+    let (s, f) = send(
+        &app,
+        "GET",
+        &format!("/api/file?ref=git:{base}&path=b1.txt"),
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{f}");
+    assert_eq!(f["content"], "b1\n");
+    let (s, _) = send(
+        &app,
+        "GET",
+        &format!("/api/file?ref=git:{base}&path=b2.txt"),
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    let (s, f) = send(
+        &app,
+        "GET",
+        &format!("/api/file?ref=git:{tip}&path=b2.txt"),
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{f}");
+    assert_eq!(f["content"], "b2\n");
+
+    for bad in [
+        "git:--all",
+        "git:HEAD",
+        "git:0000000000000000000000000000000000000000",
+    ] {
+        let (s, v) = send(
+            &app,
+            "GET",
+            &format!("/api/file?ref={bad}&path=b1.txt"),
+            None,
+        )
+        .await;
+        assert_eq!(s, StatusCode::NOT_FOUND, "{bad}: {v}");
+    }
+}

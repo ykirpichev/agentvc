@@ -1,48 +1,60 @@
 # agentvc panel for Claude
 
 A pane that sits beside the chat in Claude Code (the Claude desktop app's Code
-tab, or the terminal) and shows your local agentvc space as it changes:
+tab, or the terminal) and shows the review UI's branch tree, live from your
+local agentvc space. It is the same tree, words and rules as the web review UI
+and the VS Code / Cursor extension:
 
-- **Running**: every attempt an agent is working in right now, with its task,
-  model, current step, files touched, overlaps with other attempts, the last
-  line of its run log, and a **Stop** button for runs started by `agentvc run`.
-- **Tasks**: each open task with a count of its attempts by outcome. Click a
-  task to expand its **attempt tree**: forks nest under the attempt they came
-  from, with status (★ winner, ✓ passed, ✗ failed, ⊘ abandoned, ● running,
-  ○ exploring), model, cost, and the agent's summary or the abandon reason.
-  Settled tasks (a winner picked, or nothing left open) fold under
-  "Show N settled".
-- **Review in browser** and **Open review UI** open the agentvcd review UI at
-  that task or the inbox for diffs, compare and pick-winner.
+- **One tree.** main's newest commit at the top (and any older commit that
+  something sits on); each window's stack of branches on the commit it is
+  based on, this window first; every agent version under the commit, branch or
+  version it is based on, grouped by task. Versions that were not chosen fold
+  under "Show N not chosen".
+- **Press a row** for its actions, each with a line saying what it does:
+  - a version: Choose this version, Update from main, Update from its parent,
+    Rebase onto…, Open PR / Update PR, Stop (while an agent runs in it),
+    Discard (with a reason);
+  - a branch: Restack, Check out, Move onto….
+- **Moving is by press:** Rebase onto… or Move onto… marks every place it can
+  go with **← here**. A version shows a preview first (what merges cleanly,
+  what clashes); a clash stops and shows both sides with **Keep main**,
+  **Keep <name>** and **Keep both**, and a stopped restack has Continue and
+  Abort.
+- **Diffs** of the selected version or branch, and links to open it, or the
+  whole review UI, in the browser. **Undo** reverses the last change.
 
-Minimized, the pane becomes a one-glance widget: running, active and
-needs-review counts. `/agentvc` opens it again.
+Minimized, the pane becomes a one-glance widget: running agents and how many
+versions or branches need attention. `/agentvc` opens it again.
 
 ```
-demo                                   ● live
-RUNNING · 1
-● a8 Add CSV export to reports
-  claude-opus · 3m ago                 [Stop]
-
-TASKS · 1 open
-▾ t2 Add CSV export to reports
-  3 attempts · 1 running
-  ├─ ○ a5 exploring claude-opus · $0.45 · 2 files
-  │  │ retry with backoff in a5
-  │  └─ ● a8 running claude-opus
-  └─ ○ a6 exploring claude-sonnet · $0.46 · 2 files
-       retry with backoff in a6
-Show 1 settled
+demo9                                            ● live
+◉ trunk: sub  origin/main · 2d4a8c9
+│  main-window  this window
+│  └ ● mul  needs restack
+│     └ ● div
+│        └─ Format results nicely
+│           └─ ○ codex  Tests fail
+│        └ ● cli-ops
+│  docs
+│  └ ● usage-docs  checked out
+● calc: add  c6123de
+   └─ Format results nicely
+      └─ ○ claude  Tests pass ↓1
 ```
 
 ## How it works
 
 It is a Claude Code mod (a plugin with a hooks module). It polls the local
-daemon's JSON API (`/api/space`, `/tasks`, `/attempts`, `/live`, `/inbox`, and
-`/tasks/{id}/stats` for expanded tasks) every 2 seconds through Claude Code's
-own HTTP client, so it needs nothing from the browser and agentvcd's
-localhost-only guard needs no change. The only write it makes is
-`POST /api/attempts/{id}/stop`.
+daemon's JSON API (`/api/graph`, `/api/workspaces`, `/api/tasks`, `/api/live`)
+every 2 seconds through Claude Code's own HTTP client, so it needs nothing
+from the browser and agentvcd's localhost-only guard needs no change. Actions
+post to the same endpoints the web UI uses.
+
+The tree is laid out by the web UI's own code: `sync-shared.sh` copies
+`ui/src/core/graph.ts`, `core/words.ts`, `lib/format.ts` and `api/types.ts`
+into `hooks/shared/`, and CI fails when the copies are stale. Change those
+files in `ui/src`, then run `sh integrations/claude-desktop/sync-shared.sh`.
+Panes have no drag and drop, which is why moves are by press here.
 
 ## Install
 
@@ -98,5 +110,6 @@ claude plugin test integrations/claude-desktop     # tests/ against a recorded f
 claude --plugin-dir integrations/claude-desktop    # run it from the folder; saves hot-reload
 ```
 
-`tests/fixture.ts` holds answers recorded from agentvcd over a small demo
-space. Re-record it when the API shapes change.
+`tests/fixture.ts` holds answers recorded from agentvcd over a demo space with
+two windows. Re-record it when the API shapes change:
+`python3 tests/record-fixture.py http://127.0.0.1:7420 <folder holding the demo>`.

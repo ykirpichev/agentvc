@@ -267,6 +267,28 @@ impl Space {
             .optional()?)
     }
 
+    /// The tree of any commit of the host repo, copied into the space's store
+    /// so it reads like a snapshot's: for commits no rebase recorded, such as
+    /// a stacked branch's base and tip. `None` outside git or for anything
+    /// that is not a commit id (hex, 4 to 64 characters).
+    pub fn commit_tree(&self, commit: &str) -> Result<Option<String>> {
+        if !(4..=64).contains(&commit.len()) || !commit.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Ok(None);
+        }
+        let Ok(repo) = HostRepo::open(self.workdir()) else {
+            return Ok(None);
+        };
+        let Ok(tree) = repo.git(
+            &["rev-parse", "--verify", "-q", &format!("{commit}^{{tree}}")],
+            None,
+        ) else {
+            return Ok(None);
+        };
+        let mut git = CatFile::start(&repo)?;
+        import_tree(self.objects(), &mut git, &Oid::from_hex(&tree)?)?;
+        Ok(Some(tree))
+    }
+
     /// Files the attempt changed: against the commit it was last rebased
     /// onto, else against the snapshot it was forked from. Empty for an
     /// attempt with no parent.

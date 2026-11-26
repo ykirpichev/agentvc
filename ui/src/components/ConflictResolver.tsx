@@ -7,18 +7,12 @@ import { api } from '../api/client'
 import { useLive } from '../api/live'
 import type { ConflictHunk, GraphAttempt, HunkTake } from '../api/types'
 import { useResource } from '../api/useResource'
-import { versionName, WORDS } from '../core/words'
+import { theirsName, versionName, WORDS } from '../core/words'
 import { plural } from '../lib/format'
 import { ErrorNote, Skeleton } from './bits'
 import { useToast } from './Toaster'
 
 /** "main" for a rebase onto main; otherwise the other side's own label. */
-function theirsName(h: ConflictHunk): string {
-  const l = h.theirs_label.trim()
-  if (!l || /^[0-9a-f]{7,40}$/.test(l) || /^(main|master|origin\/)/.test(l)) return 'main'
-  return l
-}
-
 export function ConflictResolver({ version, rechoose }: { version: GraphAttempt; rechoose?: boolean }) {
   const a = version.attempt
   const data = useResource(`conflicts:${a.id}:${version.conflicts}`, () => api.conflicts(a.id))

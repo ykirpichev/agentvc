@@ -11,10 +11,10 @@ import { api } from '../api/client'
 import type { Graph, GraphAttempt, TaskSummary } from '../api/types'
 import { useResource } from '../api/useResource'
 import { embedMode, thisWorkspace } from '../core/embed'
-import { canMoveOnto, canStackOnto, layout, stackStale, type Cell, type GraphRow } from '../core/graph'
+import { canMoveBranch, canMoveOnto, canStackOnto, layout, stackStale, type Cell, type GraphRow } from '../core/graph'
 import { shortSha, versionName } from '../core/words'
 import { timeAgo } from '../lib/format'
-import { branchDrop, canMoveBranch, isBranchDrag, useStackEdit } from './stackEdit'
+import { branchDrop, isBranchDrag, useStackEdit } from './stackEdit'
 import { WindowStack } from './WorkspaceStacks'
 
 function Gutter({ cells }: { cells: Cell[] }) {
