@@ -22,7 +22,35 @@ pub const EVENTS: &[(&str, &str, Option<&str>)] = &[
     ("PostToolUse", "post-tool-use", Some(SNAPSHOT_TOOLS)),
     ("Stop", "stop", None),
     ("SubagentStop", "subagent-stop", None),
+    ("UserPromptSubmit", "user-prompt-submit", None),
 ];
+
+/// Keep the workspace's activity in step with the agent (#107): busy from
+/// the prompt until it stops, refreshed on each tool call; stopping applies
+/// the stack edits other workspaces queued meanwhile. Outside a git
+/// worktree this does nothing. Returns the edits applied.
+pub fn workspace_activity(
+    event: &str,
+    input: &Value,
+    fallback_cwd: &Path,
+    by: &str,
+) -> Result<Vec<crate::workspace::Request>> {
+    use crate::workspace::{set_activity, Activity};
+    let cwd = input
+        .get("cwd")
+        .and_then(Value::as_str)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| fallback_cwd.to_path_buf());
+    let activity = match event {
+        "stop" => Activity::Idle,
+        "user-prompt-submit" | "post-tool-use" => Activity::AgentRunning,
+        _ => return Ok(Vec::new()),
+    };
+    match set_activity(&cwd, activity, Some(by)) {
+        Err(Error::NotGitRepo(_)) => Ok(Vec::new()),
+        r => r,
+    }
+}
 
 #[derive(Debug, Serialize)]
 #[serde(tag = "result", rename_all = "snake_case")]
@@ -40,6 +68,10 @@ fn skipped(reason: impl Into<String>) -> Result<HookOutcome> {
 /// Handle one hook event. `input` is the JSON Claude Code sends on stdin;
 /// `fallback_cwd` is used when it carries no `cwd`.
 pub fn handle(event: &str, input: &Value, fallback_cwd: &Path) -> Result<HookOutcome> {
+    if event == "user-prompt-submit" {
+        // Only marks the workspace busy (`workspace_activity`); no snapshot.
+        return skipped("prompt submitted");
+    }
     let cwd = input
         .get("cwd")
         .and_then(Value::as_str)

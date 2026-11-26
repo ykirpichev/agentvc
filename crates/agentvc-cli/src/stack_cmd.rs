@@ -7,6 +7,7 @@ use std::path::Path;
 use agentvc_core::stack::{
     BranchInfo, LogResult, ParentKind, RestackResult, SubmitOptions, Window,
 };
+use agentvc_core::workspace::{self, Op, RequestStatus};
 use clap::Subcommand;
 use serde_json::{json, Value};
 
@@ -65,6 +66,14 @@ pub enum StackCmd {
         /// run restack again).
         #[arg(long)]
         keep_conflicts: bool,
+        /// Change the stack of another workspace (id, name or directory)
+        /// instead: applied now if it is idle, else queued until its agent
+        /// stops. See `agentvc workspace`.
+        #[arg(long, conflicts_with = "keep_conflicts")]
+        workspace: Option<String>,
+        /// With --workspace: always queue, even if it is idle.
+        #[arg(long, requires = "workspace")]
+        queue: bool,
     },
     /// Fetch the trunk, remove branches merged into it and restack the rest.
     /// Never moves the local trunk branch or other windows' branches.
@@ -77,6 +86,14 @@ pub enum StackCmd {
         keep_merged: bool,
         #[arg(long)]
         keep_conflicts: bool,
+        /// Change the stack of another workspace (id, name or directory)
+        /// instead: applied now if it is idle, else queued until its agent
+        /// stops. See `agentvc workspace`.
+        #[arg(long, conflicts_with = "keep_conflicts")]
+        workspace: Option<String>,
+        /// With --workspace: always queue, even if it is idle.
+        #[arg(long, requires = "workspace")]
+        queue: bool,
     },
     /// Track existing branches in this window: the branch and the untracked
     /// branches below it (parents from Graphite metadata or git history).
@@ -112,6 +129,10 @@ pub enum StackCmd {
         /// Push only, no PRs.
         #[arg(long)]
         no_pr: bool,
+        /// Don't publish this workspace's stack as
+        /// refs/agentvc/workspaces/<id> (see `agentvc workspace publish`).
+        #[arg(long)]
+        no_publish: bool,
     },
     /// Put a branch (and what is stacked on it) onto another branch or the
     /// trunk; only its own commits move.
@@ -122,15 +143,42 @@ pub enum StackCmd {
         onto: String,
         #[arg(long)]
         keep_conflicts: bool,
+        /// Change the stack of another workspace (id, name or directory)
+        /// instead: applied now if it is idle, else queued until its agent
+        /// stops. See `agentvc workspace`.
+        #[arg(long, conflicts_with = "keep_conflicts")]
+        workspace: Option<String>,
+        /// With --workspace: always queue, even if it is idle.
+        #[arg(long, requires = "workspace")]
+        queue: bool,
     },
     /// Rename a branch of this window; branches on it follow.
-    Rename { branch: String, new_name: String },
+    Rename {
+        branch: String,
+        new_name: String,
+        /// Change the stack of another workspace (id, name or directory)
+        /// instead: applied now if it is idle, else queued until its agent
+        /// stops. See `agentvc workspace`.
+        #[arg(long)]
+        workspace: Option<String>,
+        /// With --workspace: always queue, even if it is idle.
+        #[arg(long, requires = "workspace")]
+        queue: bool,
+    },
     /// Delete a branch and its commits; branches on it move to its parent
     /// without them.
     Delete {
         branch: String,
         #[arg(long)]
         keep_conflicts: bool,
+        /// Change the stack of another workspace (id, name or directory)
+        /// instead: applied now if it is idle, else queued until its agent
+        /// stops. See `agentvc workspace`.
+        #[arg(long, conflicts_with = "keep_conflicts")]
+        workspace: Option<String>,
+        /// With --workspace: always queue, even if it is idle.
+        #[arg(long, requires = "workspace")]
+        queue: bool,
     },
     /// Squash the current branch's commits into one, then restack above.
     Squash {
@@ -140,11 +188,11 @@ pub enum StackCmd {
         #[arg(long)]
         keep_conflicts: bool,
     },
-    /// Hand a branch and the branches above it to the window (worktree) at
-    /// --to.
+    /// Hand a branch and the branches above it to another window: --to is
+    /// its directory, or a workspace id or name.
     Give {
         branch: String,
-        /// The other worktree's directory.
+        /// The other worktree's directory, or its workspace id or name.
         #[arg(long)]
         to: std::path::PathBuf,
     },
@@ -267,8 +315,100 @@ fn log_text(l: &LogResult) -> String {
     t
 }
 
+/// The edit a stack command asks of another workspace (`--workspace`).
+fn remote_edit(cmd: &StackCmd) -> Option<(String, bool, Op)> {
+    let (ws, queue, op) = match cmd {
+        StackCmd::Move {
+            branch,
+            onto,
+            workspace,
+            queue,
+            ..
+        } => (
+            workspace,
+            queue,
+            Op::Move {
+                branch: branch.clone(),
+                onto: onto.clone(),
+            },
+        ),
+        StackCmd::Restack {
+            branch,
+            workspace,
+            queue,
+            ..
+        } => (
+            workspace,
+            queue,
+            Op::Restack {
+                branch: branch.clone(),
+            },
+        ),
+        StackCmd::Rename {
+            branch,
+            new_name,
+            workspace,
+            queue,
+        } => (
+            workspace,
+            queue,
+            Op::Rename {
+                branch: branch.clone(),
+                new_name: new_name.clone(),
+            },
+        ),
+        StackCmd::Delete {
+            branch,
+            workspace,
+            queue,
+            ..
+        } => (
+            workspace,
+            queue,
+            Op::Delete {
+                branch: branch.clone(),
+            },
+        ),
+        StackCmd::Sync {
+            workspace, queue, ..
+        } => (workspace, queue, Op::Sync),
+        _ => return None,
+    };
+    ws.clone().map(|w| (w, *queue, op))
+}
+
 /// Run `agentvc stack ...`; returns (json, text).
 pub fn run(cwd: &Path, cmd: StackCmd) -> anyhow::Result<(Value, String)> {
+    if let Some((target, queue, op)) = remote_edit(&cmd) {
+        let from = Window::open(cwd)
+            .ok()
+            .and_then(|w| workspace::locals(&w).ok().map(|l| (w, l)))
+            .and_then(|(w, l)| l.into_iter().find(|x| x.git_dir == w.git_dir))
+            .map(|l| l.record.id);
+        let o = workspace::edit(cwd, &target, op, from.as_deref(), queue)?;
+        let text = match o.outcome {
+            RequestStatus::Applied => format!("applied in workspace {} ({})", target, o.request_id),
+            _ => format!(
+                "queued as {} in workspace {}: {}; cancel with `agentvc workspace cancel {}`",
+                o.request_id,
+                target,
+                o.reason.as_deref().unwrap_or("busy"),
+                o.request_id
+            ),
+        };
+        return Ok((json!(o), text));
+    }
+    // One changing stack command at a time per workspace, and edits other
+    // workspaces queued here are applied first. `log` (which editors poll)
+    // reads only, so queued edits keep waiting for the agent to stop.
+    let _lock = if matches!(cmd, StackCmd::Log { .. }) {
+        None
+    } else {
+        let w = Window::open(cwd)?;
+        let l = workspace::lock(&w.git_dir)?;
+        workspace::drain_locked(cwd)?;
+        Some(l)
+    };
     let mut w = Window::open(cwd)?;
     Ok(match cmd {
         StackCmd::Init { trunk, remote } => {
@@ -313,6 +453,7 @@ pub fn run(cwd: &Path, cmd: StackCmd) -> anyhow::Result<(Value, String)> {
         StackCmd::Restack {
             branch,
             keep_conflicts,
+            ..
         } => {
             let scope: Option<HashSet<String>> = match &branch {
                 Some(b) => {
@@ -336,6 +477,7 @@ pub fn run(cwd: &Path, cmd: StackCmd) -> anyhow::Result<(Value, String)> {
             no_fetch,
             keep_merged,
             keep_conflicts,
+            ..
         } => {
             let s = w.sync(!no_fetch, !keep_merged, keep_conflicts)?;
             let mut text = String::new();
@@ -380,6 +522,7 @@ pub fn run(cwd: &Path, cmd: StackCmd) -> anyhow::Result<(Value, String)> {
             force,
             repo,
             no_pr,
+            no_publish,
         } => {
             let r = w.submit(&SubmitOptions {
                 branch,
@@ -404,18 +547,34 @@ pub fn run(cwd: &Path, cmd: StackCmd) -> anyhow::Result<(Value, String)> {
                     p.base
                 );
             }
-            (json!(r), text)
+            let mut v = json!(r);
+            if !no_publish {
+                // So `workspace ls --remote` elsewhere sees this stack. A
+                // remote refusing refs/agentvc/* only costs a warning.
+                drop(w);
+                match workspace::publish(cwd) {
+                    Ok(p) => v["published"] = json!(p),
+                    Err(e) => {
+                        v["warnings"] = json!([format!("workspace not published: {e}")]);
+                        text += &format!("warning: workspace not published: {e}\n");
+                    }
+                }
+            }
+            (v, text)
         }
         StackCmd::Move {
             branch,
             onto,
             keep_conflicts,
+            ..
         } => {
             let r = w.move_onto(&branch, &onto, keep_conflicts)?;
             let text = format!("moved {branch} onto {onto}\n{}", restack_text(&r));
             (json!(r), text)
         }
-        StackCmd::Rename { branch, new_name } => {
+        StackCmd::Rename {
+            branch, new_name, ..
+        } => {
             let t = w.rename(&branch, &new_name)?;
             (
                 json!({ "branch": t }),
@@ -425,6 +584,7 @@ pub fn run(cwd: &Path, cmd: StackCmd) -> anyhow::Result<(Value, String)> {
         StackCmd::Delete {
             branch,
             keep_conflicts,
+            ..
         } => {
             let r = w.delete(&branch, keep_conflicts)?;
             let text = format!("deleted {branch}\n{}", restack_text(&r));
@@ -439,7 +599,22 @@ pub fn run(cwd: &Path, cmd: StackCmd) -> anyhow::Result<(Value, String)> {
             (json!({ "commit": c, "restack": r }), text)
         }
         StackCmd::Give { branch, to } => {
-            let to = if to.is_absolute() { to } else { cwd.join(to) };
+            let path = if to.is_absolute() {
+                to.clone()
+            } else {
+                cwd.join(&to)
+            };
+            // A directory, or a workspace id or name.
+            let to = if path.is_dir() {
+                path
+            } else {
+                workspace::find_local(&w, &to.to_string_lossy())?.path
+            };
+            // The receiving stack is changed too: hold its lock.
+            let other = Window::open(&to)?;
+            let _their_lock = (other.git_dir != w.git_dir)
+                .then(|| workspace::lock(&other.git_dir))
+                .transpose()?;
             let moved = w.give(&branch, &to)?;
             (
                 json!({ "moved": moved, "to": to }),

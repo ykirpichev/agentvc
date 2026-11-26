@@ -84,7 +84,8 @@ Every command takes `--json`. Error codes: `needs_restack`, `push_rejected`,
 `parent_not_pushed`, `no_remote`, `same_window`, `other_repository`, `not_in_stack`,
 `owned_by_other_window`, `checked_out_elsewhere`, `conflict`,
 `rebase_in_progress`, `merge_commit`, `at_top`, `at_bottom`, `ambiguous`,
-`no_trunk`, `parent_missing`, `branch_missing`, `message_required`.
+`no_trunk`, `parent_missing`, `branch_missing`, `message_required`. Workspace codes are listed under
+[Workspaces](#workspaces-every-window-from-anywhere).
 
 ## Coming from Graphite
 
@@ -112,3 +113,57 @@ New PRs get the `agentvc:no-restack` label, so the restack Action
 `sync` also drops branches whose PR GitHub reports merged (when a token is
 available and the local branch is what was pushed), so a PR that was edited on
 GitHub before merging is still recognized.
+
+## Workspaces: every window from anywhere
+
+Each worktree is a *workspace* with an id (`w1a2b3c4d`) and a name (its
+directory name until `agentvc workspace name review`). Any window, agent or
+the review UI can see all of them and change any one's stack; the change is
+made by and in the workspace that owns the branch, so stacks stay
+independent.
+
+```sh
+agentvc workspace ls                     # every workspace: stack, PRs, behind, agent running?
+agentvc stack move s3 --onto main --workspace feature    # from any window
+agentvc stack restack --workspace feature
+agentvc workspace requests               # queued and recent edits
+agentvc workspace cancel r1a2b3c4d       # cancel a queued one
+```
+
+An edit asked from elsewhere (`move`, `restack`, `rename`, `delete`, `sync`
+with `--workspace`) is applied at once when that workspace is idle. While an
+agent works there, or a rebase is in progress, it is queued in that
+workspace's git dir and applied when the agent stops (the agent hooks mark
+the workspace busy from the prompt until `Stop`; Claude Code and Cursor) or at
+the workspace's next changing stack command. `stack log` never applies them,
+so an editor polling it does not move branches under a working agent. A
+queued edit that cannot apply (a conflict, a branch gone) is recorded as
+failed with its code. Other agents can say they are working with
+`agentvc workspace state agent-running` / `idle`. Changing stack commands take
+a per-workspace lock (`stack_locked` after 10 s), so edits never interleave.
+
+`give --to` accepts a workspace name as well as a directory.
+
+`stack submit` also publishes the workspace (record and stack) as
+`refs/agentvc/workspaces/<id>`; `agentvc workspace ls --remote` on another
+machine fetches those and lists them read-only (`remote_workspace` on edits).
+`--no-publish` skips it; a remote that refuses `refs/agentvc/*` only warns.
+
+`ls --json` gives, per branch: `workspace`, `parent`, `parent_kind`
+(`trunk|stack|other_window|branch`), `parent_workspace`, `parent_rev`, `tip`,
+`commits`, `needs_restack`, `behind` (commits on the base it lacks),
+`conflicts` (unmerged files while it is being rebased), `pr {number, state}`,
+and with an agentvc space `attempt`, `task`, `status` (`running` or the
+attempt's status) for branches exported from attempts.
+
+The daemon serves the same: `GET /api/workspaces[?remote=1]`,
+`POST /api/workspaces/{id}/stack` with `{"op": "move", "branch", "onto"}`
+(or `restack`, `rename` + `new_name`, `delete`, `sync`; `"queue": true` to
+always queue) answering `{"outcome": "applied"|"queued", "request_id"}`, and
+`POST /api/requests/{id}/cancel`. `/api/events` adds `stack_changed
+{workspace}`, `workspaces_changed`, and `request_queued`, `request_applied`,
+`request_failed {reason}`, `request_cancelled`, each with `request_id` and
+`workspace`.
+
+Workspace error codes: `no_workspace`, `remote_workspace`, `name_taken`,
+`bad_name`, `stack_locked`, `no_request`, `request_not_queued`.

@@ -40,6 +40,7 @@ pub mod tags;
 pub mod undo;
 pub mod view;
 pub mod viewgit;
+pub mod workspace;
 
 #[cfg(test)]
 pub(crate) mod testutil;

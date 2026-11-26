@@ -19,6 +19,7 @@ use crate::error::{Error, IoContext, Result};
 pub const EVENTS: &[(&str, &str)] = &[
     ("afterFileEdit", "cursor-after-file-edit"),
     ("stop", "cursor-stop"),
+    ("beforeSubmitPrompt", "cursor-before-submit"),
 ];
 
 /// Marker on the first line of the rule body, so `--remove` only deletes a
@@ -337,6 +338,7 @@ pub fn hook_input(event: &str, input: &Value) -> Option<(&'static str, Value)> {
             Some(("post-tool-use", out))
         }
         "cursor-stop" => Some(("stop", out)),
+        "cursor-before-submit" => Some(("user-prompt-submit", out)),
         _ => None,
     }
 }
