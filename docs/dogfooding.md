@@ -65,6 +65,10 @@ the view and marks the attempt `exploring`. Fix them in `$(agentvc path aX)`, th
 `agentvc snapshot aX` and `agentvc pr aX`. A promoted attempt can be rebased too; siblings
 are never touched.
 
+Promoted or abandoned the wrong attempt, or forked by mistake? `agentvc op log` lists every
+operation with its id and `agentvc undo [id]` reverses it (siblings reopen, an undone fork's
+view is put aside, not deleted); `agentvc undo <id of the undo>` redoes.
+
 ### Combining attempts: take the best parts of each (#71)
 
 When a3 has the better tests and a2 the better code, don't copy files by hand:

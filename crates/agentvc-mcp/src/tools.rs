@@ -384,6 +384,39 @@ pub static TOOLS: &[Tool] = &[
         argv: |a| Ok(Argv::new(&["promote"]).pos(Some(a.req("attempt")?)).done()),
     },
     Tool {
+        name: "op_log",
+        title: "Operation log",
+        description: "The space's operation log, newest first: every task creation, fork, status change, promote, rebase, export, run and undo, with its id, actor, a one-line summary, whether it can be undone (`undoable`) and the undo that reversed it (`undone_by`). Returns {operations}.",
+        read_only: true,
+        destructive: false,
+        open_world: false,
+        params: || vec![("limit", s("How many operations, newest first, as a number string. Defaults to 20."), false)],
+        argv: |a| Ok(Argv::new(&["op", "log"]).opt("limit", a.str("limit")?).done()),
+    },
+    Tool {
+        name: "undo",
+        title: "Undo operation",
+        description: "Reverse an operation from op_log: a status change, a promote (its siblings and ancestors reopen), a task creation, or a fork (the attempt closes as `fork undone` and its view is put aside, recoverable). Without `op`, undoes the newest undoable operation that still stands. Undo is an operation too: undo the undo's id to redo. Fails with `undo_conflict` and changes nothing when later operations changed the same attempts. Returns {op, undid, changes}.",
+        read_only: false,
+        destructive: true,
+        open_world: false,
+        params: || {
+            vec![
+                ("op", s("Operation id from op_log, for example \"12\". Defaults to the newest undoable one."), false),
+                ("actor", s(ACTOR), false),
+            ]
+        },
+        argv: |a| {
+            Ok(Argv::new(&["undo"])
+                .opt(
+                    "actor",
+                    Some(a.str("actor")?.unwrap_or_else(|| DEFAULT_ACTOR.into())),
+                )
+                .pos(a.str("op")?)
+                .done())
+        },
+    },
+    Tool {
         name: "status",
         title: "Status",
         description: "Where am I and what is going on. With `attempt`, or when the server runs inside an attempt's view: the attempt, its task, head snapshot, files changed in the view since it (`changes`), active runs, PR URL and `upstream` ({base, upstream, behind}: behind > 0 means rebase before pr). Otherwise the space: open tasks with their attempts, `needs_review` (passed, not promoted) and active runs. Returns {status}.",
