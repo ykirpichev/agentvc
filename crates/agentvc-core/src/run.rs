@@ -299,7 +299,22 @@ pub fn execute(space: &Space, run_id: i64) -> Result<RunOutcome> {
     let stdio = || -> Result<(Stdio, Stdio)> {
         match &run.log_path {
             Some(p) => {
+                // On Windows an append-only handle can't be written by MSYS
+                // tools (`sh`, git's hooks), so write from the end instead.
+                #[cfg(unix)]
                 let f = OpenOptions::new().create(true).append(true).open(p).at(p)?;
+                #[cfg(not(unix))]
+                let f = {
+                    use std::io::{Seek, SeekFrom};
+                    let mut f = OpenOptions::new()
+                        .create(true)
+                        .write(true)
+                        .truncate(false)
+                        .open(p)
+                        .at(p)?;
+                    f.seek(SeekFrom::End(0)).at(p)?;
+                    f
+                };
                 let g = f.try_clone().at(p)?;
                 Ok((Stdio::from(f), Stdio::from(g)))
             }
@@ -517,6 +532,7 @@ mod tests {
     }
 
     /// A fake `claude` that records its arguments in `$AGENTVC_VIEW/args`.
+    #[cfg(unix)]
     fn fake_claude(dir: &Path) -> PathBuf {
         let bin = dir.join("bin");
         fs::create_dir_all(&bin).unwrap();
@@ -534,6 +550,8 @@ mod tests {
         path
     }
 
+    // The fake `claude` is a shell script, which Windows can't execute.
+    #[cfg(unix)]
     #[test]
     fn claude_commands_get_the_hooks_settings() {
         let (tmp, space, a) = space_with_attempt();
@@ -579,6 +597,8 @@ mod tests {
         assert!(log.contains("warning: Claude Code ran"), "{log}");
     }
 
+    // The fake `claude` is a shell script, which Windows can't execute.
+    #[cfg(unix)]
     #[test]
     fn no_warning_when_hooks_snapshot_or_command_is_not_claude() {
         let (_tmp, space, a) = space_with_attempt();

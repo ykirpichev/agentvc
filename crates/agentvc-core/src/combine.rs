@@ -91,9 +91,7 @@ fn parse_hunks(specs: &[String]) -> Result<BTreeMap<String, Vec<usize>>> {
         if path.is_empty() {
             return Err(bad("the file is empty"));
         }
-        let list = out
-            .entry(path.trim_start_matches("./").to_string())
-            .or_default();
+        let list = out.entry(crate::objects::tree_path(path)).or_default();
         for n in nums.split(',') {
             let n: usize = n
                 .trim()
@@ -117,7 +115,9 @@ fn matcher(patterns: &[String]) -> Result<impl Fn(&str) -> bool> {
     let mut b = GlobSetBuilder::new();
     let mut plain = Vec::new();
     for p in patterns {
-        let p = p.trim_start_matches("./").trim_end_matches('/').to_string();
+        let p = crate::objects::tree_path(p)
+            .trim_end_matches('/')
+            .to_string();
         b.add(Glob::new(&p).map_err(|e| Error::BadHunk {
             spec: p.clone(),
             reason: format!("not a valid path or glob: {e}"),

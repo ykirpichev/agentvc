@@ -33,6 +33,33 @@ pub fn capture(store: &ObjectStore, dir: &Path) -> Result<Oid> {
 /// files whose size, mtime, inode and mode are unchanged, and rewriting the
 /// index afterwards.
 pub fn capture_indexed(store: &ObjectStore, dir: &Path, index_path: Option<&Path>) -> Result<Oid> {
+    capture_with_modes(store, dir, index_path, None)
+}
+
+/// [`capture_indexed`], taking file modes the filesystem can't express from
+/// `modes_from` (the attempt's previous tree), as git does with
+/// `core.fileMode=false` and `core.symlinks=false`: on Windows a file that
+/// was executable stays executable, and a symlink checked out as a plain
+/// file holding its target stays a symlink. Elsewhere the filesystem is
+/// the truth and `modes_from` is not read.
+pub fn capture_with_modes(
+    store: &ObjectStore,
+    dir: &Path,
+    index_path: Option<&Path>,
+    modes_from: Option<&Oid>,
+) -> Result<Oid> {
+    #[cfg(unix)]
+    let previous: BTreeMap<String, (Mode, Oid)> = {
+        let _ = modes_from;
+        BTreeMap::new()
+    };
+    #[cfg(not(unix))]
+    let previous = match modes_from {
+        Some(t) => flatten(store, t).unwrap_or_default(),
+        // No earlier tree (the first snapshot of the checkout): git's index
+        // knows the modes the checkout can't show.
+        None => git_index_modes(dir),
+    };
     let mut index = index_path.map(StatIndex::load).unwrap_or_default();
     let mut files: BTreeMap<PathBuf, (Mode, Oid)> = BTreeMap::new();
     let walker = ignore::WalkBuilder::new(dir)
@@ -109,7 +136,11 @@ pub fn capture_indexed(store: &ObjectStore, dir: &Path, index_path: Option<&Path
         let mode = if is_symlink {
             Mode::Symlink
         } else {
-            mode_from_meta(&meta)
+            let key = rel.to_string_lossy().replace('\\', "/");
+            match (mode_from_meta(&meta), previous.get(&key)) {
+                (Mode::File, Some((m @ (Mode::Executable | Mode::Symlink), _))) => *m,
+                (m, _) => m,
+            }
         };
         let stat = Stat::of(&meta, mode);
         let cached = index.lookup(&rel, &stat);
@@ -144,6 +175,35 @@ fn mode_from_meta(meta: &fs::Metadata) -> Mode {
 #[cfg(not(unix))]
 fn mode_from_meta(_meta: &fs::Metadata) -> Mode {
     Mode::File
+}
+
+/// Executable and symlink entries of the git index of `dir`, if it is a
+/// git checkout (empty otherwise).
+#[cfg(not(unix))]
+fn git_index_modes(dir: &Path) -> BTreeMap<String, (Mode, Oid)> {
+    let Ok(out) = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["ls-files", "-s", "-z"])
+        .output()
+    else {
+        return BTreeMap::new();
+    };
+    out.stdout
+        .split(|b| *b == 0)
+        .filter_map(|rec| {
+            let rec = std::str::from_utf8(rec).ok()?;
+            let (info, path) = rec.split_once('\t')?;
+            let mut parts = info.split_whitespace();
+            let mode = match parts.next()? {
+                "100755" => Mode::Executable,
+                "120000" => Mode::Symlink,
+                _ => return None,
+            };
+            let oid = Oid::from_hex(parts.next()?).ok()?;
+            Some((path.to_string(), (mode, oid)))
+        })
+        .collect()
 }
 
 /// Build the tree for directory `prefix` from a flat, sorted map of files.
@@ -324,6 +384,57 @@ fn diff_into(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A rename that only changes case (`readme.md` -> `README.md`) is a
+    /// rename in the tree, also on case-insensitive filesystems (macOS APFS,
+    /// Windows NTFS), and the view materializes with the new name.
+    #[test]
+    fn case_only_rename_is_recorded() {
+        let (tmp, store, work) = setup();
+        fs::write(work.join("notes.md"), "n\n").unwrap();
+        let before = capture(&store, &work).unwrap();
+        fs::rename(work.join("notes.md"), work.join("NOTES.md")).unwrap();
+        let after = capture(&store, &work).unwrap();
+        let changes = diff(&store, &before, &after).unwrap();
+        let paths: Vec<(&str, ChangeKind)> =
+            changes.iter().map(|c| (c.path.as_str(), c.kind)).collect();
+        assert!(
+            paths.contains(&("NOTES.md", ChangeKind::Added)),
+            "{paths:?}"
+        );
+        assert!(
+            paths.contains(&("notes.md", ChangeKind::Removed)),
+            "{paths:?}"
+        );
+        let out = tmp.path().join("out");
+        materialize(&store, &after, &out).unwrap();
+        let names: Vec<String> = fs::read_dir(&out)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(names.contains(&"NOTES.md".to_string()), "{names:?}");
+        assert!(!names.contains(&"notes.md".to_string()), "{names:?}");
+    }
+
+    /// On Windows the filesystem has no executable bit or (by default)
+    /// symlinks; modes come from the previous tree, as git keeps them with
+    /// `core.fileMode=false` and `core.symlinks=false`.
+    #[test]
+    fn modes_the_filesystem_cant_show_come_from_the_previous_tree() {
+        let (_tmp, store, work) = setup();
+        let base = capture(&store, &work).unwrap();
+        // Pretend README.md was executable in the previous tree.
+        let mut files = flatten(&store, &base).unwrap();
+        files.get_mut("README.md").unwrap().0 = Mode::Executable;
+        let prev = tree_from_files(&store, &files).unwrap();
+        let now = capture_with_modes(&store, &work, None, Some(&prev)).unwrap();
+        let mode = flatten(&store, &now).unwrap()["README.md"].0;
+        if cfg!(unix) {
+            assert_eq!(mode, Mode::File, "the filesystem is the truth here");
+        } else {
+            assert_eq!(mode, Mode::Executable);
+        }
+    }
 
     fn setup() -> (tempfile::TempDir, ObjectStore, PathBuf) {
         let tmp = tempfile::tempdir().unwrap();

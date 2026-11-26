@@ -484,7 +484,10 @@ mod tests {
             &json!({ "workspace_roots": ["/w"], "file_path": "src/a.rs" }),
         )
         .unwrap();
-        assert_eq!(v["tool_input"]["file_path"], "/w/src/a.rs");
+        assert_eq!(
+            Path::new(v["tool_input"]["file_path"].as_str().unwrap()),
+            Path::new("/w/src/a.rs")
+        );
         assert!(hook_input("post-tool-use", &json!({})).is_none());
     }
 }

@@ -373,7 +373,7 @@ fn write_pack(space: &Space, oids: &[Oid]) -> Result<std::result::Result<Option<
             return Ok(Err("git is not available to write packfiles".into()));
         }
     }
-    let objects = fs::canonicalize(store.root()).at(store.root())?;
+    let objects = crate::view::canonical(store.root()).at(store.root())?;
     let child = Command::new("git")
         .arg("--git-dir")
         .arg(&gitdir)
@@ -414,6 +414,11 @@ fn write_pack(space: &Space, oids: &[Oid]) -> Result<std::result::Result<Option<
     for ext in ["pack", "idx"] {
         let from = out.join(format!("{name}.{ext}"));
         let to = dest.join(format!("{name}.{ext}"));
+        if to.exists() {
+            // The same objects packed again: the name is the content's hash,
+            // and on Windows an open pack can't be replaced.
+            continue;
+        }
         fs::rename(&from, &to).at(&to)?;
     }
     let _ = fs::remove_dir_all(&out);
@@ -423,6 +428,8 @@ fn write_pack(space: &Space, oids: &[Oid]) -> Result<std::result::Result<Option<
 
 fn remove_pack_files(space: &Space, keep: Option<&str>) {
     let dir = space.objects().pack_dir();
+    // Windows can't delete a file that is open, so let go of the packs first.
+    space.objects().close_packs();
     let Ok(rd) = fs::read_dir(&dir) else { return };
     let mut files: Vec<PathBuf> = rd.flatten().map(|e| e.path()).collect();
     // Index files first, so no reader opens a pack being deleted.

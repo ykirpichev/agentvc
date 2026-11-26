@@ -168,12 +168,11 @@ impl Pack {
 
     /// Read the object at `offset`, resolving deltas.
     fn read_at(&self, store: &ObjectStore, offset: u64, depth: usize) -> Option<(u8, Vec<u8>)> {
-        use std::os::unix::fs::FileExt;
         if depth > MAX_DELTA_DEPTH {
             return None;
         }
         let mut head = [0u8; 32];
-        let n = self.file.read_at(&mut head, offset).ok()?;
+        let n = pread(&self.file, &mut head, offset).ok()?;
         let head = &head[..n];
         let mut p = 0;
         let mut c = *head.get(p)?;
@@ -217,6 +216,34 @@ impl Pack {
     }
 }
 
+/// A path as trees store it: `/`-separated, without a leading `./`. On
+/// Windows `\\` separates too (elsewhere it is a legal filename character).
+pub fn tree_path(p: &str) -> String {
+    let p = if cfg!(windows) {
+        p.replace('\\', "/")
+    } else {
+        p.to_string()
+    };
+    let mut p = p.as_str();
+    while let Some(rest) = p.strip_prefix("./") {
+        p = rest;
+    }
+    p.to_string()
+}
+
+/// Read at `offset` without a shared cursor (`pread`; on Windows a seek
+/// read, which never relies on the cursor either).
+fn pread(file: &fs::File, buf: &mut [u8], offset: u64) -> std::io::Result<usize> {
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::FileExt::read_at(file, buf, offset)
+    }
+    #[cfg(windows)]
+    {
+        std::os::windows::fs::FileExt::seek_read(file, buf, offset)
+    }
+}
+
 struct PackReader<'a> {
     file: &'a fs::File,
     pos: u64,
@@ -224,8 +251,7 @@ struct PackReader<'a> {
 
 impl Read for PackReader<'_> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        use std::os::unix::fs::FileExt;
-        let n = self.file.read_at(buf, self.pos)?;
+        let n = pread(self.file, buf, self.pos)?;
         self.pos += n as u64;
         Ok(n)
     }
@@ -334,6 +360,11 @@ impl ObjectStore {
     /// Directory holding packfiles.
     pub fn pack_dir(&self) -> PathBuf {
         self.root.join("pack")
+    }
+
+    /// Drop this store's open packs; the next `reload_packs` opens them again.
+    pub fn close_packs(&self) {
+        self.packs.write().expect("lock").clear();
     }
 
     /// Re-read the list of packfiles (after a `gc` in this or another
@@ -645,6 +676,21 @@ fn git_sort_key(e: &TreeEntry) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tree_paths_use_forward_slashes() {
+        assert_eq!(tree_path("./src/lib.rs"), "src/lib.rs");
+        assert_eq!(tree_path("././a"), "a");
+        // Windows separators become tree separators; elsewhere `\` is a
+        // character of the name, as git treats it.
+        let expect = if cfg!(windows) {
+            "src/lib.rs"
+        } else {
+            "src\\lib.rs"
+        };
+        assert_eq!(tree_path("src\\lib.rs"), expect);
+        assert!(tree_path(".\\src\\lib.rs").ends_with("lib.rs"));
+    }
 
     #[test]
     fn blob_hash_matches_git() {

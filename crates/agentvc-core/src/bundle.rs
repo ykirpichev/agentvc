@@ -372,7 +372,7 @@ pub fn decode(body: &str) -> Result<Value> {
 /// Rebuild a space in `workdir` from a decoded space comment. `source` names
 /// where it came from, for the operation log.
 pub fn restore(workdir: &Path, payload: &Value, source: &str) -> Result<(Space, BundleRestore)> {
-    let workdir = fs::canonicalize(workdir).at(workdir)?;
+    let workdir = crate::view::canonical(workdir).at(workdir)?;
     let dir = workdir.join(SPACE_DIR);
     if dir.join("meta.db").exists() {
         return Err(Error::SpaceExists(workdir));

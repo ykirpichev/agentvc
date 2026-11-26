@@ -717,7 +717,13 @@ pub fn rebase(space: &Space, attempt_id: i64, opts: &RebaseOptions) -> Result<Re
             .join(SPACE_DIR)
             .join("index")
             .join(format!("a{attempt_id}"));
-        snapshot::capture_indexed(space.objects(), &attempt.view_path, Some(&index))?.to_hex()
+        snapshot::capture_with_modes(
+            space.objects(),
+            &attempt.view_path,
+            Some(&index),
+            head.tree_oid().ok().as_ref(),
+        )?
+        .to_hex()
     } else {
         head.tree.clone()
     };

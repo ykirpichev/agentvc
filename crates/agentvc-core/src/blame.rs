@@ -203,7 +203,7 @@ impl Space {
     /// Blame `path` in attempt `attempt_id`: its head snapshot, or with
     /// `working` its view as it is now.
     pub fn blame(&self, attempt_id: i64, path: &str, working: bool) -> Result<Blame> {
-        let path = path.trim_start_matches("./").to_string();
+        let path = crate::objects::tree_path(path);
         let target = self.attempt(attempt_id)?;
         // The lineage, oldest attempt first, each with the last snapshot
         // that counts (the next attempt's fork point).
