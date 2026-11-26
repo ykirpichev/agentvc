@@ -50,14 +50,30 @@ Fork and pull requests always run the CLI (`agentvc.cliPath`).
 | `agentvc.forkActor` | `human` | Actor recorded on forks from the editor |
 | `agentvc.confirmPromote` | `true` | Ask before promoting |
 
+## Requirements
+
+The `agentvc` CLI and the `agentvcd` daemon on `PATH` (or set
+`agentvc.cliPath` and `agentvc.daemonPath`), and a repository set up with
+`agentvc init`.
+
 ## Install
 
-Download `agentvc.vsix` from the CI run's artifacts (or build it, below), then
-in VS Code or Cursor: *Extensions → … → Install from VSIX…*, or
+From the VS Code Marketplace (VS Code) or Open VSX (Cursor, VSCodium): search
+for **agentvc**, or
 
 ```sh
-code --install-extension agentvc.vsix     # or: cursor --install-extension agentvc.vsix
+code --install-extension avc.agentvc
 ```
+
+Or download `agentvc.vsix` from a GitHub Release or a CI run, then
+*Extensions → … → Install from VSIX…*, or `cursor --install-extension agentvc.vsix`.
+
+## Release
+
+Push a tag `vscode-vX.Y.Z`. The *VS Code extension release* workflow tests,
+packages and publishes to the Marketplace (`VSCE_PAT` secret) and Open VSX
+(`OVSX_PAT` secret), and attaches the `.vsix` to a GitHub Release. Add the
+version's notes to `CHANGELOG.md` first.
 
 ## Develop
 
@@ -73,3 +89,7 @@ npm run package        # agentvc.vsix
 
 Press F5 with this folder open to launch an Extension Development Host. The
 daemon's types are shared with the web UI (`ui/src/api/types.ts`).
+
+## License
+
+MIT OR Apache-2.0, at your option.

@@ -3,11 +3,17 @@
   "displayName": "agentvc",
   "description": "Review agent attempts in the editor: attempt tree, native diff compare, and pick a winner.",
   "version": "0.1.0",
-  "publisher": "agentvc",
-  "private": true,
+  "publisher": "avc",
+  "license": "MIT OR Apache-2.0",
+  "preview": true,
+  "pricing": "Free",
   "repository": {
     "type": "git",
     "url": "https://github.com/ykirpichev/agentvc"
+  },
+  "homepage": "https://github.com/ykirpichev/agentvc/tree/main/integrations/vscode",
+  "bugs": {
+    "url": "https://github.com/ykirpichev/agentvc/issues"
   },
   "engines": {
     "vscode": "^1.90.0"
@@ -45,7 +51,7 @@
     "viewsWelcome": [
       {
         "view": "agentvc.attempts",
-        "contents": "Connecting to agentvcd\u2026",
+        "contents": "Connecting to agentvcd…",
         "when": "agentvc.state == connecting"
       },
       {
@@ -79,7 +85,7 @@
       },
       {
         "command": "agentvc.compareAttempts",
-        "title": "Compare Two Attempts\u2026",
+        "title": "Compare Two Attempts…",
         "category": "agentvc",
         "icon": "$(diff-multiple)"
       },
@@ -107,7 +113,7 @@
       },
       {
         "command": "agentvc.openFileDiff",
-        "title": "Open Changed File\u2026",
+        "title": "Open Changed File…",
         "category": "agentvc",
         "icon": "$(go-to-file)"
       },
@@ -154,7 +160,7 @@
       },
       {
         "command": "agentvc.abandon",
-        "title": "Abandon\u2026",
+        "title": "Abandon…",
         "category": "agentvc",
         "icon": "$(circle-slash)"
       },
@@ -399,7 +405,9 @@
     "compile-tests": "tsc -p test",
     "test:unit": "npm run compile-tests && mocha 'out/integrations/vscode/test/unit/**/*.test.js'",
     "test": "npm run build && npm run compile-tests && node out/integrations/vscode/test/runTest.js",
-    "package": "npm run build && vsce package --no-dependencies --skip-license -o agentvc.vsix"
+    "package": "npm run build && vsce package --no-dependencies -o agentvc.vsix",
+    "publish:vsce": "vsce publish --no-dependencies --packagePath agentvc.vsix",
+    "publish:ovsx": "ovsx publish agentvc.vsix"
   },
   "devDependencies": {
     "@types/mocha": "^10.0.10",
@@ -410,7 +418,22 @@
     "@vscode/vsce": "^3.2.2",
     "esbuild": "^0.25.0",
     "mocha": "^11.1.0",
+    "ovsx": "^1.4.0",
     "typescript": "^5.7.3",
     "ws": "^8.18.0"
+  },
+  "keywords": [
+    "agents",
+    "ai",
+    "version control",
+    "review",
+    "diff",
+    "attempts",
+    "claude",
+    "cursor"
+  ],
+  "galleryBanner": {
+    "color": "#1e1b3a",
+    "theme": "dark"
   }
 }

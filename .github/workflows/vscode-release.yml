@@ -1,0 +1,67 @@
+name: VS Code extension release
+
+# Push a tag like `vscode-v0.1.0` to test, package and publish the extension
+# to the VS Code Marketplace (VSCE_PAT) and Open VSX (OVSX_PAT, used by
+# Cursor and VSCodium). A registry whose secret is missing is skipped; the
+# .vsix is always attached to a GitHub Release.
+on:
+  push:
+    tags: ["vscode-v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to publish, e.g. 0.1.0"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: integrations/vscode
+    env:
+      VERSION: ${{ inputs.version || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build agentvc and agentvcd for the extension tests
+        working-directory: .
+        run: cargo build -p agentvc-cli -p agentvcd
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: integrations/vscode/package-lock.json
+      - run: npm ci
+      - name: Set the version from the tag
+        run: npm version --no-git-tag-version --allow-same-version "${VERSION#vscode-v}"
+      - run: npm run typecheck
+      - run: npm run test:unit
+      - run: xvfb-run -a npm test
+      - run: npm run package
+      - name: Publish to the VS Code Marketplace
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+        run: |
+          if [ -z "$VSCE_PAT" ]; then echo "::warning::VSCE_PAT not set; skipping the Marketplace"; exit 0; fi
+          npm run publish:vsce
+      - name: Publish to Open VSX
+        env:
+          OVSX_PAT: ${{ secrets.OVSX_PAT }}
+        run: |
+          if [ -z "$OVSX_PAT" ]; then echo "::warning::OVSX_PAT not set; skipping Open VSX"; exit 0; fi
+          # Creates the namespace on first publish; fails harmlessly once it exists.
+          npx ovsx create-namespace "$(node -p 'require("./package.json").publisher')" || true
+          npm run publish:ovsx
+      - name: Attach the .vsix to a GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="vscode-v${VERSION#vscode-v}"
+          gh release view "$tag" >/dev/null 2>&1 || \
+            gh release create "$tag" --target "$GITHUB_SHA" --title "VS Code extension ${VERSION#vscode-v}" --notes-file CHANGELOG.md
+          gh release upload "$tag" agentvc.vsix --clobber

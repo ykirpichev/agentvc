@@ -219,3 +219,10 @@ cargo build
 cargo run -p agentvc-cli -- --help
 cargo test --workspace
 ```
+
+## License
+
+Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or
+[MIT license](LICENSE-MIT) at your option. Unless you state otherwise, any
+contribution you submit for inclusion is dual-licensed the same way, without
+additional terms.
