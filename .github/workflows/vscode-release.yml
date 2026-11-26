@@ -54,6 +54,8 @@ jobs:
           OVSX_PAT: ${{ secrets.OVSX_PAT }}
         run: |
           if [ -z "$OVSX_PAT" ]; then echo "::warning::OVSX_PAT not set; skipping Open VSX"; exit 0; fi
+          # Creates the namespace on first publish; fails harmlessly once it exists.
+          npx ovsx create-namespace "$(node -p 'require("./package.json").publisher')" || true
           npm run publish:ovsx
       - name: Attach the .vsix to a GitHub Release
         env:
