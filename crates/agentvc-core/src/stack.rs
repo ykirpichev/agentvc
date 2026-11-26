@@ -1653,7 +1653,7 @@ impl Window {
 
     // ---- navigation ----
 
-    fn switch(&self, branch: &str) -> Result<String> {
+    pub(crate) fn switch(&self, branch: &str) -> Result<String> {
         if let Some(p) = self.checkouts_elsewhere().get(branch) {
             return Err(stack_err_with(
                 "checked_out_elsewhere",

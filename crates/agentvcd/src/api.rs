@@ -97,14 +97,19 @@ impl From<Error> for ApiError {
             | Error::BadHunk { .. }
             | Error::BadQuery(_) => StatusCode::BAD_REQUEST,
             Error::Stack { code, .. } => match *code {
-                "no_workspace" | "no_request" => StatusCode::NOT_FOUND,
+                "no_workspace" | "no_request" | "not_in_stack" | "no_branch" => {
+                    StatusCode::NOT_FOUND
+                }
                 "conflict"
                 | "stack_locked"
                 | "request_not_queued"
                 | "remote_workspace"
                 | "checked_out_elsewhere"
                 | "owned_by_other_window"
-                | "rebase_in_progress" => StatusCode::CONFLICT,
+                | "rebase_in_progress"
+                | "unresolved_conflicts"
+                | "no_conflicts"
+                | "not_conflicted" => StatusCode::CONFLICT,
                 _ => StatusCode::BAD_REQUEST,
             },
             _ => StatusCode::INTERNAL_SERVER_ERROR,

@@ -3,7 +3,12 @@
 import { useLocation, useNavigate } from 'react-router'
 import { routeFor, toHost } from './embed'
 
-export type Selection = { kind: 'version'; id: number } | { kind: 'task'; id: number } | { kind: 'commit'; commit: string } | null
+export type Selection =
+  | { kind: 'version'; id: number }
+  | { kind: 'task'; id: number }
+  | { kind: 'commit'; commit: string }
+  | { kind: 'branch'; workspace: string; name: string }
+  | null
 
 export function selectionFromPath(path: string): Selection {
   let m = /^\/review\/v\/(\d+)/.exec(path)
@@ -12,12 +17,17 @@ export function selectionFromPath(path: string): Selection {
   if (m) return { kind: 'task', id: Number(m[1]) }
   m = /^\/review\/c\/([0-9a-f]+)/.exec(path)
   if (m) return { kind: 'commit', commit: m[1]! }
+  m = /^\/review\/b\/([^/]+)\/(.+)$/.exec(path)
+  if (m) return { kind: 'branch', workspace: decodeURIComponent(m[1]!), name: decodeURIComponent(m[2]!) }
   return null
 }
 
 export const versionLink = (id: number, onto?: string) => `/review/v/${id}${onto ? `?onto=${onto}` : ''}`
 export const taskLink = (id: number) => `/review/t/${id}`
 export const commitLink = (c: string) => `/review/c/${c}`
+/** A stacked branch of a workspace (`?resolve=1` opens its stopped restack). */
+export const branchLink = (workspace: string, name: string) =>
+  `/review/b/${encodeURIComponent(workspace)}/${name.split('/').map(encodeURIComponent).join('/')}`
 
 /** "Rebase onto…" picks a target by click; this is the version being moved. */
 export function usePick() {

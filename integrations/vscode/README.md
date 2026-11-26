@@ -18,7 +18,14 @@ tree, compare attempts in VS Code's native diff editor, and pick the winner.
   Undo. The frame follows the editor's theme. Needs the daemon (started for
   you). In a remote window the daemon's port is forwarded with
   `asExternalUri`; the daemon answers only `localhost`, so this works for SSH
-  and dev containers that forward to localhost.
+  and dev containers that forward to localhost. Drag the line between the
+  graph and *Stacks* to resize them. Click a stack branch to open its commits
+  and changes; double-click (or *Check out*) switches that window to it. When
+  a restack clashes, *Resolve* shows each place with Keep main / Keep mine /
+  Keep both / Edit, then *Continue* or *Abort*.
+
+  The tree views below (*Stack (this window)*, *Attempts*) are hidden by
+  default; turn them on from the side bar's `...` menu.
 
 - **Stack (this window)**: the stacked branches of this window's worktree
   (`agentvc stack`, see [docs/stacks.md](../../docs/stacks.md)). Each Cursor or

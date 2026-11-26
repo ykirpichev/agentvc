@@ -20,6 +20,24 @@ export const WORDS = {
   keepMain: 'Keep main',
   keepBoth: 'Keep both',
   keep: (name: string) => `Keep ${name}`,
+  checkout: 'Check out',
+  restack: 'Restack',
+  resolve: 'Resolve conflicts',
+} as const
+
+/** One line under each action saying what it does, in plain words. */
+export const HELP = {
+  choose: 'Pick this as the version to ship. The task\'s other versions are set aside; Undo brings them back.',
+  updateFromMain: (n: number) =>
+    `Main has ${n} new commit${n === 1 ? '' : 's'}. Replays this version's changes on top; you see a preview first and settle any clashes here.`,
+  rebaseOnto: 'Like Update from main, onto a main commit you click in the branch graph.',
+  openPr: 'Pushes this version as a branch and opens a pull request on GitHub.',
+  updatePr: 'Pushes this version again; the pull request updates.',
+  take: (name: string) => `Copies this version's changes into ${name}, the version you chose.`,
+  discard: 'Sets this version aside with a reason. It stays in history; Undo brings it back.',
+  checkout: 'Switches that window (worktree) to this branch.',
+  restack: 'Its parent changed. Replays this branch, and the branches above it, onto the parent\'s new tip.',
+  resolve: 'Restacking stopped on a clash. Pick what each place should say, then continue.',
 } as const
 
 /** How a version is named: who made it, e.g. `claude · opus`. */

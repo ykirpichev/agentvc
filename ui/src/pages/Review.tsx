@@ -18,7 +18,7 @@ import { MovePreview } from '../components/MovePreview'
 import { useToast } from '../components/Toaster'
 import { visibleVersions } from '../core/graph'
 import { nextStep, type NextStep } from '../core/next'
-import { shortSha, statusWords, versionName, WORDS } from '../core/words'
+import { HELP, shortSha, statusWords, versionName, WORDS } from '../core/words'
 import { money, plural, timeAgo } from '../lib/format'
 import { CompareView } from './Compare'
 
@@ -164,6 +164,7 @@ export function TaskReview() {
                   type="button"
                   className={`btn ${a.status === 'passed' ? 'btn-primary' : 'btn-ghost'}`}
                   disabled={busy}
+                  title={HELP.choose}
                   onClick={() => void act(() => api.promote(a.id), `Chose ${versionName(a)}. The others stay in history.`)}
                 >
                   {WORDS.choose}
@@ -252,46 +253,67 @@ export function VersionReview() {
 
       {a.prompt && <p className="rv-prompt">{a.prompt}</p>}
 
-      <div className="rv-actions">
+      <div className="rv-actions rv-actions-list">
         {isOpen && !chosen && g.conflicts === 0 && (
-          <button type="button" className="btn btn-primary" disabled={busy} onClick={() => void act(() => api.promote(a.id), `Chose ${versionName(a)}. The others stay in history.`)}>
-            {WORDS.choose}
-          </button>
+          <div className="act">
+            <button type="button" className="btn btn-primary" disabled={busy} onClick={() => void act(() => api.promote(a.id), `Chose ${versionName(a)}. The others stay in history.`)}>
+              {WORDS.choose}
+            </button>
+            <span className="act-help">{HELP.choose}</span>
+          </div>
         )}
         {(isOpen || a.status === 'promoted') && behind > 0 && g.conflicts === 0 && (
-          <button type="button" className={`btn ${a.status === 'promoted' ? 'btn-primary' : 'btn-ghost'}`} disabled={busy || !graph.trunk[0]} onClick={() => navigate(versionLink(a.id, graph.trunk[0]!.commit))}>
-            ↻ {WORDS.updateFromMain}
-          </button>
+          <div className="act">
+            <button type="button" className={`btn ${a.status === 'promoted' ? 'btn-primary' : 'btn-ghost'}`} disabled={busy || !graph.trunk[0]} onClick={() => navigate(versionLink(a.id, graph.trunk[0]!.commit))}>
+              ↻ {WORDS.updateFromMain}
+            </button>
+            <span className="act-help">{HELP.updateFromMain(behind)}</span>
+          </div>
         )}
         {(isOpen || a.status === 'promoted') && (
-          <button type="button" className="btn btn-ghost" disabled={busy} onClick={() => navigate(`${versionLink(a.id)}?pick=${a.id}`)}>
-            ⤴ {WORDS.rebaseOnto}
-          </button>
+          <div className="act">
+            <button type="button" className="btn btn-ghost" disabled={busy} onClick={() => navigate(`${versionLink(a.id)}?pick=${a.id}`)}>
+              ⤴ {WORDS.rebaseOnto}
+            </button>
+            <span className="act-help">{HELP.rebaseOnto}</span>
+          </div>
         )}
         {a.status === 'promoted' && behind === 0 && g.conflicts === 0 && (
-          <button type="button" className="btn btn-primary" disabled={busy} onClick={() => void act(() => api.openPr(a.id), g.pr ? 'PR updated' : 'PR opened', false)}>
-            {g.pr ? 'Update PR' : WORDS.openPr}
-          </button>
+          <div className="act">
+            <button type="button" className="btn btn-primary" disabled={busy} onClick={() => void act(() => api.openPr(a.id), g.pr ? 'PR updated' : 'PR opened', false)}>
+              {g.pr ? 'Update PR' : WORDS.openPr}
+            </button>
+            <span className="act-help">{g.pr ? HELP.updatePr : HELP.openPr}</span>
+          </div>
         )}
         {g.pr && (
-          <a className="btn btn-ghost" href={g.pr.url} target="_blank" rel="noreferrer">
-            PR #{g.pr.number} ↗
-          </a>
+          <div className="act">
+            <a className="btn btn-ghost" href={g.pr.url} target="_blank" rel="noreferrer">
+              PR #{g.pr.number} ↗
+            </a>
+            <span className="act-help">Opens the pull request on GitHub.</span>
+          </div>
         )}
         {chosen && chosen.attempt.id !== a.id && isOpen && (
-          <button
-            type="button"
-            className="btn btn-ghost"
-            disabled={busy}
-            onClick={() => void act(() => api.take(chosen.attempt.id, { source: `a${a.id}`, keep_conflicts: true }), `Added ${versionName(a)}'s changes to ${versionName(chosen.attempt)}`)}
-          >
-            Add its changes to {versionName(chosen.attempt)}
-          </button>
+          <div className="act">
+            <button
+              type="button"
+              className="btn btn-ghost"
+              disabled={busy}
+              onClick={() => void act(() => api.take(chosen.attempt.id, { source: `a${a.id}`, keep_conflicts: true }), `Added ${versionName(a)}'s changes to ${versionName(chosen.attempt)}`)}
+            >
+              Add its changes to {versionName(chosen.attempt)}
+            </button>
+            <span className="act-help">{HELP.take(versionName(chosen.attempt))}</span>
+          </div>
         )}
         {isOpen && !discarding && (
-          <button type="button" className="btn btn-ghost" disabled={busy} onClick={() => setDiscarding(true)}>
-            {WORDS.discard}
-          </button>
+          <div className="act">
+            <button type="button" className="btn btn-ghost" disabled={busy} onClick={() => setDiscarding(true)}>
+              {WORDS.discard}
+            </button>
+            <span className="act-help">{HELP.discard}</span>
+          </div>
         )}
       </div>
 

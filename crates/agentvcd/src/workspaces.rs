@@ -7,6 +7,13 @@
 //!   "rename"|"delete"|"sync", "branch", "onto", "new_name", "queue"}`:
 //!   `{"outcome": "applied"|"queued", "request_id", "result"}`.
 //! - `POST /api/requests/{id}/cancel`: cancel a queued edit.
+//! - `GET /api/workspaces/{id}/branches/{name}`: a branch's own commits and
+//!   files.
+//! - A restack stopped on a conflict (`"keep_conflicts": true` on an edit):
+//!   `GET /api/workspaces/{id}/conflicts`, `POST .../conflicts/resolve`
+//!   `{"path", "hunks": [{"index", "take", "text"}]}` (hunks from the
+//!   branch's side: `ours` is the branch), then `POST .../continue` or
+//!   `POST .../abort`.
 //!
 //! Events: `stack_changed {workspace}`, `workspaces_changed`, and
 //! `request_queued|request_applied|request_failed|request_cancelled
@@ -34,6 +41,11 @@ pub(crate) fn routes() -> Router<AppState> {
         .route("/workspaces", get(list))
         .route("/workspaces/{id}/stack", post(edit))
         .route("/requests/{id}/cancel", post(cancel))
+        .route("/workspaces/{id}/branches/{name}", get(branch))
+        .route("/workspaces/{id}/conflicts", get(conflicts))
+        .route("/workspaces/{id}/conflicts/resolve", post(resolve))
+        .route("/workspaces/{id}/continue", post(cont))
+        .route("/workspaces/{id}/abort", post(abort))
 }
 
 #[derive(Deserialize)]
@@ -59,6 +71,9 @@ pub(crate) struct EditBody {
     /// Queue even if the workspace is idle.
     #[serde(default)]
     queue: bool,
+    /// Stop a conflicting restack in the worktree, to resolve it here.
+    #[serde(default)]
+    keep_conflicts: bool,
 }
 
 /// Blocking work off the async runtime, without the space lock.
@@ -81,7 +96,17 @@ async fn edit(
     let body = json_body(body)?;
     let dir = st.workdir().to_path_buf();
     let from = format!("api:{}", st.actor());
-    let out = blocking(move || workspace::edit(&dir, &id, body.op, Some(&from), body.queue)).await;
+    let out = blocking(move || {
+        workspace::edit_with(
+            &dir,
+            &id,
+            body.op,
+            Some(&from),
+            body.queue,
+            body.keep_conflicts,
+        )
+    })
+    .await;
     st.poke_workspaces();
     Ok(Json(out?))
 }
@@ -96,6 +121,66 @@ async fn cancel(State(st): State<AppState>, Path(id): Path<String>) -> ApiResult
     let request = blocking(move || workspace::cancel(&dir, &id)).await?;
     st.poke_workspaces();
     Ok(Json(CancelResponse { request }))
+}
+
+async fn branch(
+    State(st): State<AppState>,
+    Path((id, name)): Path<(String, String)>,
+) -> ApiResult<workspace::BranchDetail> {
+    let dir = st.workdir().to_path_buf();
+    Ok(Json(
+        blocking(move || workspace::branch_detail(&dir, &id, &name)).await?,
+    ))
+}
+
+async fn conflicts(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<workspace::WsConflicts> {
+    let dir = st.workdir().to_path_buf();
+    Ok(Json(
+        blocking(move || workspace::conflicts(&dir, &id)).await?,
+    ))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ResolveBody {
+    path: String,
+    hunks: Vec<agentvc_core::conflicts::HunkChoice>,
+}
+
+async fn resolve(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+    body: Result<Json<ResolveBody>, JsonRejection>,
+) -> ApiResult<workspace::WsResolve> {
+    let body = json_body(body)?;
+    let dir = st.workdir().to_path_buf();
+    let out = blocking(move || workspace::resolve(&dir, &id, &body.path, &body.hunks)).await;
+    st.poke_workspaces();
+    Ok(Json(out?))
+}
+
+async fn cont(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<workspace::WsFinish> {
+    finish(st, id, false).await
+}
+
+async fn abort(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<workspace::WsFinish> {
+    finish(st, id, true).await
+}
+
+async fn finish(st: AppState, id: String, abort: bool) -> ApiResult<workspace::WsFinish> {
+    let dir = st.workdir().to_path_buf();
+    let out = blocking(move || workspace::finish(&dir, &id, abort)).await;
+    st.poke_workspaces();
+    Ok(Json(out?))
 }
 
 /// The events that take `old` to `new`.

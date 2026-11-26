@@ -32,7 +32,8 @@ use crate::export::{copy_tree_objects, HostRepo, IMPORT_BASE_KEY};
 use crate::objects::{parse_tree, Mode, ObjectStore, Oid};
 use crate::resolve::{merge_file, Resolution, Rules, Sides, Strategy};
 use crate::snapshot::{self, ChangeKind, FileChange};
-use crate::space::{now, Snapshot, Space, Status, ROOT_ATTEMPT, SPACE_DIR};
+use crate::space::{now, Attempt, Snapshot, Space, Status, ROOT_ATTEMPT, SPACE_DIR};
+use crate::undo::{Change, TreeState};
 
 #[derive(Clone, Debug, Default)]
 pub struct RebaseOptions {
@@ -114,6 +115,22 @@ fn row_to_base(r: &rusqlite::Row<'_>) -> rusqlite::Result<GitBase> {
 impl Space {
     /// The rebase that `snapshot` is based on, if it or one of the snapshots
     /// it descends from was recorded by a rebase.
+    /// The tree an attempt's view holds right now, without recording it.
+    pub(crate) fn capture_view_tree(&self, attempt: &Attempt, head: &Snapshot) -> Result<String> {
+        let index = self
+            .workdir()
+            .join(SPACE_DIR)
+            .join("index")
+            .join(format!("a{}", attempt.id));
+        Ok(snapshot::capture_with_modes(
+            self.objects(),
+            &attempt.view_path,
+            Some(&index),
+            head.tree_oid().ok().as_ref(),
+        )?
+        .to_hex())
+    }
+
     pub fn git_base(&self, snapshot: &Snapshot) -> Result<Option<GitBase>> {
         let mut snap = snapshot.clone();
         for _ in 0..100_000 {
@@ -687,6 +704,39 @@ pub(crate) fn write_changes(
     Ok(())
 }
 
+/// Put attempt `id` from state `from` into state `to` (undo and redo of a
+/// rebase): writes the view, records a snapshot with that tree and a git
+/// base, and closes or reopens the conflicts that differ.
+pub(crate) fn put_tree(space: &Space, id: i64, from: &TreeState, to: &TreeState) -> Result<()> {
+    let attempt = space.attempt(id)?;
+    let to_oid = Oid::from_hex(&to.tree)?;
+    if space.ensure_view(&attempt)? {
+        let changes = snapshot::diff(space.objects(), &Oid::from_hex(&from.tree)?, &to_oid)?;
+        write_changes(space.objects(), &attempt.view_path, &to_oid, &changes)?;
+    }
+    let meta = serde_json::json!({ "undo_of": "rebase", "base": to.base });
+    let snap = insert_snapshot(space, id, &to.tree, "undo", Some(meta))?;
+    space.db.execute(
+        "INSERT INTO git_bases (attempt_id, snapshot_id, commit_id, tree, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![id, snap.id, to.base, to.base_tree, now()],
+    )?;
+    for c in from.conflicts.iter().filter(|c| !to.conflicts.contains(c)) {
+        space.db.execute(
+            "UPDATE conflicts SET resolved_at = ?1, resolution = 'undone' WHERE id = ?2 AND resolved_at IS NULL",
+            params![now(), c],
+        )?;
+    }
+    for c in to.conflicts.iter().filter(|c| !from.conflicts.contains(c)) {
+        space.db.execute(
+            "UPDATE conflicts SET resolved_at = NULL, resolution = NULL WHERE id = ?1",
+            params![c],
+        )?;
+    }
+    let _ = space.link_view_git(&space.attempt(id)?);
+    Ok(())
+}
+
 pub(crate) fn insert_snapshot(
     space: &Space,
     attempt_id: i64,
@@ -794,21 +844,15 @@ pub fn rebase(space: &Space, attempt_id: i64, opts: &RebaseOptions) -> Result<Re
     // The state to rebase is the view as it is now. Capture it without
     // recording, so a failed rebase leaves history untouched.
     let current = if attempt.status.takes_snapshots() && view_ok {
-        let index = space
-            .workdir()
-            .join(SPACE_DIR)
-            .join("index")
-            .join(format!("a{attempt_id}"));
-        snapshot::capture_with_modes(
-            space.objects(),
-            &attempt.view_path,
-            Some(&index),
-            head.tree_oid().ok().as_ref(),
-        )?
-        .to_hex()
+        space.capture_view_tree(&attempt, &head)?
     } else {
         head.tree.clone()
     };
+    let conflicts_before: Vec<i64> = space
+        .conflicts(attempt_id, false)?
+        .iter()
+        .map(|c| c.id)
+        .collect();
 
     let from = space
         .git_base_commit(&head)?
@@ -926,7 +970,37 @@ pub fn rebase(space: &Space, attempt_id: i64, opts: &RebaseOptions) -> Result<Re
         // Move the view's git HEAD and index to the new base.
         let _ = space.link_view_git(&space.attempt(attempt_id)?);
     }
+    let from_tree = repo.git(&["rev-parse", &format!("{from}^{{tree}}")], None)?;
+    let mut changes_log = vec![Change::Tree {
+        attempt: attempt_id,
+        from: TreeState {
+            tree: current.clone(),
+            base: from.clone(),
+            base_tree: from_tree,
+            conflicts: conflicts_before,
+        },
+        to: TreeState {
+            tree: merge.tree.clone(),
+            base: onto.clone(),
+            base_tree: onto_tree.clone(),
+            conflicts: space
+                .conflicts(attempt_id, false)?
+                .iter()
+                .map(|c| c.id)
+                .collect(),
+        },
+    }];
     if keep && attempt.status != Status::Exploring {
+        changes_log.push(Change::status(
+            attempt_id,
+            attempt.status,
+            attempt.reason.clone(),
+            Status::Exploring,
+            Some(format!(
+                "rebase conflicts in {} files",
+                merge.conflicts.len()
+            )),
+        ));
         space.db.execute(
             "UPDATE attempts SET status = 'exploring', reason = ?1 WHERE id = ?2",
             params![
@@ -943,6 +1017,8 @@ pub fn rebase(space: &Space, attempt_id: i64, opts: &RebaseOptions) -> Result<Re
             "attempt": attempt_id, "onto": onto, "onto_ref": onto_ref, "from": from,
             "snapshot": snap.id, "conflicts": merge.conflicts,
             "auto_resolved": resolved,
+            // What undo reverses (#120): files and base, then status.
+            "changes": changes_log,
         }),
     )?;
     Ok(RebaseResult {
@@ -1334,6 +1410,78 @@ mod tests {
                 .contains("<<<<<<< a2\nfrom a2\n||||||| base\n=======\nfrom main\n>>>>>>> main\n"),
             "{readme}"
         );
+    }
+
+    #[test]
+    fn undo_reverses_a_rebase_that_kept_conflicts() {
+        // #120: the toast's Undo must put back files, base and status.
+        let (tmp, space, _) = repo();
+        let w = tmp.path();
+        let a = fork(&space, BackendChoice::Copy).unwrap();
+        let view = &a.view_path;
+        fs::write(view.join("README.md"), "# demo\n\nline ONE\n").unwrap();
+        space.snapshot(a.id, "manual", None).unwrap();
+        space.set_status(a.id, Status::Passed, None).unwrap();
+        let before_base = space
+            .git_base_commit(&space.head_snapshot(a.id).unwrap())
+            .unwrap();
+        let c1 = advance_main(w, "# demo\n\nline uno\n");
+        let r = rebase(
+            &space,
+            a.id,
+            &RebaseOptions {
+                keep_conflicts: true,
+                ..onto("main")
+            },
+        )
+        .unwrap();
+        assert_eq!(r.status, Status::Exploring);
+        assert_eq!(space.conflicts(a.id, false).unwrap().len(), 1);
+
+        // The newest undoable operation is the rebase itself.
+        let u = space.undo("human", None).unwrap();
+        assert_eq!(u.undid.kind, "attempt.rebase");
+        assert_eq!(
+            fs::read_to_string(view.join("README.md")).unwrap(),
+            "# demo\n\nline ONE\n"
+        );
+        assert_eq!(space.attempt(a.id).unwrap().status, Status::Passed);
+        assert!(space.conflicts(a.id, false).unwrap().is_empty());
+        let head = space.head_snapshot(a.id).unwrap();
+        assert_eq!(head.trigger, "undo");
+        assert_eq!(space.git_base_commit(&head).unwrap(), before_base);
+
+        // Undo of the undo is redo.
+        space.undo("human", Some(u.op)).unwrap();
+        assert!(fs::read_to_string(view.join("README.md"))
+            .unwrap()
+            .contains("<<<<<<<"));
+        assert_eq!(space.attempt(a.id).unwrap().status, Status::Exploring);
+        assert_eq!(space.conflicts(a.id, false).unwrap().len(), 1);
+        let head = space.head_snapshot(a.id).unwrap();
+        assert_eq!(
+            space.git_base_commit(&head).unwrap().as_deref(),
+            Some(c1.as_str())
+        );
+
+        // Work done after the rebase blocks undoing it.
+        let (tmp, space, _) = repo();
+        let a = fork(&space, BackendChoice::Copy).unwrap();
+        fs::write(a.view_path.join("README.md"), "# demo\n\nmine\n").unwrap();
+        advance_main(tmp.path(), "# demo\n\ntheirs\n");
+        let r = rebase(
+            &space,
+            a.id,
+            &RebaseOptions {
+                keep_conflicts: true,
+                ..onto("main")
+            },
+        )
+        .unwrap();
+        assert_eq!(r.conflicts, ["README.md"]);
+        fs::write(a.view_path.join("README.md"), "# demo\n\nboth\n").unwrap();
+        let e = space.undo("human", None).unwrap_err();
+        assert!(e.to_string().contains("not in a snapshot"), "{e}");
     }
 
     #[test]
