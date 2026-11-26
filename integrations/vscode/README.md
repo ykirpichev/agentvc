@@ -11,7 +11,7 @@ tree, compare attempts in VS Code's native diff editor, and pick the winner.
   UI as the browser, served by `agentvcd` and shown in a frame, so VS Code,
   Cursor and the web look and work the same. The side bar has the branch graph
   (main's commits, every task's versions, drag a version onto a commit to
-  rebase it) and *Stacks*: this window's stack, or every window's with *All*;
+  rebase it, or onto another version to stack it on top) and *Stacks*: this window's stack, or every window's with *All*;
   drag a branch onto another branch or main to move it, wherever that window
   is (the change waits while an agent works there). Clicking anything opens it
   in the review tab, with the rebase preview, conflict resolver, Open PR and

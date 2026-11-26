@@ -427,6 +427,8 @@ export interface GraphAttempt {
   conflicts: number
   head_snapshot: number | null
   pr: { number: number; url: string; state: 'open' | 'closed' | 'merged' | null } | null
+  /** Stacked onto another version: that version and the snapshot of it this one is on. */
+  stacked_on?: { attempt: number; snapshot: number }
 }
 
 export interface Graph {

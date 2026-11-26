@@ -37,8 +37,9 @@ use crate::undo::{Change, TreeState};
 
 #[derive(Clone, Debug, Default)]
 pub struct RebaseOptions {
-    /// Git revision to rebase onto. Defaults to the remote's default branch,
-    /// fetched first.
+    /// Git revision to rebase onto, or `aN` to stack onto version N (its
+    /// head snapshot, as a commit on its own base). Defaults to the
+    /// remote's default branch, fetched first.
     pub onto: Option<String>,
     /// Remote whose default branch is the default target. Defaults to `origin`.
     pub remote: Option<String>,
@@ -243,6 +244,13 @@ impl Space {
             .optional()?)
     }
 
+    /// The version a base commit stands for, when an attempt was stacked
+    /// onto another (`rebase --onto aN`): `(attempt, snapshot)`.
+    pub fn stacked_on(&self, commit: &str) -> Option<(i64, i64)> {
+        let repo = HostRepo::open(self.workdir()).ok()?;
+        stacked_base(&repo, commit)
+    }
+
     /// A recorded rebase onto `commit` (full id), from any attempt. Its
     /// tree is stored in the space, so it can be read like a snapshot's.
     pub fn git_base_by_commit(&self, commit: &str) -> Result<Option<GitBase>> {
@@ -273,6 +281,146 @@ impl Space {
         };
         snapshot::diff(self.objects(), &Oid::from_hex(&base)?, &head)
     }
+}
+
+/// Trailer on a stacked base commit: `Agentvc-Stacked-On: a7 s12`.
+pub const STACKED_TRAILER: &str = "Agentvc-Stacked-On";
+
+/// `aN` names a version to stack onto instead of a git revision.
+pub fn parse_version_ref(rev: &str) -> Option<i64> {
+    let n = rev.trim().strip_prefix('a')?;
+    if n.is_empty() || !n.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    n.parse().ok()
+}
+
+/// The version (attempt, snapshot) a stacked base commit holds, read from
+/// its trailer; `None` for any other commit.
+pub(crate) fn stacked_base(repo: &HostRepo, commit: &str) -> Option<(i64, i64)> {
+    let out = repo
+        .git(
+            &[
+                "show",
+                "-s",
+                &format!("--format=%(trailers:key={STACKED_TRAILER},valueonly)"),
+                commit,
+            ],
+            None,
+        )
+        .ok()?;
+    let mut parts = out.lines().next()?.split_whitespace();
+    let a = parse_version_ref(parts.next()?)?;
+    let s = parts.next()?.strip_prefix('s')?.parse().ok()?;
+    Some((a, s))
+}
+
+fn stack_error(code: &'static str, message: String) -> Error {
+    Error::Stack {
+        code,
+        message,
+        details: None,
+    }
+}
+
+/// The commit that stands for version `target` as a base: its head
+/// snapshot's tree on top of the commit that snapshot is based on. Written
+/// deterministically (fixed author and dates), so a preview and the rebase
+/// after it name the same commit, and kept reachable under
+/// `refs/agentvc/stacked/`.
+pub(crate) fn version_commit(
+    space: &Space,
+    repo: &HostRepo,
+    attempt_id: i64,
+    target: i64,
+) -> Result<String> {
+    if target == attempt_id {
+        return Err(stack_error(
+            "stack_onto_self",
+            format!("a{target} cannot be stacked on itself"),
+        ));
+    }
+    if target == ROOT_ATTEMPT {
+        return Err(Error::RootAttempt);
+    }
+    let t = space.attempt(target)?;
+    if t.status == Status::Abandoned {
+        return Err(Error::AttemptClosed {
+            id: target,
+            status: t.status.to_string(),
+        });
+    }
+    let open = space.conflicts(target, false)?;
+    if !open.is_empty() {
+        return Err(Error::UnresolvedConflicts {
+            attempt: target,
+            paths: open.into_iter().map(|c| c.path).collect(),
+        });
+    }
+    let snap = space.head_snapshot(target)?;
+    let parent = space
+        .git_base_commit(&snap)?
+        .and_then(|c| repo.rev(&c))
+        .ok_or_else(|| Error::NotFound {
+            kind: "git base commit of",
+            id: format!("a{target}"),
+        })?;
+    // Stacking onto a version that is (transitively) stacked on this one
+    // would make a loop.
+    let mut c = parent.clone();
+    for _ in 0..256 {
+        match stacked_base(repo, &c) {
+            Some((a, _)) if a == attempt_id => {
+                return Err(stack_error(
+                    "stack_cycle",
+                    format!("a{target} is stacked on a{attempt_id}; stacking a{attempt_id} on it would make a loop"),
+                ))
+            }
+            Some(_) => match repo.rev(&format!("{c}^")) {
+                Some(p) => c = p,
+                None => break,
+            },
+            None => break,
+        }
+    }
+    copy_tree_objects(space, &snap.tree_oid()?, &repo.objects_dir()?)?;
+    let goal = match t.task_id {
+        Some(id) => space.task(id)?.goal,
+        None => String::new(),
+    };
+    let message = format!(
+        "Stacked on a{target} (s{}){}\n\n{STACKED_TRAILER}: a{target} s{}\n",
+        snap.id,
+        if goal.trim().is_empty() {
+            String::new()
+        } else {
+            format!(": {}", goal.trim())
+        },
+        snap.id
+    );
+    let date = format!("@{} +0000", snap.created_at);
+    let env = [
+        ("GIT_AUTHOR_NAME", "agentvc"),
+        ("GIT_AUTHOR_EMAIL", "agentvc@localhost"),
+        ("GIT_COMMITTER_NAME", "agentvc"),
+        ("GIT_COMMITTER_EMAIL", "agentvc@localhost"),
+        ("GIT_AUTHOR_DATE", date.as_str()),
+        ("GIT_COMMITTER_DATE", date.as_str()),
+    ];
+    let commit = repo.git_env(
+        &["commit-tree", &snap.tree, "-p", &parent, "-F", "-"],
+        Some(&message),
+        &env,
+    )?;
+    repo.git(
+        &[
+            "update-ref",
+            &format!("refs/agentvc/stacked/a{target}/s{}", snap.id),
+            &commit,
+        ],
+        None,
+    )?;
+    Ok(commit)
 }
 
 /// Resolve the commit to rebase onto, fetching the remote for the default.
@@ -837,7 +985,13 @@ pub fn rebase(space: &Space, attempt_id: i64, opts: &RebaseOptions) -> Result<Re
         });
     }
     let repo = HostRepo::open(space.workdir())?;
-    let (onto, onto_ref) = resolve_onto(&repo, opts)?;
+    let (onto, onto_ref) = match opts.onto.as_deref().and_then(parse_version_ref) {
+        Some(target) => (
+            version_commit(space, &repo, attempt_id, target)?,
+            format!("a{target}"),
+        ),
+        None => resolve_onto(&repo, opts)?,
+    };
 
     let view_ok = space.ensure_view(&attempt)?;
     let head = space.head_snapshot(attempt_id)?;
@@ -1410,6 +1564,57 @@ mod tests {
                 .contains("<<<<<<< a2\nfrom a2\n||||||| base\n=======\nfrom main\n>>>>>>> main\n"),
             "{readme}"
         );
+    }
+
+    #[test]
+    fn a_version_stacks_onto_another_version() {
+        let (_tmp, space, _) = repo();
+        let lower = fork(&space, BackendChoice::Copy).unwrap();
+        fs::write(
+            lower.view_path.join("src/lib.rs"),
+            "pub fn f() -> u32 { 1 }\npub fn g() -> u32 { 2 }\n",
+        )
+        .unwrap();
+        let s_lower = space.snapshot(lower.id, "manual", None).unwrap().snapshot;
+        let upper = fork(&space, BackendChoice::Copy).unwrap();
+        fs::write(upper.view_path.join("README.md"), "# demo\n\nupper\n").unwrap();
+        space.snapshot(upper.id, "manual", None).unwrap();
+
+        // The preview and the rebase stand on the same commit.
+        let target = format!("a{}", lower.id);
+        let p = rebase(
+            &space,
+            upper.id,
+            &RebaseOptions {
+                preview: true,
+                ..onto(&target)
+            },
+        )
+        .unwrap();
+        let r = rebase(&space, upper.id, &onto(&target)).unwrap();
+        assert_eq!(p.onto, r.onto);
+        assert!(r.rebased);
+        assert_eq!(r.onto_ref, target);
+        assert_eq!(space.stacked_on(&r.onto), Some((lower.id, s_lower.id)));
+
+        // Upper now holds lower's change, and lists only its own.
+        assert!(fs::read_to_string(upper.view_path.join("src/lib.rs"))
+            .unwrap()
+            .contains("fn g()"));
+        let own: Vec<String> = space
+            .own_changes(upper.id)
+            .unwrap()
+            .into_iter()
+            .map(|c| c.path)
+            .collect();
+        assert_eq!(own, ["README.md"]);
+
+        // Again with nothing new is a no-op; a loop or itself is refused.
+        assert!(!rebase(&space, upper.id, &onto(&target)).unwrap().rebased);
+        let e = rebase(&space, lower.id, &onto(&format!("a{}", upper.id))).unwrap_err();
+        assert_eq!(e.code(), "stack_cycle");
+        let e = rebase(&space, lower.id, &onto(&target)).unwrap_err();
+        assert_eq!(e.code(), "stack_onto_self");
     }
 
     #[test]
