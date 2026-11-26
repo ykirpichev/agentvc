@@ -2,6 +2,7 @@ import * as vscode from 'vscode'
 import { Commands } from './commands'
 import { Connection } from './connection'
 import { SCHEME, SnapshotContent } from './content'
+import { StackView, type StackItem } from './stack'
 import { StatusBar } from './statusBar'
 import { AttemptsTree, type Node } from './tree'
 
@@ -11,6 +12,7 @@ export interface AgentvcApi {
   tree: AttemptsTree
   commands: Commands
   statusBar: StatusBar
+  stack: StackView
   /** Resolves after the next tree reload. */
   whenRefreshed(): Promise<void>
 }
@@ -27,6 +29,16 @@ export async function activate(ctx: vscode.ExtensionContext): Promise<AgentvcApi
   const statusBar = new StatusBar(conn, tree)
   const commands = new Commands(conn, tree, view)
   commands.register(ctx)
+  // This window's own stack (#107): CLI only, no space or daemon needed.
+  const stack = new StackView(log)
+  const stackView = vscode.window.createTreeView<StackItem>('agentvc.stack.view', {
+    treeDataProvider: stack,
+    dragAndDropController: stack,
+    showCollapseAll: true,
+  })
+  stack.register(ctx, stackView)
+  ctx.subscriptions.push(stack)
+  void stack.reload()
 
   const refreshed = new vscode.EventEmitter<void>()
   const refresh = async () => {
@@ -61,6 +73,7 @@ export async function activate(ctx: vscode.ExtensionContext): Promise<AgentvcApi
     tree,
     commands,
     statusBar,
+    stack,
     whenRefreshed: () => new Promise((resolve) => {
       const d = refreshed.event(() => {
         d.dispose()

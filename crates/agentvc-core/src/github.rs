@@ -945,7 +945,7 @@ pub fn open_pr(space: &Space, attempt_id: i64, opts: &PrOptions) -> Result<PrRes
 
 /// A refused push says so: git proxies answer 403 for branches the
 /// credentials may not write, which otherwise reads as a generic git error.
-fn push_error(e: Error, remote: &str, branch: &str) -> Error {
+pub(crate) fn push_error(e: Error, remote: &str, branch: &str) -> Error {
     match e {
         Error::Git { stderr, .. } if push_refused(&stderr) => Error::PushNotAllowed {
             remote: remote.to_string(),

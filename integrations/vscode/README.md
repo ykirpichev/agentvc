@@ -7,6 +7,16 @@ tree, compare attempts in VS Code's native diff editor, and pick the winner.
 
 ## Features
 
+- **Stack (this window)**: the stacked branches of this window's worktree
+  (`agentvc stack`, see [docs/stacks.md](../../docs/stacks.md)). Each Cursor or
+  VS Code window on its own worktree has its own stack; actions here never touch
+  another window's branches, which show read-only under *Other windows*. Drag a
+  branch onto another branch or the trunk to move it (only its own commits move,
+  the branches above follow). Toolbar: new branch, sync with trunk, submit (push
+  and one PR per branch), restack, track an existing branch, up/down/top/bottom.
+  The status bar shows the current branch and its place in the stack, and how
+  many branches need a restack. Needs only the `agentvc` CLI: no space, no daemon.
+
 - **Attempts view** (activity bar): tasks → attempts, nested by what they were
   forked from, with status, actor, check result, snapshot count, cost and a
   spinner for live runs. Each attempt lists its changed files and snapshots.
