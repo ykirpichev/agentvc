@@ -30,6 +30,7 @@ use serde::Serialize;
 use crate::error::{Error, IoContext, Result};
 use crate::export::{copy_tree_objects, HostRepo, IMPORT_BASE_KEY};
 use crate::objects::{parse_tree, Mode, ObjectStore, Oid};
+use crate::resolve::{merge_file, Resolution, Rules, Sides, Strategy};
 use crate::snapshot::{self, ChangeKind, FileChange};
 use crate::space::{now, Snapshot, Space, Status, ROOT_ATTEMPT, SPACE_DIR};
 
@@ -45,6 +46,8 @@ pub struct RebaseOptions {
     /// On conflicts, write files with conflict markers into the view and mark
     /// the attempt `exploring` instead of failing.
     pub keep_conflicts: bool,
+    /// Report git's conflicts as they are, without resolution strategies.
+    pub no_auto_resolve: bool,
     /// Who rebases, for the operation log. Defaults to the attempt's actor.
     pub actor: Option<String>,
 }
@@ -81,6 +84,8 @@ pub struct RebaseResult {
     pub changes: Vec<FileChange>,
     /// Files left with conflict markers (only with `keep_conflicts`).
     pub conflicts: Vec<String>,
+    /// Files whose conflicts a resolution strategy resolved (see `resolve`).
+    pub resolved: Vec<Resolution>,
     /// Whether the view on disk was updated. False for a closed attempt whose
     /// view is gone; history is updated either way.
     pub view_updated: bool,
@@ -131,10 +136,71 @@ impl Space {
     /// The git commit `snapshot` is based on: its rebase target, else the
     /// host HEAD recorded at init.
     pub fn git_base_commit(&self, snapshot: &Snapshot) -> Result<Option<String>> {
-        match self.git_base(snapshot)? {
-            Some(b) => Ok(Some(b.commit)),
-            None => self.meta(IMPORT_BASE_KEY),
+        if let Some(b) = self.git_base(snapshot)? {
+            return Ok(Some(b.commit));
         }
+        let import = self.meta(IMPORT_BASE_KEY)?;
+        // Snapshots of the root taken before the root recorded its own bases
+        // (#96): if the root snapshot this one descends from is not the
+        // init commit's tree but is exactly the checkout's HEAD tree, it was
+        // taken from that HEAD.
+        let mut snap = snapshot.clone();
+        while snap.attempt_id != ROOT_ATTEMPT {
+            match self.attempt(snap.attempt_id)?.parent_snapshot {
+                Some(p) => snap = self.snapshot_by_id(p)?,
+                None => return Ok(import),
+            }
+        }
+        let Ok(repo) = HostRepo::open(self.workdir()) else {
+            return Ok(import);
+        };
+        let tree_of = |c: &str| {
+            repo.git(&["rev-parse", &format!("{c}^{{tree}}")], None)
+                .ok()
+        };
+        if let Some(i) = &import {
+            if tree_of(i).as_deref() == Some(snap.tree.as_str()) {
+                return Ok(import);
+            }
+        }
+        match repo.rev("HEAD") {
+            Some(head) if tree_of(&head).as_deref() == Some(snap.tree.as_str()) => Ok(Some(head)),
+            _ => Ok(import),
+        }
+    }
+
+    /// Record the host checkout's HEAD as the git base of a snapshot of the
+    /// root attempt (the checkout itself) when it differs from the base the
+    /// snapshot would otherwise get. The root's tree follows the checkout, so
+    /// after a `git pull`, or in a space restored into a newer checkout
+    /// (#96), the commit recorded at init no longer describes it, and a
+    /// rebase from that old commit would conflict in every file main
+    /// changed since. Best effort: outside git nothing is recorded.
+    pub(crate) fn note_root_base(&self, snap: &Snapshot) {
+        let _ = (|| -> Result<()> {
+            let Ok(repo) = HostRepo::open(self.workdir()) else {
+                return Ok(());
+            };
+            let Some(head) = repo.rev("HEAD") else {
+                return Ok(());
+            };
+            let recorded = match self.git_base(snap)? {
+                Some(b) => Some(b.commit),
+                None => self.meta(IMPORT_BASE_KEY)?,
+            };
+            if recorded.as_deref() == Some(head.as_str()) {
+                return Ok(());
+            }
+            let tree = repo.git(&["rev-parse", &format!("{head}^{{tree}}")], None)?;
+            let mut git = CatFile::start(&repo)?;
+            import_tree(self.objects(), &mut git, &Oid::from_hex(&tree)?)?;
+            self.db.execute(
+                "INSERT INTO git_bases (attempt_id, snapshot_id, commit_id, tree, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![snap.attempt_id, snap.id, head, tree, now()],
+            )?;
+            Ok(())
+        })();
     }
 
     /// The latest rebase of this attempt itself, which `diff aN` compares
@@ -231,13 +297,38 @@ fn resolve_onto(repo: &HostRepo, opts: &RebaseOptions) -> Result<(String, String
     })
 }
 
-/// `git merge-tree` result: the merged tree and the conflicted paths.
+/// The result of a three-way merge after conflict resolution.
 pub(crate) struct Merge {
     pub tree: String,
+    /// Paths that still conflict.
     pub conflicts: Vec<String>,
+    /// Every path git reported as conflicted, with what resolution did.
+    pub(crate) files: Vec<Resolution>,
+    /// The merged blob of each path resolution rewrote.
+    pub(crate) blobs: BTreeMap<String, String>,
 }
 
-pub(crate) fn merge_trees(repo: &HostRepo, base: &str, ours: &str, theirs: &str) -> Result<Merge> {
+impl Merge {
+    /// The files a strategy resolved completely.
+    pub(crate) fn resolved(&self) -> Vec<Resolution> {
+        self.files
+            .iter()
+            .filter(|f| f.remaining == 0 && f.hunks > 0)
+            .cloned()
+            .collect()
+    }
+}
+
+/// Three-way merge tree `ours` (wrapped in a commit on `base`) with commit
+/// `theirs`, then resolve what conflicts with `rules`.
+pub(crate) fn merge_trees(
+    repo: &HostRepo,
+    base: &str,
+    ours: &str,
+    theirs: &str,
+    rules: &Rules,
+    sides: &Sides,
+) -> Result<Merge> {
     // merge-tree in git < 2.45 only merges commits, so wrap the attempt's tree
     // in a dangling commit on the old base. No ref points at it.
     let ident = [
@@ -251,18 +342,37 @@ pub(crate) fn merge_trees(repo: &HostRepo, base: &str, ours: &str, theirs: &str)
         None,
         &ident,
     )?;
-    let out = Command::new("git")
-        .arg("-C")
+    merge_commits(repo, Some(base), &ours, theirs, rules, sides)
+}
+
+fn is_file_mode(mode: &str) -> bool {
+    mode == "100644" || mode == "100755"
+}
+
+/// `git merge-tree` of two commits, then deterministic resolution of the
+/// conflicted text files (see [`crate::resolve`]). Files git reports as
+/// conflicted are merged again line by line; resolved ones get the merged
+/// blob, the rest get diff3-style markers. Binary files, symlinks and
+/// rename/delete conflicts keep git's result.
+pub(crate) fn merge_commits(
+    repo: &HostRepo,
+    base: Option<&str>,
+    ours: &str,
+    theirs: &str,
+    rules: &Rules,
+    sides: &Sides,
+) -> Result<Merge> {
+    let mut cmd = Command::new("git");
+    cmd.arg("-C")
         .arg(&repo.workdir)
-        .args([
-            "merge-tree",
-            "--write-tree",
-            "-z",
-            "--name-only",
-            &format!("--merge-base={base}"),
-            &ours,
-            theirs,
-        ])
+        .args(["merge-tree", "--write-tree", "-z"]);
+    if let Some(base) = base {
+        cmd.arg(format!("--merge-base={base}"));
+    }
+    let out = cmd
+        .args([ours, theirs])
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_INDEX_FILE")
         .stdin(Stdio::null())
         .output()
         .at("git")?;
@@ -273,23 +383,137 @@ pub(crate) fn merge_trees(repo: &HostRepo, base: &str, ours: &str, theirs: &str)
             stderr: String::from_utf8_lossy(&out.stderr).trim().to_string(),
         });
     }
-    // <tree> NUL (<path> NUL)* NUL <messages>, the path list only on conflicts.
+    // <tree> NUL (<mode> <oid> <stage> TAB <path> NUL)* NUL <messages>; the
+    // conflicted entries only on conflicts.
     let stdout = String::from_utf8_lossy(&out.stdout);
     let mut fields = stdout.split('\0');
-    let tree = fields.next().unwrap_or_default().trim().to_string();
-    let mut conflicts = Vec::new();
+    let mut tree = fields.next().unwrap_or_default().trim().to_string();
+    Oid::from_hex(&tree)?;
+    let mut paths: Vec<String> = Vec::new();
+    // Per path: (mode, oid) of stages 1 (base), 2 (ours) and 3 (theirs).
+    let mut stages: BTreeMap<String, [Option<(String, String)>; 3]> = BTreeMap::new();
     if code == Some(1) {
         for f in fields {
             if f.is_empty() {
                 break;
             }
-            if conflicts.last().map(String::as_str) != Some(f) {
-                conflicts.push(f.to_string());
+            let Some((info, path)) = f.split_once('\t') else {
+                continue;
+            };
+            let parts: Vec<&str> = info.split(' ').collect();
+            if paths.last().map(String::as_str) != Some(path) {
+                paths.push(path.to_string());
+            }
+            if let [mode, oid, stage] = parts.as_slice() {
+                if let Ok(n @ 1..=3) = stage.parse::<usize>() {
+                    stages.entry(path.to_string()).or_default()[n - 1] =
+                        Some((mode.to_string(), oid.to_string()));
+                }
             }
         }
     }
-    Oid::from_hex(&tree)?;
-    Ok(Merge { tree, conflicts })
+    let mut merge = Merge {
+        tree: tree.clone(),
+        conflicts: Vec::new(),
+        files: Vec::new(),
+        blobs: BTreeMap::new(),
+    };
+    if paths.is_empty() {
+        return Ok(merge);
+    }
+    if !rules.enabled {
+        merge.conflicts = paths;
+        return Ok(merge);
+    }
+    let mut rules = rules.clone();
+    rules.load_attributes(&repo.workdir, &paths);
+    let mut git = CatFile::start(repo)?;
+    let mut text = |oid: &str| -> Result<Option<String>> {
+        let (_, data) = git.read(&Oid::from_hex(oid)?)?;
+        Ok(String::from_utf8(data).ok().filter(|t| !t.contains('\0')))
+    };
+    let mut updates = String::new();
+    for path in paths {
+        let strategy = rules.strategy_for(&path);
+        let st = stages.get(&path).cloned().unwrap_or_default();
+        let sides_ok = matches!((&st[1], &st[2]), (Some((mo, _)), Some((mt, _))) if is_file_mode(mo) && is_file_mode(mt))
+            && st[0].as_ref().is_none_or(|(m, _)| is_file_mode(m));
+        let texts = if sides_ok {
+            let b = match &st[0] {
+                Some((_, oid)) => text(oid)?.map(Some),
+                None => Some(None),
+            };
+            let o = text(&st[1].as_ref().expect("checked").1)?;
+            let t = text(&st[2].as_ref().expect("checked").1)?;
+            match (b, o, t) {
+                (Some(b), Some(o), Some(t)) => Some((b, o, t)),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        let Some((b, o, t)) = texts else {
+            merge.files.push(Resolution {
+                path: path.clone(),
+                strategy: Strategy::None,
+                hunks: 0,
+                remaining: 1,
+            });
+            merge.conflicts.push(path);
+            continue;
+        };
+        let fm = merge_file(
+            b.as_deref(),
+            &o,
+            &t,
+            strategy,
+            rules.formatter_for(&path),
+            sides,
+        );
+        let (mb, mo, mt) = (
+            st[0].as_ref().map(|s| s.0.as_str()),
+            st[1].as_ref().map(|s| s.0.as_str()).unwrap_or("100644"),
+            st[2].as_ref().map(|s| s.0.as_str()).unwrap_or("100644"),
+        );
+        let mode = if mo == mt || mb == Some(mt) { mo } else { mt };
+        let blob = repo.git(&["hash-object", "-w", "--stdin"], Some(&fm.text))?;
+        updates.push_str(&format!("{mode} {blob}\t{path}\0"));
+        merge.blobs.insert(path.clone(), blob);
+        merge.files.push(Resolution {
+            path: path.clone(),
+            strategy: fm.strategy,
+            hunks: fm.resolved,
+            remaining: fm.conflicts,
+        });
+        if fm.conflicts > 0 {
+            merge.conflicts.push(path);
+        }
+    }
+    if !updates.is_empty() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default();
+        let index = std::env::temp_dir().join(format!(
+            "agentvc-merge-{}-{nanos}.index",
+            std::process::id()
+        ));
+        let index_s = index.to_string_lossy().to_string();
+        let env = [("GIT_INDEX_FILE", index_s.as_str())];
+        let written = (|| {
+            repo.git_env(&["read-tree", &tree], None, &env)?;
+            repo.git_env(
+                &["update-index", "-z", "--index-info"],
+                Some(&updates),
+                &env,
+            )?;
+            repo.git_env(&["write-tree"], None, &env)
+        })();
+        let _ = fs::remove_file(&index);
+        tree = written?;
+        merge.tree = tree;
+    }
+    Ok(merge)
 }
 
 /// A long-running `git cat-file --batch`, for reading many objects.
@@ -515,13 +739,25 @@ pub fn rebase(space: &Space, attempt_id: i64, opts: &RebaseOptions) -> Result<Re
             snapshot: None,
             changes: Vec::new(),
             conflicts: Vec::new(),
+            resolved: Vec::new(),
             view_updated: false,
             status: attempt.status,
         });
     }
 
     copy_tree_objects(space, &Oid::from_hex(&current)?, &repo.objects_dir()?)?;
-    let merge = merge_trees(&repo, &from, &current, &onto)?;
+    let rules = if opts.no_auto_resolve {
+        Rules::disabled()
+    } else {
+        Rules::from_space(space)?
+    };
+    let sides = Sides {
+        ours: format!("a{attempt_id}"),
+        theirs: onto_ref.clone(),
+        theirs_first: false,
+    };
+    let merge = merge_trees(&repo, &from, &current, &onto, &rules, &sides)?;
+    let resolved = merge.resolved();
     let keep = !merge.conflicts.is_empty();
     if keep && !(opts.keep_conflicts && view_ok) {
         return Err(Error::Conflict {
@@ -551,6 +787,9 @@ pub fn rebase(space: &Space, attempt_id: i64, opts: &RebaseOptions) -> Result<Re
     if keep {
         meta["conflicts"] = serde_json::json!(merge.conflicts);
     }
+    if !resolved.is_empty() {
+        meta["auto_resolved"] = serde_json::json!(resolved);
+    }
     let snap = insert_snapshot(space, attempt_id, &merge.tree, "rebase", Some(meta))?;
     space.db.execute(
         "INSERT INTO git_bases (attempt_id, snapshot_id, commit_id, tree, created_at)
@@ -577,6 +816,7 @@ pub fn rebase(space: &Space, attempt_id: i64, opts: &RebaseOptions) -> Result<Re
         serde_json::json!({
             "attempt": attempt_id, "onto": onto, "onto_ref": onto_ref, "from": from,
             "snapshot": snap.id, "conflicts": merge.conflicts,
+            "auto_resolved": resolved,
         }),
     )?;
     Ok(RebaseResult {
@@ -588,6 +828,7 @@ pub fn rebase(space: &Space, attempt_id: i64, opts: &RebaseOptions) -> Result<Re
         snapshot: Some(snap),
         changes,
         conflicts: merge.conflicts,
+        resolved,
         view_updated: view_ok,
         status: space.attempt(attempt_id)?.status,
     })
@@ -756,6 +997,114 @@ mod tests {
             let ch = space.head_snapshot(child.id).unwrap();
             assert_eq!(space.git_base_commit(&ch).unwrap(), Some(c1));
         }
+    }
+
+    #[test]
+    fn attempts_forked_after_the_checkout_moved_rebase_from_its_new_head() {
+        // #96: the checkout moves past the commit recorded at init (a pull,
+        // or a space restored into a newer checkout). An attempt forked
+        // now must rebase from that new HEAD, not from the init commit.
+        let (tmp, space, _) = repo();
+        let w = tmp.path();
+        fs::write(w.join("src/lib.rs"), "pub fn f() -> u32 { 10 }\n").unwrap();
+        git(w, &["commit", "-q", "-am", "pulled"]);
+        let a = fork(&space, BackendChoice::Copy).unwrap();
+        fs::write(a.view_path.join("notes.txt"), "mine\n").unwrap();
+        fs::write(w.join("src/lib.rs"), "pub fn f() -> u32 { 11 }\n").unwrap();
+        let c2 = advance_main(w, "# demo\n\nline one\n");
+
+        let r = rebase(&space, a.id, &onto("main")).unwrap();
+        assert!(r.conflicts.is_empty() && r.resolved.is_empty(), "{r:?}");
+        assert_eq!(r.onto, c2);
+        let lib = fs::read_to_string(a.view_path.join("src/lib.rs")).unwrap();
+        assert_eq!(lib, "pub fn f() -> u32 { 11 }\n");
+    }
+
+    #[test]
+    fn root_snapshots_without_a_recorded_base_match_the_checkout_head() {
+        // Spaces from before #96 have no base row for later root snapshots.
+        let (tmp, space, c0) = repo();
+        let w = tmp.path();
+        fs::write(w.join("src/lib.rs"), "pub fn f() -> u32 { 10 }\n").unwrap();
+        git(w, &["commit", "-q", "-am", "pulled"]);
+        let c1 = git(w, &["rev-parse", "HEAD"]);
+        let a = fork(&space, BackendChoice::Copy).unwrap();
+        space
+            .db
+            .execute(
+                "DELETE FROM git_bases WHERE attempt_id = ?1",
+                [ROOT_ATTEMPT],
+            )
+            .unwrap();
+        let head = space.head_snapshot(a.id).unwrap();
+        assert_eq!(space.git_base_commit(&head).unwrap(), Some(c1));
+        let first = space.snapshots(ROOT_ATTEMPT).unwrap()[0].clone();
+        assert_eq!(space.git_base_commit(&first).unwrap(), Some(c0));
+    }
+
+    #[test]
+    fn both_sides_adding_at_one_point_auto_resolves() {
+        let (tmp, space, _) = repo();
+        let w = tmp.path();
+        let a = fork(&space, BackendChoice::Copy).unwrap();
+        let view = &a.view_path;
+        fs::write(view.join("README.md"), "# demo\n\nline one\nfrom a2\n").unwrap();
+        advance_main(w, "# demo\n\nline one\nfrom main\n");
+
+        // Plain git conflicts, and --no-auto-resolve reports it as before.
+        let err = rebase(
+            &space,
+            a.id,
+            &RebaseOptions {
+                no_auto_resolve: true,
+                ..onto("main")
+            },
+        )
+        .unwrap_err();
+        assert_eq!(err.code(), "conflict");
+
+        let r = rebase(&space, a.id, &onto("main")).unwrap();
+        assert!(r.conflicts.is_empty());
+        assert_eq!(r.resolved.len(), 1);
+        assert_eq!(r.resolved[0].path, "README.md");
+        assert_eq!(r.resolved[0].strategy, Strategy::Auto);
+        assert_eq!(
+            fs::read_to_string(view.join("README.md")).unwrap(),
+            "# demo\n\nline one\nfrom a2\nfrom main\n"
+        );
+        let meta = r.snapshot.unwrap().meta.unwrap();
+        assert_eq!(meta["auto_resolved"][0]["path"], "README.md");
+
+        // A rule turns it off per path.
+        let (tmp, space, _) = repo();
+        let w = tmp.path();
+        space
+            .set_config(crate::config::MERGE_STRATEGY, &["*.md=none".into()])
+            .unwrap();
+        let a = fork(&space, BackendChoice::Copy).unwrap();
+        fs::write(
+            a.view_path.join("README.md"),
+            "# demo\n\nline one\nfrom a2\n",
+        )
+        .unwrap();
+        advance_main(w, "# demo\n\nline one\nfrom main\n");
+        let r = rebase(
+            &space,
+            a.id,
+            &RebaseOptions {
+                keep_conflicts: true,
+                ..onto("main")
+            },
+        )
+        .unwrap();
+        assert_eq!(r.conflicts, ["README.md"]);
+        // Markers in diff3 style, with the base section.
+        let readme = fs::read_to_string(a.view_path.join("README.md")).unwrap();
+        assert!(
+            readme
+                .contains("<<<<<<< a2\nfrom a2\n||||||| base\n=======\nfrom main\n>>>>>>> main\n"),
+            "{readme}"
+        );
     }
 
     #[test]

@@ -27,6 +27,9 @@ pub const PR_TRAILER: &str = "pr.trailer";
 pub const PR_BODY_PREFIX: &str = "pr.body-prefix";
 pub const GIT_CAPTURE_COMMITS: &str = crate::viewgit::CAPTURE_COMMITS;
 
+pub const MERGE_STRATEGY: &str = "merge.strategy";
+pub const MERGE_FORMATTER: &str = "merge.formatter";
+
 pub const EXPORT_VERIFY: &str = "export.verify";
 
 pub const GC_AUTO: &str = "gc.auto";
@@ -57,6 +60,18 @@ pub const KEYS: &[Key] = &[
         multi: false,
         env: Some("AGENTVC_PR_BODY_PREFIX"),
         about: "file whose text goes above the generated PR body",
+    },
+    Key {
+        name: MERGE_STRATEGY,
+        multi: true,
+        env: None,
+        about: "`<glob>=<strategy>` for conflicts in matching files: auto, union, ours, theirs, json, cargo-lock, format, none (first match wins)",
+    },
+    Key {
+        name: MERGE_FORMATTER,
+        multi: true,
+        env: None,
+        about: "`<glob>=<command>` formatter (stdin to stdout) run over all sides before merging, for the `format` strategy and as an `auto` fallback",
     },
     Key {
         name: EXPORT_VERIFY,

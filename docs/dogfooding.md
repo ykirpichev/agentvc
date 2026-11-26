@@ -65,6 +65,30 @@ the view and marks the attempt `exploring`. Fix them in `$(agentvc path aX)`, th
 `agentvc snapshot aX` and `agentvc pr aX`. A promoted attempt can be rebased too; siblings
 are never touched.
 
+### Conflicts that resolve themselves (#91)
+
+`rebase`, `take` and `merge` resolve the usual conflicts between parallel attempts
+before reporting any, deterministically and without an agent: both sides adding at the
+same point (an enum variant, a `mod` line, a subcommand, a test, a README section) keeps
+both; the same change twice, or a whitespace-only change, keeps the real change; edits to
+different words of one line merge token by token; `Cargo.lock` merges by package and
+`*.json` by key. What was resolved is listed as `R  path  (strategy, N hunks)` (in
+`--json`: `resolved`) and in the snapshot's `auto_resolved` metadata. Hunks that are left
+get diff3 markers with the base section (`|||||||`).
+
+Per path, first match wins: `agentvc config merge.strategy '<glob>=<strategy>' --add`,
+then `agentvc-merge=<strategy>` in `.gitattributes` (git's `merge=union` counts), then
+the defaults. Strategies: `auto`, `union` (keep both sides of every hunk, for
+changelogs), `ours`, `theirs`, `json`, `cargo-lock`, `format`, `none`. With
+`agentvc config merge.formatter '*.rs=rustfmt --edition 2021' --add`, `auto` formats all
+three sides and merges again when hunks are left. `--no-auto-resolve` gives git's result.
+
+`agentvc conflicts replay` re-runs the merge commits in the repository's history with
+these rules and says how many conflicts they resolve. On this repository (Nov 26): 8 of
+50 merges conflicted in 12 files; 10 files resolve, all with the same lines the human
+resolution committed (7 byte for byte, 3 with the two added blocks in the other order).
+The 2 left are the same line fixed two different ways.
+
 Promoted or abandoned the wrong attempt, or forked by mistake? `agentvc op log` lists every
 operation with its id and `agentvc undo [id]` reverses it (siblings reopen, an undone fork's
 view is put aside, not deleted); `agentvc undo <id of the undo>` redoes.
