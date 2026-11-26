@@ -4,8 +4,10 @@
 pub mod bundle;
 pub mod config;
 pub mod cursor;
+pub mod doctor;
 pub mod error;
 pub mod export;
+pub mod gc;
 pub mod github;
 pub mod hooks;
 pub mod index;

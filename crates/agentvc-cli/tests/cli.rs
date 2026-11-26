@@ -1259,6 +1259,56 @@ fn sync_falls_back_to_the_pr_comment_when_the_push_is_refused() {
 }
 
 #[test]
+fn doctor_and_gc_report_and_exit_codes() {
+    let tmp = tempdir();
+    let w = tmp.path();
+    fs::write(w.join("lib.rs"), "pub fn f() {}\n").unwrap();
+    agentvc(w, &["init", "--no-prepare"]);
+    let fork = agentvc(w, &["fork", "--backend", "copy"]);
+    let view = fork["fork"]["attempt"]["view_path"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    fs::write(Path::new(&view).join("lib.rs"), "pub fn g() {}\n").unwrap();
+    agentvc(w, &["snapshot", "a2"]);
+
+    let v = agentvc(w, &["doctor", "--offline"]);
+    assert_eq!(v["ok"], true);
+    assert_eq!(v["doctor"]["errors"], 0);
+
+    let v = agentvc(w, &["gc", "--dry-run"]);
+    assert_eq!(v["gc"]["dry_run"], true);
+    assert!(v["gc"]["objects_packed"].as_u64().unwrap() > 0);
+    let v = agentvc(w, &["gc"]);
+    assert_eq!(v["gc"]["after"]["packs"], 1);
+    assert_eq!(v["gc"]["after"]["loose"], 0);
+    // Everything still reads from the pack.
+    let v = agentvc(w, &["diff", "a1", "a2"]);
+    assert_eq!(v["changes"][0]["path"], "lib.rs");
+
+    // A broken view: doctor fails (with --json too) until --repair fixes it.
+    fs::remove_dir_all(&view).unwrap();
+    let out = Command::cargo_bin("agentvc")
+        .unwrap()
+        .args(["--json", "-C"])
+        .arg(w)
+        .args(["doctor", "--offline"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["doctor"]["findings"][0]["code"], "missing_view");
+    assert_eq!(v["doctor"]["findings"][0]["severity"], "error");
+    let v = agentvc(w, &["doctor", "--offline", "--repair"]);
+    assert_eq!(v["doctor"]["errors"], 0);
+    assert_eq!(v["doctor"]["repaired"], 1);
+    assert_eq!(
+        fs::read_to_string(Path::new(&view).join("lib.rs")).unwrap(),
+        "pub fn g() {}\n"
+    );
+}
+
+#[test]
 fn git_works_in_views_and_commits_become_snapshots() {
     let tmp = tempdir();
     let w = tmp.path().join("work");

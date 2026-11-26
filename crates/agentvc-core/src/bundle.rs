@@ -191,6 +191,10 @@ pub fn encode(space: &Space, pr: u64) -> Result<Bundle> {
             continue;
         }
         let head = space.head_snapshot(a.id)?;
+        // `agentvc gc` pruned this loser's tree: only its metadata travels.
+        if head.pruned_at.is_some() {
+            continue;
+        }
         let pushed = space.exports(a.id)?.into_iter().rev().find(|e| {
             e.snapshot_id == head.id
                 && e.pr_url.is_some()

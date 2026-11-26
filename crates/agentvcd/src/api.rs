@@ -437,7 +437,7 @@ async fn diff(State(st): State<AppState>, Query(q): Query<DiffQuery>) -> ApiResu
             let changes = agentvc_core::snapshot::diff(
                 s.objects(),
                 &Oid::from_hex(sa.tree())?,
-                &Oid::from_hex(&sb.tree)?,
+                &sb.tree_oid()?,
             )?;
             Ok(Ok(DiffResponse {
                 a_ref: sa.label(),

@@ -7,7 +7,7 @@
 
 use std::path::PathBuf;
 use std::process::{ExitCode, Stdio};
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
 use agentvc_core::snapshot::ChangeKind;
 use agentvc_core::view::BackendChoice;
@@ -177,6 +177,47 @@ enum Cmd {
         /// Lines of context around changes in --patch.
         #[arg(long, short = 'U', default_value_t = agentvc_core::patch::DEFAULT_CONTEXT, value_name = "N")]
         unified: usize,
+    },
+    /// Check that the database, objects, views, overlay layers, runs and sync
+    /// state agree (the `git fsck` of agentvc). Each finding has a stable
+    /// code and severity; exits non-zero (also with --json) while errors
+    /// remain.
+    Doctor {
+        /// Fix what is safe to fix: remount views, rewrite missing views from
+        /// their latest snapshot, copy missing objects back from git, mark
+        /// dead runs lost, delete directories nothing refers to.
+        #[arg(long)]
+        repair: bool,
+        /// Skip the check against the sync remote.
+        #[arg(long)]
+        offline: bool,
+    },
+    /// Keep the space small: pack live objects into a git packfile, prune the
+    /// trees of attempts abandoned more than gc.keepAbandonedDays ago (their
+    /// history stays), delete views of attempts closed more than
+    /// gc.keepViewsDays ago, and overlay layers nothing uses. Never prunes
+    /// open, promoted, exported or named work, or what the last sync did
+    /// not carry.
+    Gc {
+        /// Report what would be freed; change nothing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Only pack loose objects, and only past gc.auto of them (what
+        /// snapshots start in the background).
+        #[arg(long)]
+        auto: bool,
+        /// Override gc.keepAbandonedDays (default 30).
+        #[arg(long, value_name = "DAYS")]
+        keep_abandoned_days: Option<i64>,
+        /// Override gc.keepViewsDays (default 7).
+        #[arg(long, value_name = "DAYS")]
+        keep_views_days: Option<i64>,
+        /// Also drop unreferenced loose objects written in the last hour.
+        #[arg(long)]
+        prune_now: bool,
+        /// Do not write packfiles.
+        #[arg(long)]
+        no_pack: bool,
     },
     /// Print the view directory of an attempt, mounting an overlay view first
     /// if it is not mounted (for example after a reboot).
@@ -405,6 +446,8 @@ enum TaskCmd {
 /// Output of a command: JSON for `--json`, text otherwise.
 /// Exit code to use in text mode instead of 0 (set by `run`).
 static EXIT_OVERRIDE: AtomicI32 = AtomicI32::new(0);
+/// Exit with failure even with `--json` (set by `doctor` when errors remain).
+static EXIT_FAILURE: AtomicBool = AtomicBool::new(false);
 
 struct Out {
     json: Value,
@@ -427,6 +470,9 @@ fn main() -> ExitCode {
                 println!("{v}");
             } else if !out.text.is_empty() {
                 println!("{}", out.text.trim_end());
+            }
+            if EXIT_FAILURE.load(Ordering::Relaxed) {
+                return ExitCode::FAILURE;
             }
             match EXIT_OVERRIDE.load(Ordering::Relaxed) {
                 c if c > 0 && !as_json => ExitCode::from(c.min(255) as u8),
@@ -460,7 +506,10 @@ fn attempt_base(space: &Space, id: i64) -> anyhow::Result<Option<(String, String
         return Ok(Some((format!("git:{}", base.commit), base.tree)));
     }
     Ok(match space.attempt(id)?.parent_snapshot {
-        Some(p) => Some((format!("s{p}"), space.snapshot_by_id(p)?.tree)),
+        Some(p) => Some((
+            format!("s{p}"),
+            space.snapshot_by_id(p)?.tree_oid()?.to_hex(),
+        )),
         None => None,
     })
 }
@@ -866,6 +915,7 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
                 Some(Value::Object(m))
             };
             let r = space.snapshot(id, &trigger, meta)?;
+            auto_gc_in_background(&space);
             Out {
                 text: if r.unchanged {
                     format!("a{id} unchanged since s{}", r.snapshot.id)
@@ -953,9 +1003,14 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
             );
             for s in &snaps {
                 text += &format!(
-                    "  s{}  {}  {}{}\n",
+                    "  s{}  {}{}  {}{}\n",
                     s.id,
                     &s.tree[..12],
+                    if s.pruned_at.is_some() {
+                        " (tree pruned)"
+                    } else {
+                        ""
+                    },
                     s.trigger,
                     s.meta
                         .as_ref()
@@ -978,8 +1033,8 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
             let (from, from_tree, to, to_tree) = match (a, b) {
                 (Some(a), Some(b)) => {
                     let (ra, rb) = (parse_ref(&a)?, parse_ref(&b)?);
-                    let ta = space.resolve(ra)?.tree;
-                    let tb = space.resolve(rb)?.tree;
+                    let ta = space.resolve(ra)?.tree_oid()?.to_hex();
+                    let tb = space.resolve(rb)?.tree_oid()?.to_hex();
                     (ra.to_string(), ta, rb.to_string(), tb)
                 }
                 (Some(a), None) => {
@@ -988,7 +1043,7 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
                     };
                     let (from, from_tree) = attempt_base(&space, id)?
                         .ok_or_else(|| anyhow::anyhow!("a{id} has no parent; pass two refs"))?;
-                    let to_tree = space.head_snapshot(id)?.tree;
+                    let to_tree = space.head_snapshot(id)?.tree_oid()?.to_hex();
                     (from, from_tree, format!("a{id}"), to_tree)
                 }
                 (None, _) => {
@@ -1188,6 +1243,9 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
                 let state = match (r.exit_code, r.alive, r.pid) {
                     (Some(c), _, _) => format!("exit {c}"),
                     (None, Some(true), _) => "running".to_string(),
+                    // Finished without an exit code: `doctor --repair`
+                    // found its process gone.
+                    (None, _, _) if r.finished_at.is_some() => "lost".to_string(),
                     // The worker records the pid just after it spawns the
                     // command; until then the run is starting, not lost.
                     (None, _, None) => "starting".to_string(),
@@ -1215,6 +1273,25 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
                 json: json!({ "runs": runs }),
             }
         }
+        Cmd::Doctor { repair, offline } => doctor_cmd(&space, repair, offline)?,
+        Cmd::Gc {
+            dry_run,
+            auto,
+            keep_abandoned_days,
+            keep_views_days,
+            prune_now,
+            no_pack,
+        } => gc_cmd(
+            &space,
+            &agentvc_core::gc::GcOptions {
+                dry_run,
+                auto,
+                keep_abandoned_days,
+                keep_views_days,
+                prune_expire: prune_now.then_some(std::time::Duration::ZERO),
+                no_pack,
+            },
+        )?,
         Cmd::Prepare { attempt } => {
             let id = match attempt {
                 Some(a) => attempt_id(&a)?,
@@ -1831,6 +1908,8 @@ fn run_hook(event: &str, cwd: &std::path::Path, as_json: bool) -> Out {
     if let Err(e) = &result {
         // Surface hook failures without failing the agent's tool call.
         eprintln!("agentvc hook {event}: {e}");
+    } else if let Ok(space) = Space::discover(cwd) {
+        auto_gc_in_background(&space);
     }
     Out {
         // Claude Code shows hook stdout in transcripts; stay quiet in text mode.
@@ -1996,6 +2075,180 @@ fn short_command(cmd: &[String]) -> String {
         Some((i, _)) => format!("{}…", &full[..i]),
         None => full,
     }
+}
+
+/// Start `agentvc gc --auto` in the background when there are enough loose
+/// objects (one directory listing when there are not). Off with
+/// `agentvc config gc.auto 0`.
+fn auto_gc_in_background(space: &Space) {
+    if !agentvc_core::gc::auto_needed(space) {
+        return;
+    }
+    let start = || -> std::io::Result<()> {
+        let log = space
+            .workdir()
+            .join(agentvc_core::space::SPACE_DIR)
+            .join("gc.log");
+        let f = std::fs::File::create(&log)?;
+        let mut cmd = std::process::Command::new(std::env::current_exe()?);
+        cmd.arg("-C")
+            .arg(space.workdir())
+            .args(["gc", "--auto"])
+            .stdin(Stdio::null())
+            .stdout(f.try_clone()?)
+            .stderr(f);
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            cmd.process_group(0);
+        }
+        cmd.spawn()?;
+        Ok(())
+    };
+    let _ = start();
+}
+
+fn human_bytes(b: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let mut v = b as f64;
+    let mut u = 0;
+    while v >= 1024.0 && u < UNITS.len() - 1 {
+        v /= 1024.0;
+        u += 1;
+    }
+    if u == 0 {
+        format!("{b} B")
+    } else {
+        format!("{v:.1} {}", UNITS[u])
+    }
+}
+
+fn doctor_cmd(space: &Space, repair: bool, offline: bool) -> anyhow::Result<Out> {
+    let r = agentvc_core::doctor::doctor(
+        space,
+        &agentvc_core::doctor::DoctorOptions { repair, offline },
+    )?;
+    let mut text = String::new();
+    for f in &r.findings {
+        let sev = match f.severity {
+            agentvc_core::doctor::Severity::Error => "error",
+            agentvc_core::doctor::Severity::Warning => "warning",
+            agentvc_core::doctor::Severity::Info => "info",
+        };
+        let tag = if f.repaired {
+            "  [repaired]"
+        } else if f.repairable && !repair {
+            "  [--repair fixes]"
+        } else {
+            ""
+        };
+        text += &format!("{sev:<7}  {}  {}{tag}\n", f.code, f.message);
+    }
+    text += &format!(
+        "checked {} attempts, {} snapshots, {} objects, {} active runs: ",
+        r.checked.attempts, r.checked.snapshots, r.checked.objects, r.checked.runs
+    );
+    text += &match (r.errors, r.warnings, r.repaired) {
+        (0, 0, 0) => "no problems".to_string(),
+        (e, w, fixed) => {
+            let mut parts = vec![format!("{e} errors"), format!("{w} warnings")];
+            if fixed > 0 {
+                parts.push(format!("{fixed} repaired"));
+            }
+            parts.join(", ")
+        }
+    };
+    if r.errors > 0 {
+        EXIT_FAILURE.store(true, Ordering::Relaxed);
+    }
+    Ok(Out {
+        text,
+        json: json!({ "doctor": r }),
+    })
+}
+
+fn gc_cmd(space: &Space, opts: &agentvc_core::gc::GcOptions) -> anyhow::Result<Out> {
+    let r = agentvc_core::gc::gc(space, opts)?;
+    let mut text = String::new();
+    if let Some(why) = &r.skipped {
+        text = format!("gc: nothing to do ({why})");
+        return Ok(Out {
+            text,
+            json: json!({ "gc": r }),
+        });
+    }
+    let would = if r.dry_run { "would " } else { "" };
+    let stats = |s: &agentvc_core::gc::ObjectStats| {
+        format!(
+            "{} loose ({}), {} packed in {} packs ({})",
+            s.loose,
+            human_bytes(s.loose_bytes),
+            s.packed,
+            s.packs,
+            human_bytes(s.pack_bytes)
+        )
+    };
+    text += &format!("objects before: {}\n", stats(&r.before));
+    if !r.dry_run {
+        text += &format!("objects after:  {}\n", stats(&r.after));
+    }
+    if !r.pruned_snapshots.is_empty() {
+        let mut list: Vec<String> = r
+            .pruned_snapshots
+            .iter()
+            .take(10)
+            .map(|s| format!("s{s}"))
+            .collect();
+        if r.pruned_snapshots.len() > 10 {
+            list.push(format!("and {} more", r.pruned_snapshots.len() - 10));
+        }
+        text += &format!(
+            "{would}prune trees of {} snapshots: {}\n",
+            r.pruned_snapshots.len(),
+            list.join(" ")
+        );
+    }
+    if r.kept_unsynced > 0 {
+        text += &format!(
+            "kept {} expired snapshots the last sync did not carry (run `agentvc sync`)\n",
+            r.kept_unsynced
+        );
+    }
+    for v in &r.views {
+        text += &format!(
+            "{would}remove view of a{} ({})\n",
+            v.attempt,
+            human_bytes(v.bytes)
+        );
+    }
+    for id in &r.views_kept {
+        text += &format!("kept view of a{id} (busy or running)\n");
+    }
+    #[cfg(target_os = "linux")]
+    for l in &r.layers {
+        text += &format!(
+            "{would}remove layer L{} of a{} ({})\n",
+            l.layer,
+            l.source_attempt,
+            human_bytes(l.bytes)
+        );
+    }
+    text += &format!(
+        "{would}drop {} unreferenced objects, {}pack {}; {} {}freed in {} ms\n",
+        r.objects_removed,
+        would,
+        r.objects_packed,
+        human_bytes(r.bytes_freed),
+        if r.dry_run { "would be " } else { "" },
+        r.millis
+    );
+    for n in &r.notes {
+        text += &format!("note: {n}\n");
+    }
+    Ok(Out {
+        text,
+        json: json!({ "gc": r }),
+    })
 }
 
 #[cfg(test)]

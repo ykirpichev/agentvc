@@ -209,18 +209,21 @@ pub(crate) fn host_head(workdir: &Path) -> Option<String> {
 /// Copy the objects reachable from `tree` into a git object directory.
 /// Returns how many objects were copied.
 pub(crate) fn copy_tree_objects(space: &Space, tree: &Oid, dest: &Path) -> Result<usize> {
-    let src_root = space.objects().root();
     let copy = |oid: &Oid| -> Result<bool> {
         let hex = oid.to_hex();
         let to = dest.join(&hex[..2]).join(&hex[2..]);
         if to.exists() {
             return Ok(false);
         }
-        let from = src_root.join(&hex[..2]).join(&hex[2..]);
         let dir = to.parent().expect("object path has a parent");
         fs::create_dir_all(dir).at(dir)?;
         let tmp = dir.join(format!(".agentvc-tmp-{}-{hex}", std::process::id()));
-        fs::copy(&from, &tmp).at(&from)?;
+        // Loose objects are copied as they are; packed ones are written out
+        // loose for git.
+        let from = space.objects().loose_path(oid);
+        if fs::copy(&from, &tmp).is_err() {
+            fs::write(&tmp, space.objects().loose_bytes(oid)?).at(&tmp)?;
+        }
         fs::rename(&tmp, &to).at(&to)?;
         Ok(true)
     };
@@ -339,7 +342,7 @@ pub fn export(space: &Space, attempt_id: i64, opts: &ExportOptions) -> Result<Ex
             .and_then(|h| repo.rev(&h))
             .or_else(|| repo.rev("HEAD")),
     };
-    let tree = Oid::from_hex(&snapshot.tree)?;
+    let tree = snapshot.tree_oid()?;
     let objects_copied = copy_tree_objects(space, &tree, &repo.objects_dir()?)?;
 
     let message = commit_message(

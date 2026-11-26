@@ -136,6 +136,12 @@ impl StatIndex {
         idx
     }
 
+    /// Every blob id the index remembers (gc keeps them, since the next
+    /// capture trusts them without rewriting the blob).
+    pub fn oids(&self) -> impl Iterator<Item = &Oid> {
+        self.entries.values().map(|(_, o)| o)
+    }
+
     /// The blob id recorded for `rel` if its stat is unchanged and not racy.
     pub fn lookup(&mut self, rel: &Path, stat: &Stat) -> Option<Oid> {
         let (old, oid) = self.entries.get(rel)?;
