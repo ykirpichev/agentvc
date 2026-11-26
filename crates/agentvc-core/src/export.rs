@@ -403,7 +403,9 @@ pub fn export(space: &Space, attempt_id: i64, opts: &ExportOptions) -> Result<Ex
         None => None,
     };
 
-    let snapshot = if attempt.status.is_open() && space.ensure_view(&attempt)? {
+    // The view as it is now, promoted or not, so a fix made after promote
+    // is never left out (#116).
+    let snapshot = if attempt.status.takes_snapshots() && space.ensure_view(&attempt)? {
         space.snapshot(attempt_id, "export", None)?.snapshot
     } else {
         space.head_snapshot(attempt_id)?
@@ -612,7 +614,7 @@ pub(crate) fn make_commit(
         None => None,
     };
 
-    let snapshot = if attempt.status.is_open() && space.ensure_view(attempt)? {
+    let snapshot = if attempt.status.takes_snapshots() && space.ensure_view(attempt)? {
         space.snapshot(attempt_id, "export", None)?.snapshot
     } else {
         space.head_snapshot(attempt_id)?
@@ -1080,6 +1082,43 @@ mod tests {
         .unwrap();
         assert_eq!(git(tmp.path(), &["show", "promoted:done.txt"]), "done");
         assert_eq!(r.snapshot.trigger, "promoted");
+    }
+
+    /// #116: a fix made in a promoted attempt's view (CI, review) is recorded
+    /// and exported, never silently left out; an abandoned one stays frozen.
+    #[test]
+    fn promoted_attempts_keep_recording_their_view() {
+        let (tmp, space, _head) = repo();
+        let task = space.create_task("t", None).unwrap();
+        let a = fork(&space, task.id, "agent");
+        fs::write(a.view_path.join("done.txt"), "v1\n").unwrap();
+        space.set_status(a.id, Status::Promoted, None).unwrap();
+        let opts = ExportOptions {
+            branch: "pr".into(),
+            force: true,
+            ..Default::default()
+        };
+        export(&space, a.id, &opts).unwrap();
+        // The CI fix after promote.
+        fs::write(a.view_path.join("done.txt"), "v2\n").unwrap();
+        let s = space.snapshot(a.id, "manual", None).unwrap();
+        assert!(!s.unchanged);
+        fs::write(a.view_path.join("done.txt"), "v3\n").unwrap();
+        // Not even snapshotted: export still takes the view as it is.
+        let r = export(&space, a.id, &opts).unwrap();
+        assert_eq!(git(tmp.path(), &["show", "pr:done.txt"]), "v3");
+        assert_eq!(r.snapshot.trigger, "export");
+        assert_eq!(space.attempt(a.id).unwrap().status, Status::Promoted);
+
+        let b = fork(&space, task.id, "agent");
+        fs::write(b.view_path.join("b.txt"), "b\n").unwrap();
+        space.snapshot(b.id, "tool", None).unwrap();
+        space.set_status(b.id, Status::Abandoned, None).unwrap();
+        fs::write(b.view_path.join("b.txt"), "later\n").unwrap();
+        assert_eq!(
+            space.snapshot(b.id, "manual", None).unwrap_err().code(),
+            "attempt_closed"
+        );
     }
 
     #[test]

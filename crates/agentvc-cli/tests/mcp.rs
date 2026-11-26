@@ -292,11 +292,15 @@ fn fork_snapshot_diff_promote_matches_cli() {
         serde_json::from_str(r["result"]["contents"][0]["text"].as_str().unwrap()).unwrap();
     assert_eq!(tree["task"], 1);
     assert_eq!(tree["attempts"].as_array().unwrap().len(), 2);
-    // ...and snapshot defaults to that attempt (promoted, so closed).
+    // ...and snapshot defaults to that attempt, which still records its
+    // view after promote (#116).
     let (v, is_error) = c.tool("snapshot", json!({}));
-    assert!(is_error);
-    assert_eq!(v["error"]["code"], "attempt_closed");
-    assert!(v["error"]["message"].as_str().unwrap().contains(&aid));
+    assert!(!is_error, "{v}");
+    assert_eq!(
+        v["snapshot"]["attempt_id"].to_string(),
+        aid.trim_start_matches('a'),
+        "{v}"
+    );
 }
 
 #[test]

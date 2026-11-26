@@ -68,6 +68,15 @@ the view and marks the attempt `exploring`. Fix them in `$(agentvc path aX)`, th
 `agentvc snapshot aX` and `agentvc pr aX`. A promoted attempt can be rebased too; siblings
 are never touched.
 
+A follow-up attempt (forked from one whose PR has since merged, squashed or not) is
+rebased against that PR's export rather than its old base: main already holds the export,
+so only the work done after it is merged in, and lines both versions changed don't
+conflict with themselves (#110).
+
+A promoted attempt keeps recording its view: fix CI or review comments in it, and
+`agentvc snapshot aX` / `agentvc pr aX` pick the fix up (`pr` exports the view as it is
+even without a snapshot). Only abandoned attempts are frozen (#116).
+
 ### Conflicts that resolve themselves (#91)
 
 `rebase`, `take` and `merge` resolve the usual conflicts between parallel attempts
