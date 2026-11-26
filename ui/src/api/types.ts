@@ -514,6 +514,7 @@ export type WsOp =
   | { op: 'restack'; branch?: string }
   | { op: 'rename'; branch: string; new_name: string }
   | { op: 'delete'; branch: string }
+  | { op: 'checkout'; branch: string }
 
 export interface WsRequest {
   id: string
@@ -559,4 +560,39 @@ export interface WsEditOutcome {
   request_id: string
   workspace: string
   reason?: string
+  /** With `keep_conflicts`, a restack that stopped says where. */
+  result?: { conflict?: { branch: string; paths: string[] } | null }
+}
+
+/** A restack stopped on a conflict in a workspace. Hunks are from the branch's side: `ours` is the branch. */
+export interface WsConflicts {
+  workspace: string
+  stopped: boolean
+  branch: string | null
+  parent: string | null
+  onto: string | null
+  subject: string | null
+  files: { path: string; hunks: ConflictHunk[]; text: string }[]
+}
+
+export interface WsResolve {
+  path: string
+  remaining_hunks: number
+  open: string[]
+}
+
+export interface WsFinish {
+  outcome: 'continued' | 'stopped' | 'aborted'
+  conflicts: WsConflicts | null
+}
+
+export interface BranchDetail {
+  workspace: string
+  name: string
+  parent: string
+  base: string
+  tip: string
+  current: boolean
+  commits: { commit: string; subject: string; author: string; time: number }[]
+  files: { path: string; kind: ChangeKind }[]
 }

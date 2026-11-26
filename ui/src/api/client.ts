@@ -29,8 +29,12 @@ import type {
   RebasePreview,
   ResolveResponse,
   UndoResponse,
+  BranchDetail,
   WorkspaceList,
+  WsConflicts,
   WsEditOutcome,
+  WsFinish,
+  WsResolve,
   WsOp,
   WsRequest,
 } from './types'
@@ -134,7 +138,17 @@ export const api = {
   /** Every workspace (worktree) of the repo with its stack. */
   workspaces: () => get<WorkspaceList>('/workspaces'),
   /** Change a workspace's stack from here: applied now, or queued while its agent works. */
-  stackEdit: (workspace: string, op: WsOp) => post<WsEditOutcome>(`/workspaces/${encodeURIComponent(workspace)}/stack`, op),
+  stackEdit: (workspace: string, op: WsOp, keepConflicts = false) =>
+    post<WsEditOutcome>(`/workspaces/${encodeURIComponent(workspace)}/stack`, keepConflicts ? { ...op, keep_conflicts: true } : op),
+  /** One stacked branch: its own commits and files. */
+  branch: (workspace: string, name: string) =>
+    get<BranchDetail>(`/workspaces/${encodeURIComponent(workspace)}/branches/${encodeURIComponent(name)}`),
+  /** The conflicts of a restack stopped in a workspace. */
+  wsConflicts: (workspace: string) => get<WsConflicts>(`/workspaces/${encodeURIComponent(workspace)}/conflicts`),
+  wsResolve: (workspace: string, path: string, hunks: { index: number; take: HunkTake; text?: string }[]) =>
+    post<WsResolve>(`/workspaces/${encodeURIComponent(workspace)}/conflicts/resolve`, { path, hunks }),
+  wsContinue: (workspace: string) => post<WsFinish>(`/workspaces/${encodeURIComponent(workspace)}/continue`),
+  wsAbort: (workspace: string) => post<WsFinish>(`/workspaces/${encodeURIComponent(workspace)}/abort`),
   cancelRequest: (id: string) => post<{ request: WsRequest }>(`/requests/${encodeURIComponent(id)}/cancel`),
   mark: (id: number, status: 'passed' | 'failed' | 'exploring') =>
     post<ActionResponse>(`/attempts/${id}/mark`, { status }),

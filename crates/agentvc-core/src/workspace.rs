@@ -343,14 +343,19 @@ pub enum Op {
     },
     /// Fetch the trunk, drop merged branches, restack.
     Sync,
+    /// Check out a branch in that workspace.
+    Checkout {
+        branch: String,
+    },
 }
 
 impl Op {
     pub fn branch(&self) -> Option<&str> {
         match self {
-            Op::Move { branch, .. } | Op::Rename { branch, .. } | Op::Delete { branch } => {
-                Some(branch)
-            }
+            Op::Move { branch, .. }
+            | Op::Rename { branch, .. }
+            | Op::Delete { branch }
+            | Op::Checkout { branch } => Some(branch),
             Op::Restack { branch } => branch.as_deref(),
             Op::Sync => None,
         }
@@ -375,6 +380,10 @@ pub struct Request {
     pub workspace: String,
     #[serde(flatten)]
     pub op: Op,
+    /// Leave a conflicting restack in the worktree to resolve (`git rebase`
+    /// stopped there) instead of failing with nothing changed.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub keep_conflicts: bool,
     /// Who asked: a workspace id, `api`, or an actor.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from: Option<String>,
@@ -444,10 +453,12 @@ fn new_request_id() -> String {
 }
 
 /// Run `op` on `w`. A restack that stops at a conflict is an error here
-/// (nothing changed), so a queued edit reports it as failed.
-fn run_op(w: &mut Window, op: &Op) -> Result<Value> {
+/// (nothing changed), so a queued edit reports it as failed; with `keep`
+/// the conflict is left in the worktree to resolve and reported in the
+/// result.
+fn run_op(w: &mut Window, op: &Op, keep: bool) -> Result<Value> {
     let restacked = |r: crate::stack::RestackResult| -> Result<Value> {
-        if let Some(c) = &r.conflict {
+        if let Some(c) = r.conflict.as_ref().filter(|_| !keep) {
             return Err(ws_err_with(
                 "conflict",
                 format!(
@@ -462,7 +473,7 @@ fn run_op(w: &mut Window, op: &Op) -> Result<Value> {
         Ok(json!(r))
     };
     match op {
-        Op::Move { branch, onto } => restacked(w.move_onto(branch, onto, false)?),
+        Op::Move { branch, onto } => restacked(w.move_onto(branch, onto, keep)?),
         Op::Restack { branch } => {
             let scope = match branch {
                 Some(b) => {
@@ -477,12 +488,16 @@ fn run_op(w: &mut Window, op: &Op) -> Result<Value> {
                 }
                 None => None,
             };
-            restacked(w.restack(scope.as_ref(), false)?)
+            restacked(w.restack(scope.as_ref(), keep)?)
         }
         Op::Rename { branch, new_name } => Ok(json!(w.rename(branch, new_name)?)),
-        Op::Delete { branch } => restacked(w.delete(branch, false)?),
+        Op::Delete { branch } => restacked(w.delete(branch, keep)?),
+        Op::Checkout { branch } => {
+            w.settle()?;
+            Ok(json!({ "checked_out": w.switch(branch)? }))
+        }
         Op::Sync => {
-            let s = w.sync(true, true, false)?;
+            let s = w.sync(true, true, keep)?;
             if s.restack.conflict.is_some() {
                 restacked(s.restack.clone())?;
             }
@@ -493,7 +508,7 @@ fn run_op(w: &mut Window, op: &Op) -> Result<Value> {
 
 /// Run `req` in `w` and record the outcome in the request file.
 fn settle_request(w: &mut Window, mut req: Request) -> (Request, Result<Value>) {
-    let res = run_op(w, &req.op);
+    let res = run_op(w, &req.op, req.keep_conflicts);
     req.finished_at = Some(now());
     match &res {
         Ok(v) => {
@@ -551,6 +566,19 @@ pub fn edit(
     from: Option<&str>,
     queue: bool,
 ) -> Result<EditOutcome> {
+    edit_with(cwd, target, op, from, queue, false)
+}
+
+/// [`edit`], leaving a conflicting restack in the worktree when
+/// `keep_conflicts` (see [`conflicts`], [`resolve`] and [`finish`]).
+pub fn edit_with(
+    cwd: &Path,
+    target: &str,
+    op: Op,
+    from: Option<&str>,
+    queue: bool,
+    keep_conflicts: bool,
+) -> Result<EditOutcome> {
     let here = Window::open(cwd)?;
     let ws = find_local(&here, target)?;
     let _lock = lock(&ws.git_dir)?;
@@ -559,6 +587,7 @@ pub fn edit(
         id: new_request_id(),
         workspace: ws.record.id.clone(),
         op,
+        keep_conflicts,
         from: from.map(str::to_string),
         created_at: now(),
         status: RequestStatus::Queued,
@@ -1234,6 +1263,372 @@ pub fn fingerprints(cwd: &Path) -> Result<Fingerprints> {
     Ok(out)
 }
 
+// ---- one branch of a workspace ---------------------------------------------
+
+/// A commit of a stacked branch.
+#[derive(Clone, Debug, Serialize)]
+pub struct BranchCommit {
+    pub commit: String,
+    pub subject: String,
+    pub author: String,
+    pub time: i64,
+}
+
+/// A file a stacked branch changes.
+#[derive(Clone, Debug, Serialize)]
+pub struct BranchFile {
+    pub path: String,
+    pub kind: crate::snapshot::ChangeKind,
+}
+
+/// What one branch of a workspace holds: its own commits and files, for the
+/// review UI's branch page.
+#[derive(Clone, Debug, Serialize)]
+pub struct BranchDetail {
+    pub workspace: String,
+    pub name: String,
+    pub parent: String,
+    /// The commit it sits on and its tip; diff `base..tip` for its changes.
+    pub base: String,
+    pub tip: String,
+    pub current: bool,
+    pub commits: Vec<BranchCommit>,
+    pub files: Vec<BranchFile>,
+}
+
+/// Branch `name` of workspace `target`.
+pub fn branch_detail(cwd: &Path, target: &str, name: &str) -> Result<BranchDetail> {
+    let here = Window::open(cwd)?;
+    let ws = find_local(&here, target)?;
+    let w = Window::open(&ws.path)?;
+    let t = w
+        .state
+        .branches
+        .iter()
+        .find(|b| b.name == name)
+        .cloned()
+        .ok_or_else(|| {
+            ws_err_with(
+                "not_in_stack",
+                format!("branch {name} is not in this workspace's stack"),
+                json!({ "branch": name }),
+            )
+        })?;
+    let tip = w.branch_tip(name).ok_or_else(|| {
+        ws_err_with(
+            "no_branch",
+            format!("branch {name} does not exist"),
+            json!({ "branch": name }),
+        )
+    })?;
+    let range = format!("{}..{tip}", t.parent_rev);
+    let log = w
+        .repo
+        .git(&["log", "--format=%H%x1f%s%x1f%an%x1f%ct", &range], None)?;
+    let commits = log
+        .lines()
+        .filter_map(|l| {
+            let f: Vec<&str> = l.split('\x1f').collect();
+            (f.len() == 4).then(|| BranchCommit {
+                commit: f[0].into(),
+                subject: f[1].into(),
+                author: f[2].into(),
+                time: f[3].parse().unwrap_or(0),
+            })
+        })
+        .collect();
+    let names = w.repo.git(
+        &["diff", "--name-status", "--no-renames", &t.parent_rev, &tip],
+        None,
+    )?;
+    let files = names
+        .lines()
+        .filter_map(|l| {
+            let (k, path) = l.split_once('\t')?;
+            use crate::snapshot::ChangeKind;
+            let kind = match k.chars().next()? {
+                'A' => ChangeKind::Added,
+                'D' => ChangeKind::Removed,
+                _ => ChangeKind::Modified,
+            };
+            Some(BranchFile {
+                path: path.into(),
+                kind,
+            })
+        })
+        .collect();
+    Ok(BranchDetail {
+        workspace: ws.record.id,
+        name: name.to_string(),
+        parent: t.parent,
+        base: t.parent_rev,
+        current: w.current_branch().as_deref() == Some(name),
+        tip,
+        commits,
+        files,
+    })
+}
+
+// ---- conflicts of a restack left in a workspace ----------------------------
+//
+// `edit_with(.., keep_conflicts: true)` (or `stack restack --keep-conflicts`)
+// stops a conflicting restack in that workspace's worktree, as `git rebase`
+// does. These let any window, or the review UI, finish it: show the
+// conflicts, resolve them hunk by hunk, then continue or abort.
+//
+// Hunks are shown from the branch's side: `ours` is the branch being
+// restacked ("mine"), `theirs` its new parent. In the file git writes them
+// the other way round (`HEAD` is the parent), which `resolve` translates.
+
+/// One conflicted file of a workspace.
+#[derive(Clone, Debug, Serialize)]
+pub struct WsConflictFile {
+    pub path: String,
+    /// Empty when git left no markers (deleted on one side, binary).
+    pub hunks: Vec<crate::conflicts::Hunk>,
+    pub text: String,
+}
+
+/// Where a workspace's stopped restack stands.
+#[derive(Clone, Debug, Serialize)]
+pub struct WsConflicts {
+    pub workspace: String,
+    /// Whether a rebase is stopped in the worktree.
+    pub stopped: bool,
+    /// The branch being restacked and the branch it goes onto.
+    pub branch: Option<String>,
+    pub parent: Option<String>,
+    pub onto: Option<String>,
+    /// The commit being replayed when it stopped.
+    pub subject: Option<String>,
+    /// Files with conflicts still unresolved.
+    pub files: Vec<WsConflictFile>,
+}
+
+/// Outcome of [`resolve`].
+#[derive(Clone, Debug, Serialize)]
+pub struct WsResolve {
+    pub path: String,
+    pub remaining_hunks: usize,
+    /// Files still unresolved; when empty, [`finish`] can continue.
+    pub open: Vec<String>,
+}
+
+/// Outcome of [`finish`].
+#[derive(Clone, Debug, Serialize)]
+pub struct WsFinish {
+    /// `continued` (all done), `stopped` (the next commit or branch
+    /// conflicts too; see `conflicts`) or `aborted`.
+    pub outcome: &'static str,
+    pub conflicts: Option<WsConflicts>,
+    /// The restack of the branches above, once the stopped one finished.
+    pub restack: Option<Value>,
+}
+
+fn take_from_branch_side(t: &crate::conflicts::Take) -> crate::conflicts::Take {
+    use crate::conflicts::Take;
+    match t {
+        Take::Ours => Take::Theirs,
+        Take::Theirs => Take::Ours,
+        Take::Both => Take::BothTheirsFirst,
+        Take::BothTheirsFirst => Take::Both,
+        Take::Base => Take::Base,
+        Take::Custom => Take::Custom,
+    }
+}
+
+fn unmerged(w: &Window) -> Result<Vec<String>> {
+    let out = w
+        .repo
+        .git(&["diff", "--name-only", "--diff-filter=U"], None)?;
+    Ok(out
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(str::to_string)
+        .collect())
+}
+
+fn read_conflicts(w: &Window, id: &str) -> Result<WsConflicts> {
+    let stopped = w.rebase_in_progress();
+    let pending = w.state.pending.clone();
+    let branch = pending.as_ref().map(|p| p.branch.clone());
+    let parent = branch.as_ref().and_then(|b| {
+        w.state
+            .branches
+            .iter()
+            .find(|t| &t.name == b)
+            .map(|t| t.parent.clone())
+    });
+    let subject = ["rebase-merge", "rebase-apply"]
+        .iter()
+        .find_map(|d| fs::read_to_string(w.git_dir.join(d).join("message")).ok())
+        .and_then(|m| m.lines().next().map(str::to_string));
+    let mut files = Vec::new();
+    if stopped {
+        for path in unmerged(w)? {
+            let full = w.path().join(&path);
+            let text = fs::read_to_string(&full).unwrap_or_default();
+            let hunks = crate::conflicts::parse_hunks(&text)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|h| crate::conflicts::Hunk {
+                    ours: h.theirs,
+                    theirs: h.ours,
+                    ours_label: branch.clone().unwrap_or(h.theirs_label),
+                    theirs_label: parent.clone().unwrap_or(h.ours_label),
+                    ..h
+                })
+                .collect();
+            files.push(WsConflictFile { path, hunks, text });
+        }
+    }
+    Ok(WsConflicts {
+        workspace: id.to_string(),
+        stopped,
+        branch,
+        parent,
+        onto: pending.map(|p| p.onto),
+        subject,
+        files,
+    })
+}
+
+/// The conflicts of the restack stopped in workspace `target`.
+pub fn conflicts(cwd: &Path, target: &str) -> Result<WsConflicts> {
+    let here = Window::open(cwd)?;
+    let ws = find_local(&here, target)?;
+    let w = Window::open(&ws.path)?;
+    read_conflicts(&w, &ws.record.id)
+}
+
+/// Resolve hunks of one conflicted file of workspace `target` (choices from
+/// the branch's side; see above). A file left with no markers is staged.
+pub fn resolve(
+    cwd: &Path,
+    target: &str,
+    path: &str,
+    choices: &[crate::conflicts::HunkChoice],
+) -> Result<WsResolve> {
+    let here = Window::open(cwd)?;
+    let ws = find_local(&here, target)?;
+    let _lock = lock(&ws.git_dir)?;
+    let w = Window::open(&ws.path)?;
+    if !w.rebase_in_progress() {
+        return Err(ws_err(
+            "no_conflicts",
+            "no restack is stopped in this workspace",
+        ));
+    }
+    if !unmerged(&w)?.iter().any(|p| p == path) {
+        return Err(ws_err_with(
+            "not_conflicted",
+            format!("{path} has no unresolved conflict here"),
+            json!({ "path": path }),
+        ));
+    }
+    let full = w.path().join(path);
+    let text = fs::read_to_string(&full).at(&full)?;
+    let choices: Vec<_> = choices
+        .iter()
+        .map(|c| crate::conflicts::HunkChoice {
+            take: take_from_branch_side(&c.take),
+            ..c.clone()
+        })
+        .collect();
+    let (out, _) = crate::conflicts::apply_choices(&text, &choices)?;
+    fs::write(&full, &out).at(&full)?;
+    let remaining = crate::conflicts::parse_hunks(&out)
+        .map(|h| h.len())
+        .unwrap_or(0);
+    if remaining == 0 {
+        w.repo.git(&["add", "--", path], None)?;
+    }
+    Ok(WsResolve {
+        path: path.to_string(),
+        remaining_hunks: remaining,
+        open: unmerged(&w)?,
+    })
+}
+
+/// Continue (or with `abort`, give up) the restack stopped in workspace
+/// `target`. Continuing commits the resolved files, finishes that branch
+/// and restacks the branches above it, stopping again on the next conflict.
+pub fn finish(cwd: &Path, target: &str, abort: bool) -> Result<WsFinish> {
+    let here = Window::open(cwd)?;
+    let ws = find_local(&here, target)?;
+    let _lock = lock(&ws.git_dir)?;
+    let mut w = Window::open(&ws.path)?;
+    let id = ws.record.id.clone();
+    if !w.rebase_in_progress() && w.state.pending.is_none() {
+        return Err(ws_err(
+            "no_conflicts",
+            "no restack is stopped in this workspace",
+        ));
+    }
+    if abort {
+        if w.rebase_in_progress() {
+            w.repo.git(&["rebase", "--abort"], None)?;
+        }
+        w.state.pending = None;
+        w.save()?;
+        return Ok(WsFinish {
+            outcome: "aborted",
+            conflicts: None,
+            restack: None,
+        });
+    }
+    let branch = w.state.pending.as_ref().map(|p| p.branch.clone());
+    if w.rebase_in_progress() {
+        let open = unmerged(&w)?;
+        if !open.is_empty() {
+            return Err(ws_err_with(
+                "unresolved_conflicts",
+                format!("resolve {} first", open.join(", ")),
+                json!({ "paths": open }),
+            ));
+        }
+        let r = w.repo.git_env(
+            &["-c", "core.editor=true", "rebase", "--continue"],
+            None,
+            &[("GIT_EDITOR", "true")],
+        );
+        if w.rebase_in_progress() {
+            // The next commit of the branch conflicts too.
+            return Ok(WsFinish {
+                outcome: "stopped",
+                conflicts: Some(read_conflicts(&w, &id)?),
+                restack: None,
+            });
+        }
+        r?;
+    }
+    w.settle()?;
+    // Branches above the finished one, onto its new tip.
+    let restack = match branch.filter(|b| w.tracks(b)) {
+        Some(b) => {
+            let up = w.upstack(&b);
+            let r = w.restack(Some(&up), true)?;
+            let stopped = r.conflict.is_some();
+            let v = json!(r);
+            if stopped {
+                return Ok(WsFinish {
+                    outcome: "stopped",
+                    conflicts: Some(read_conflicts(&Window::open(&ws.path)?, &id)?),
+                    restack: Some(v),
+                });
+            }
+            Some(v)
+        }
+        None => None,
+    };
+    let _ = drain_locked(&ws.path);
+    Ok(WsFinish {
+        outcome: "continued",
+        conflicts: None,
+        restack,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1295,6 +1690,106 @@ mod tests {
             fs::write(dir.join(format!("{n}.txt")), format!("{n}\n")).unwrap();
             w.create(Some(n), Some(n), true).unwrap();
         }
+    }
+
+    /// w2 stacks b1 (edits a.txt) and b2; main then edits a.txt too.
+    fn conflicting_stack() -> (Fx, String) {
+        let f = setup();
+        fs::write(f.w2.join("a.txt"), "mine\n").unwrap();
+        let mut w = Window::open(&f.w2).unwrap();
+        w.create(Some("b1"), Some("b1: mine"), true).unwrap();
+        fs::write(f.w2.join("b2.txt"), "b2\n").unwrap();
+        w.create(Some("b2"), Some("b2"), true).unwrap();
+        fs::write(f.w1.join("a.txt"), "theirs\n").unwrap();
+        git(&f.w1, &["commit", "-qam", "main edits a"]);
+        git(&f.w1, &["push", "-q", "origin", "main"]);
+        git(&f.w1, &["fetch", "-q", "origin"]);
+        let id = list(&f.w1, None, false).unwrap().workspaces[1].id.clone();
+        (f, id)
+    }
+
+    #[test]
+    fn a_stopped_restack_is_resolved_and_continued_from_another_window() {
+        let (f, id) = conflicting_stack();
+        let restack = || Op::Restack { branch: None };
+        // Without keep_conflicts: refused, nothing changed.
+        let e = edit(&f.w1, &id, restack(), None, false).unwrap_err();
+        assert_eq!(e.code(), "conflict");
+        assert!(!conflicts(&f.w1, &id).unwrap().stopped);
+
+        let o = edit_with(&f.w1, &id, restack(), None, false, true).unwrap();
+        assert_eq!(o.outcome, RequestStatus::Applied);
+        assert_eq!(o.result.as_ref().unwrap()["conflict"]["branch"], "b1");
+        let c = conflicts(&f.w1, &id).unwrap();
+        assert!(c.stopped);
+        assert_eq!(
+            (c.branch.as_deref(), c.parent.as_deref()),
+            (Some("b1"), Some("main"))
+        );
+        assert_eq!(c.subject.as_deref(), Some("b1: mine"));
+        assert_eq!(c.files.len(), 1);
+        let h = &c.files[0].hunks[0];
+        // Shown from the branch's side.
+        assert_eq!((h.ours.as_str(), h.theirs.as_str()), ("mine\n", "theirs\n"));
+        assert_eq!(
+            (h.ours_label.as_str(), h.theirs_label.as_str()),
+            ("b1", "main")
+        );
+
+        let e = finish(&f.w1, &id, false).unwrap_err();
+        assert_eq!(e.code(), "unresolved_conflicts");
+        let choice = crate::conflicts::HunkChoice {
+            index: 1,
+            take: crate::conflicts::Take::Both,
+            text: None,
+        };
+        let r = resolve(&f.w1, &id, "a.txt", &[choice]).unwrap();
+        assert_eq!(r.remaining_hunks, 0);
+        assert!(r.open.is_empty());
+        let done = finish(&f.w1, &id, false).unwrap();
+        assert_eq!(done.outcome, "continued");
+        // Mine first, then main's; b2 followed onto it.
+        assert_eq!(git(&f.w2, &["show", "b1:a.txt"]), "mine\ntheirs");
+        assert_eq!(git(&f.w2, &["show", "b2:a.txt"]), "mine\ntheirs");
+        let w = Window::open(&f.w2).unwrap();
+        assert!(w.state.pending.is_none() && !w.rebase_in_progress());
+        let l = list(&f.w1, None, false).unwrap();
+        assert!(l.workspaces[1].branches.iter().all(|b| !b.needs_restack));
+
+        let d = branch_detail(&f.w1, &id, "b1").unwrap();
+        assert_eq!(d.parent, "main");
+        assert_eq!(d.commits.len(), 1);
+        assert_eq!(d.commits[0].subject, "b1: mine");
+        assert_eq!(d.files.len(), 1);
+        assert_eq!(d.files[0].path, "a.txt");
+        assert_eq!(
+            branch_detail(&f.w1, &id, "nope").unwrap_err().code(),
+            "not_in_stack"
+        );
+        // Check out another branch of that window from here.
+        edit(
+            &f.w1,
+            &id,
+            Op::Checkout {
+                branch: "b2".into(),
+            },
+            None,
+            false,
+        )
+        .unwrap();
+        assert_eq!(git(&f.w2, &["branch", "--show-current"]), "b2");
+    }
+
+    #[test]
+    fn a_stopped_restack_can_be_aborted() {
+        let (f, id) = conflicting_stack();
+        let before = git(&f.w2, &["rev-parse", "b1"]);
+        edit_with(&f.w1, &id, Op::Restack { branch: None }, None, false, true).unwrap();
+        assert!(conflicts(&f.w1, &id).unwrap().stopped);
+        assert_eq!(finish(&f.w1, &id, true).unwrap().outcome, "aborted");
+        assert!(!conflicts(&f.w1, &id).unwrap().stopped);
+        assert_eq!(git(&f.w2, &["rev-parse", "b1"]), before);
+        assert_eq!(finish(&f.w1, &id, true).unwrap_err().code(), "no_conflicts");
     }
 
     #[test]

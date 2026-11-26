@@ -1,3 +1,4 @@
+import { BranchReview } from './pages/BranchReview'
 import { Navigate, Route, Routes } from 'react-router'
 import { Empty } from './components/bits'
 import { Shell } from './components/Shell'
@@ -19,6 +20,7 @@ export function App() {
         <Route path="review/t/:id" element={<TaskReview />} />
         <Route path="review/v/:id" element={<VersionReview />} />
         <Route path="review/c/:sha" element={<CommitReview />} />
+        <Route path="review/b/:workspace/*" element={<BranchReview />} />
         <Route path="inbox" element={<Inbox />} />
         <Route path="tasks" element={<Tasks />} />
         <Route path="tasks/:id" element={<TaskPage />} />

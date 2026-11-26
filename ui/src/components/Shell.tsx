@@ -12,6 +12,7 @@ import { ShortcutHelp } from './ShortcutHelp'
 import { BranchGraph } from './BranchGraph'
 import { ToastProvider } from './Toaster'
 import { WorkspaceStacks } from './WorkspaceStacks'
+import { SplitPane } from './SplitPane'
 import { embedMode, onHost, toHost } from '../core/embed'
 import type { ReviewContext } from '../pages/reviewContext'
 
@@ -83,8 +84,7 @@ export function Shell() {
     return (
       <ToastProvider>
         <div className="shell-embed shell-embed-sidebar">
-          {graphBox}
-          <WorkspaceStacks />
+          <SplitPane id="sidebar" top={graphBox} bottom={<WorkspaceStacks />} />
         </div>
       </ToastProvider>
     )
@@ -139,8 +139,7 @@ export function Shell() {
           ))}
         </nav>
 
-        {graphBox}
-        <WorkspaceStacks />
+        <SplitPane id="web" top={graphBox} bottom={<WorkspaceStacks />} />
 
         <div className="sidebar-foot">
           <span className={`conn conn-${connection}`} title={`Event stream: ${connection}`}>

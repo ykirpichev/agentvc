@@ -720,6 +720,9 @@
   padding: 2px 12px 2px 30px;
   font-size: 12px;
 }
+.wst-req {
+  min-width: 0;
+}
 .wst-req-text {
   flex: 1;
   min-width: 0;
@@ -752,4 +755,98 @@
 }
 .shell-embed-panel .main {
   flex: 1;
+}
+
+/* Actions as a list: each button with one line on what it does. */
+.rv-actions-list {
+  flex-direction: column;
+  flex-wrap: nowrap;
+  gap: 8px;
+}
+.act {
+  display: grid;
+  grid-template-columns: minmax(170px, max-content) 1fr;
+  align-items: center;
+  gap: 12px;
+}
+.act > .btn {
+  justify-self: start;
+}
+.act-help {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.35;
+}
+@media (max-width: 640px) {
+  .act {
+    grid-template-columns: 1fr;
+    gap: 4px;
+  }
+}
+
+.conf-foot {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding-top: 10px;
+}
+.br-commits {
+  list-style: none;
+  margin: 0 0 8px;
+  padding: 0;
+  display: grid;
+  gap: 4px;
+}
+
+/* ---- graph above, stacks below, a handle between ---- */
+.vsplit {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.vsplit-top {
+  flex: 0 0 auto;
+  min-height: 60px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.vsplit-top > .bgraph {
+  flex: 1;
+}
+.vsplit-bottom {
+  flex: 1 1 0;
+  overflow-x: hidden;
+  min-height: 60px;
+  overflow-y: auto;
+}
+.vsplit-bottom > .wsx {
+  max-height: none;
+  overflow: visible;
+  border-top: 0;
+}
+.vsplit-handle {
+  flex: none;
+  height: 7px;
+  margin: 0 -10px;
+  cursor: row-resize;
+  position: relative;
+  touch-action: none;
+}
+.vsplit-handle::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 3px;
+  height: 1px;
+  background: var(--border);
+}
+.vsplit-handle:hover::after,
+.vsplit-handle:focus-visible::after {
+  height: 3px;
+  top: 2px;
+  background: var(--accent);
 }

@@ -51,13 +51,15 @@
           "id": "agentvc.stack.view",
           "name": "Stack (this window)",
           "icon": "media/agentvc.svg",
-          "contextualTitle": "agentvc"
+          "contextualTitle": "agentvc",
+          "visibility": "hidden"
         },
         {
           "id": "agentvc.attempts",
           "name": "Attempts",
           "icon": "media/agentvc.svg",
-          "contextualTitle": "agentvc"
+          "contextualTitle": "agentvc",
+          "visibility": "hidden"
         }
       ]
     },

@@ -596,8 +596,10 @@ fn auto_hunk(
         return Some(concat(&[ours]));
     }
     // Both sides inserted at the same point: keep both, unless one
-    // insertion already contains the other at its start or end.
-    if keep_both && base.iter().all(|l| l.trim().is_empty()) {
+    // insertion already contains the other at its start or end. Two
+    // insertions that define the same name (both added `def mul`) are a real
+    // conflict: keeping both would let one silently shadow the other (#121).
+    if keep_both && base.iter().all(|l| l.trim().is_empty()) && !defines_same_name(ours, theirs) {
         let (first, second) = if sides.theirs_first {
             (theirs, ours)
         } else {
@@ -613,6 +615,106 @@ fn auto_hunk(
     }
     // Edits to different words of the same lines.
     word_merge(base, ours, theirs)
+}
+
+/// Keywords that introduce a named definition, across common languages.
+const DEF_KEYWORDS: &[&str] = &[
+    "def",
+    "fn",
+    "func",
+    "function",
+    "class",
+    "struct",
+    "enum",
+    "trait",
+    "interface",
+    "type",
+    "union",
+    "mod",
+    "module",
+    "macro_rules!",
+    "sub",
+    "proc",
+];
+/// Modifiers that may come before such a keyword.
+const DEF_MODIFIERS: &[&str] = &[
+    "pub",
+    "pub(crate)",
+    "pub(super)",
+    "async",
+    "export",
+    "default",
+    "static",
+    "unsafe",
+    "const",
+    "extern",
+    "abstract",
+    "final",
+    "public",
+    "private",
+    "protected",
+    "open",
+    "data",
+    "sealed",
+    "inline",
+    "override",
+    "declare",
+];
+
+/// The names a block defines at its own top level (`def mul`, `pub fn mul`,
+/// `export function mul`, `class Mul`, `const MUL =`).
+fn defined_names(block: &[&str]) -> std::collections::BTreeSet<String> {
+    let indent = |l: &str| l.len() - l.trim_start().len();
+    let top = block
+        .iter()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| indent(l))
+        .min()
+        .unwrap_or(0);
+    let mut names = std::collections::BTreeSet::new();
+    for l in block
+        .iter()
+        .filter(|l| !l.trim().is_empty() && indent(l) == top)
+    {
+        let mut words = l.split_whitespace().peekable();
+        let mut saw_const = false;
+        while let Some(w) = words.peek() {
+            if DEF_MODIFIERS.contains(w) {
+                saw_const |= *w == "const";
+                words.next();
+            } else {
+                break;
+            }
+        }
+        let name_after = |w: Option<&str>| -> Option<String> {
+            let w = w?;
+            let n: String = w
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '$')
+                .collect();
+            (!n.is_empty()).then_some(n)
+        };
+        match words.next() {
+            Some(k) if DEF_KEYWORDS.contains(&k) => {
+                if let Some(n) = name_after(words.next()) {
+                    names.insert(n);
+                }
+            }
+            // `const NAME = ...` / `const NAME: T = ...`
+            Some(w) if saw_const => {
+                if let Some(n) = name_after(Some(w)) {
+                    names.insert(n);
+                }
+            }
+            _ => {}
+        }
+    }
+    names
+}
+
+fn defines_same_name(ours: &[&str], theirs: &[&str]) -> bool {
+    let o = defined_names(ours);
+    !o.is_empty() && defined_names(theirs).iter().any(|n| o.contains(n))
 }
 
 fn tokens(text: &str) -> Vec<&str> {
@@ -1417,6 +1519,46 @@ mod tests {
         // The same insertion on both sides is kept once.
         let m = auto(base, ours, ours);
         assert_eq!(m.text, ours);
+    }
+
+    #[test]
+    fn both_sides_defining_the_same_name_is_a_conflict() {
+        // #121: trunk and a branch both append `def mul`.
+        let base = "def add(a, b):\n    return a + b\n";
+        let ours = format!("{base}\n\ndef mul(a, b):\n    return a * b\n");
+        let theirs = format!(
+            "{base}\n\ndef mul(a, b):\n    \"\"\"Multiply two numbers.\"\"\"\n    return float(a) * float(b)\n"
+        );
+        let m = auto(base, &ours, &theirs);
+        assert_eq!(m.conflicts, 1, "{}", m.text);
+        assert_eq!(
+            m.text.matches("def mul").count(),
+            2,
+            "both sides shown in markers"
+        );
+        assert!(has_markers(&m.text));
+        // Different names still keep both.
+        let theirs = format!("{base}\n\ndef div(a, b):\n    return a / b\n");
+        let m = auto(base, &ours, &theirs);
+        assert_eq!(m.conflicts, 0, "{}", m.text);
+        // Across languages, with modifiers.
+        assert!(defines_same_name(
+            &["pub async fn mul(a: i32) -> i32 {", "    a", "}"],
+            &["fn mul() {}"]
+        ));
+        assert!(defines_same_name(
+            &["export function mul() {}"],
+            &["function mul(a) {"]
+        ));
+        assert!(defines_same_name(
+            &["const LIMIT = 10;"],
+            &["export const LIMIT: number = 5"]
+        ));
+        assert!(!defines_same_name(&["    Fork,"], &["    Mcp,"]));
+        assert!(!defines_same_name(
+            &["fn a() {", "    fn mul() {}", "}"],
+            &["fn mul() {}"]
+        ));
     }
 
     #[test]

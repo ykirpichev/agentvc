@@ -63,6 +63,26 @@ pub enum Change {
     ViewPark { attempt: i64 },
     /// An attempt's view was brought back.
     ViewRestore { attempt: i64 },
+    /// An attempt's files and git base moved from one state to another (a
+    /// rebase). Applied as a new snapshot with that tree and base, so
+    /// nothing is deleted.
+    Tree {
+        attempt: i64,
+        from: TreeState,
+        to: TreeState,
+    },
+}
+
+/// What a [`Change::Tree`] moves between.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TreeState {
+    pub tree: String,
+    /// The git commit it is based on, and that commit's tree.
+    pub base: String,
+    pub base_tree: String,
+    /// Conflicts open in this state.
+    #[serde(default)]
+    pub conflicts: Vec<i64>,
 }
 
 impl Change {
@@ -103,6 +123,11 @@ impl Change {
             Change::TaskRemove { task } => Change::TaskAdd { task },
             Change::ViewPark { attempt } => Change::ViewRestore { attempt },
             Change::ViewRestore { attempt } => Change::ViewPark { attempt },
+            Change::Tree { attempt, from, to } => Change::Tree {
+                attempt,
+                from: to,
+                to: from,
+            },
         }
     }
 
@@ -119,6 +144,10 @@ impl Change {
             Change::TaskRemove { task } => format!("t{} removed", task.id),
             Change::ViewPark { attempt } => format!("a{attempt}: view put aside"),
             Change::ViewRestore { attempt } => format!("a{attempt}: view restored"),
+            Change::Tree { attempt, to, .. } => format!(
+                "a{attempt}: files back on {}",
+                &to.base[..12.min(to.base.len())]
+            ),
         }
     }
 }
@@ -175,6 +204,8 @@ fn undoable(kind: &str, payload: &Value) -> bool {
         "task.create" | "attempt.fork" => true,
         "undo" => payload.get("changes").is_some_and(Value::is_array),
         k if is_status_kind(k) => payload.get("changes").is_some_and(Value::is_array),
+        // Rebases record their changes since #120.
+        "attempt.rebase" => payload.get("changes").is_some_and(Value::is_array),
         _ => false,
     }
 }
@@ -476,6 +507,31 @@ impl Space {
                     return Err(conflict(op, format!("t{} exists", task.id)));
                 }
             }
+            Change::Tree { attempt, from, .. } => {
+                let a = self.attempt(*attempt)?;
+                let head = self.head_snapshot(*attempt)?;
+                if head.tree != from.tree {
+                    return Err(conflict(
+                        op,
+                        format!(
+                            "a{attempt} has changed since (s{}); nothing to put back",
+                            head.id
+                        ),
+                    ));
+                }
+                // Edits not yet snapshotted would be overwritten.
+                if a.status.takes_snapshots() && self.ensure_view(&a)? {
+                    let now = self.capture_view_tree(&a, &head)?;
+                    if now != from.tree {
+                        return Err(conflict(
+                            op,
+                            format!(
+                                "the view of a{attempt} has changes not in a snapshot; run `agentvc snapshot a{attempt}` first"
+                            ),
+                        ));
+                    }
+                }
+            }
             Change::ViewPark { attempt } => {
                 if *attempt == crate::space::ROOT_ATTEMPT {
                     return Err(conflict(op, "a1 is the host checkout"));
@@ -573,6 +629,9 @@ impl Space {
                         .at(trash.parent().expect("has parent"))?;
                     fs::rename(&a.view_path, &trash).at(&a.view_path)?;
                 }
+            }
+            Change::Tree { attempt, from, to } => {
+                crate::rebase::put_tree(self, *attempt, from, to)?;
             }
             Change::ViewRestore { attempt } => {
                 let a = self.attempt(*attempt)?;
