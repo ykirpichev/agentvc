@@ -35,12 +35,11 @@ export function CommandPalette({ onClose }: { onClose: () => void }) {
 
   const items = useMemo<Item[]>(() => {
     const out: Item[] = [
-      { id: 'inbox', icon: 'inbox', label: 'Inbox', hint: 'Waiting on you', to: '/inbox' },
-      { id: 'tasks', icon: 'tasks', label: 'Tasks', hint: 'All tasks', to: '/tasks' },
+      { id: 'review', icon: 'inbox', label: 'Review', hint: 'Waiting on you', to: '/review' },
       { id: 'live', icon: 'live', label: 'Live', hint: 'Running agents', to: '/live' },
     ]
     for (const t of tasks.data ?? []) {
-      out.push({ id: `t${t.id}`, icon: 'tasks', label: t.goal, hint: `${t.attempts.total} attempts`, to: `/tasks/${t.id}` })
+      out.push({ id: `t${t.id}`, icon: 'tasks', label: t.goal, hint: `${t.attempts.total} attempts`, to: `/review/t/${t.id}` })
     }
     for (const a of attempts.data ?? []) {
       out.push({

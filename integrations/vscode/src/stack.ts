@@ -298,11 +298,11 @@ export class StackView
     return this.log?.branches.find((b) => b.current)?.pr
   }
 
-  register(ctx: vscode.ExtensionContext, view: vscode.TreeView<StackItem>): void {
+  register(ctx: vscode.ExtensionContext): void {
     const reg = (id: string, fn: (...a: never[]) => unknown) =>
       ctx.subscriptions.push(vscode.commands.registerCommand(id, fn))
     reg('agentvc.stack.refresh', () => this.reload())
-    reg('agentvc.stack.focus', () => vscode.commands.executeCommand('agentvc.stack.view.focus'))
+    reg('agentvc.stack.focus', () => vscode.commands.executeCommand('agentvc.branches.focus'))
     reg('agentvc.stack.create', async () => {
       const message = await vscode.window.showInputBox({
         title: 'New stacked branch',
@@ -414,7 +414,6 @@ export class StackView
       if (repo) void vscode.env.openExternal(vscode.Uri.parse(`https://github.com/${repo}/pull/${pr}`))
     })
     ctx.subscriptions.push(
-      view,
       vscode.window.onDidChangeWindowState((s) => {
         // Another window may have moved a branch this one builds on.
         if (s.focused) void this.reload()

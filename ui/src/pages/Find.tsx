@@ -191,7 +191,7 @@ function ResultRow({
           {actorName(r.actor)}
           {r.model && <span className="muted"> · {r.model}</span>}
           {showTask && r.task_id && (
-            <Link to={`/tasks/${r.task_id}`} className="find-task" onClick={(e) => e.stopPropagation()}>
+            <Link to={`/review/t/${r.task_id}`} className="find-task" onClick={(e) => e.stopPropagation()}>
               t{r.task_id} {r.task}
             </Link>
           )}

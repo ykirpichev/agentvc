@@ -99,7 +99,7 @@ export function CompareView({ data, embedded }: { data: CompareResponse; embedde
       keys: ['u', 'backspace'],
       description: 'Back to the task',
       group: 'Compare',
-      handler: () => navigate(taskId ? `/tasks/${taskId}` : '/tasks'),
+      handler: () => navigate(taskId ? `/review/t/${taskId}` : '/review'),
     },
   ])
 
@@ -107,7 +107,7 @@ export function CompareView({ data, embedded }: { data: CompareResponse; embedde
   return (
     <>
       {!embedded && (<>
-      <Link to={taskId ? `/tasks/${taskId}` : '/tasks'} className="back">
+      <Link to={taskId ? `/review/t/${taskId}` : '/review'} className="back">
         <Icon name="back" size={14} /> {taskId ? `Task t${taskId}` : 'Tasks'}
       </Link>
       <PageHeader

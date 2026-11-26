@@ -1569,8 +1569,8 @@ pub fn finish(cwd: &Path, target: &str, abort: bool) -> Result<WsFinish> {
         if w.rebase_in_progress() {
             w.repo.git(&["rebase", "--abort"], None)?;
         }
-        w.state.pending = None;
-        w.save()?;
+        // Clears the stop, and puts a moved branch back on its old parent.
+        w.settle()?;
         return Ok(WsFinish {
             outcome: "aborted",
             conflicts: None,
@@ -1790,6 +1790,31 @@ mod tests {
         assert!(!conflicts(&f.w1, &id).unwrap().stopped);
         assert_eq!(git(&f.w2, &["rev-parse", "b1"]), before);
         assert_eq!(finish(&f.w1, &id, true).unwrap_err().code(), "no_conflicts");
+    }
+
+    #[test]
+    fn an_aborted_move_puts_the_branch_back_on_its_parent() {
+        let (f, id) = conflicting_stack();
+        // c sits on b2 and changes the line main changed too.
+        let mut w = Window::open(&f.w2).unwrap();
+        fs::write(f.w2.join("a.txt"), "c\n").unwrap();
+        w.create(Some("c"), Some("c"), true).unwrap();
+        let trunk = list(&f.w1, None, false).unwrap().workspaces[1]
+            .trunk
+            .clone();
+        let before = git(&f.w2, &["rev-parse", "c"]);
+        let mv = Op::Move {
+            branch: "c".into(),
+            onto: trunk,
+        };
+        let o = edit_with(&f.w1, &id, mv, None, false, true).unwrap();
+        assert_eq!(o.result.as_ref().unwrap()["conflict"]["branch"], "c");
+        assert_eq!(finish(&f.w1, &id, true).unwrap().outcome, "aborted");
+        let w = Window::open(&f.w2).unwrap();
+        let c = w.state.branches.iter().find(|b| b.name == "c").unwrap();
+        assert_eq!(c.parent, "b2");
+        assert!(w.state.pending.is_none());
+        assert_eq!(git(&f.w2, &["rev-parse", "c"]), before);
     }
 
     #[test]

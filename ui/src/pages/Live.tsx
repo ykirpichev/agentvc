@@ -15,7 +15,7 @@ import { triggerLabel } from '../lib/snapshot'
 function describe(e: ReceivedEvent['event']): { text: React.ReactNode; to: string } {
   switch (e.type) {
     case 'task_created':
-      return { text: <>New task <b>t{e.task.id}</b> {e.task.goal}</>, to: `/tasks/${e.task.id}` }
+      return { text: <>New task <b>t{e.task.id}</b> {e.task.goal}</>, to: `/review/t/${e.task.id}` }
     case 'attempt_created':
       return {
         text: (
@@ -249,7 +249,7 @@ function LiveCard({
         </span>
       </div>
       {a.task_id && (
-        <Link to={`/tasks/${a.task_id}`} className="live-task">
+        <Link to={`/review/t/${a.task_id}`} className="live-task">
           t{a.task_id} · {la.task_goal}
         </Link>
       )}

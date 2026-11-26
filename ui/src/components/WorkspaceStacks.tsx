@@ -1,122 +1,49 @@
-// Every workspace (each worktree, each editor window) with its stack of
-// branches. "This" shows the window you are in; "All" shows every one. Drag a
-// branch onto another branch or onto main to move it there; the workspace
-// that owns it makes the change, at once when idle or after its agent stops.
+// A window's stack of branches (each worktree, each editor window has its
+// own), drawn inside the one branch tree on the main commit it sits on. Drag
+// a branch onto another branch, or onto a main commit, to move it there; the
+// window that owns it makes the change, at once when idle or after its agent
+// stops.
 
-import { useMemo, useState, type DragEvent } from 'react'
+import { useMemo, useState, type DragEvent, type ReactNode } from 'react'
 import { useLocation } from 'react-router'
 import { api } from '../api/client'
 import { useLive } from '../api/live'
 import type { WorkspaceInfo, WsBranch, WsOp, WsRequest } from '../api/types'
-import { useResource } from '../api/useResource'
-import { thisWorkspace } from '../core/embed'
 import { branchLink, selectionFromPath, useGo } from '../core/links'
 import { shortSha } from '../core/words'
 import { timeAgo } from '../lib/format'
+import { BRANCH_MIME, canMoveBranch, useStackEdit } from './stackEdit'
 import { useToast } from './Toaster'
 
-type Scope = 'this' | 'all'
-const SCOPE_KEY = 'agentvc.wsScope'
-
-function readScope(): Scope {
-  try {
-    return localStorage.getItem(SCOPE_KEY) === 'all' ? 'all' : 'this'
-  } catch {
-    return 'this'
-  }
-}
-
-export function WorkspaceStacks() {
-  const data = useResource('workspaces', api.workspaces)
-  const [scope, setScope] = useState<Scope>(readScope)
-  const list = data.data
-  const mine = list ? thisWorkspace(list) : undefined
-  const shown = !list ? [] : scope === 'this' && mine ? [mine] : list.workspaces
-  const others = list ? list.workspaces.length - 1 : 0
-
-  const pick = (s: Scope) => {
-    setScope(s)
-    try {
-      localStorage.setItem(SCOPE_KEY, s)
-    } catch {
-      // Not remembered; fine.
-    }
-  }
-
-  if (data.error) {
-    // Older daemons and spaces outside git have no workspaces; stay quiet.
-    return null
-  }
-  if (!list || list.workspaces.length === 0) return null
-
-  return (
-    <section className="wsx" aria-label="Workspaces">
-      <div className="bgraph-head">
-        <span>Stacks</span>
-        <span className="seg" role="tablist" aria-label="Which workspaces">
-          <button type="button" role="tab" aria-selected={scope === 'this'} className={scope === 'this' ? 'on' : ''} onClick={() => pick('this')} disabled={!mine}>
-            This
-          </button>
-          <button type="button" role="tab" aria-selected={scope === 'all'} className={scope === 'all' ? 'on' : ''} onClick={() => pick('all')}>
-            All{others > 0 ? ` ${list.workspaces.length}` : ''}
-          </button>
-        </span>
-      </div>
-      {shown.map((w) => (
-        <WorkspaceTree key={w.id} w={w} mine={w.id === mine?.id} showHead={scope === 'all' || !mine} />
-      ))}
-    </section>
-  )
-}
-
-function WorkspaceTree({ w, mine, showHead }: { w: WorkspaceInfo; mine: boolean; showHead: boolean }) {
-  const toast = useToast()
+export function WindowStack({
+  w,
+  mine,
+  showHead,
+  under,
+}: {
+  w: WorkspaceInfo
+  mine: boolean
+  /** Name the window: there is more than one. */
+  showHead: boolean
+  /** Rows drawn under a branch: the versions based on its tip. */
+  under: (b: WsBranch) => ReactNode
+}) {
   const go = useGo()
+  const toast = useToast()
   const { refresh } = useLive()
+  const { run, busy } = useStackEdit()
   const [drag, setDrag] = useState<string | null>(null)
   const [over, setOver] = useState<string | null>(null)
-  const [busy, setBusy] = useState(false)
   const readOnly = w.kind === 'remote'
   const byName = useMemo(() => new Map(w.branches.map((b) => [b.name, b])), [w])
   const queued = w.requests.filter((r) => r.status === 'queued')
   // Failures since the last edit that worked; older ones are history.
   const lastOk = Math.max(0, ...w.requests.filter((r) => r.status === 'applied').map((r) => r.created_at))
-  const failed = w.requests.filter((r) => r.status === 'failed' && r.created_at > lastOk).slice(0, 2)
+  const failed = w.requests.filter((r) => r.status === 'failed' && r.created_at > lastOk).slice(0, 1)
   const sel = selectionFromPath(useLocation().pathname)
   const selected = (name: string) => sel?.kind === 'branch' && sel.workspace === w.id && sel.name === name
-  const trunkName = w.trunk.replace(/^origin\//, '')
 
-  /** Branches below `name` (its upstack): it cannot move onto those. */
-  const upstack = (name: string): Set<string> => {
-    const out = new Set<string>([name])
-    const walk = (n: string) => byName.get(n)?.children.forEach((c) => (out.has(c) ? undefined : (out.add(c), walk(c))))
-    walk(name)
-    return out
-  }
-  const canDrop = (branch: string | null, onto: string) => {
-    if (!branch || readOnly) return false
-    const b = byName.get(branch)
-    if (!b || b.parent === onto || (onto === w.trunk && b.parent_kind === 'trunk')) return false
-    return !upstack(branch).has(onto)
-  }
-
-  const run = async (op: WsOp, done: string, keep = false) => {
-    setBusy(true)
-    try {
-      const r = await api.stackEdit(w.id, op, keep)
-      const stopped = r.result?.conflict?.branch
-      if (r.outcome === 'queued') toast.ok(`Queued for ${w.name}: ${r.reason ?? 'an agent is working there'}. It applies when the agent stops.`, { undo: false })
-      else if (stopped) {
-        toast.ok(`${stopped} clashes with its parent. Pick what to keep in the review tab.`, { undo: false })
-        go(branchLink(w.id, stopped))
-      } else toast.ok(done, { undo: false })
-    } catch (e) {
-      toast.error(e)
-    } finally {
-      setBusy(false)
-      refresh()
-    }
-  }
+  if (w.branches.length === 0 && !w.pending && queued.length === 0) return null
 
   /** Run a failed edit again, stopping at the clash so it can be resolved here. */
   const retry = (r: WsRequest) => {
@@ -128,34 +55,31 @@ function WorkspaceTree({ w, mine, showHead }: { w: WorkspaceInfo; mine: boolean;
           : r.op === 'delete' && r.branch
             ? { op: 'delete', branch: r.branch }
             : null
-    return op ? run(op, `${r.op} ${r.branch ?? ''} done.`, true) : Promise.resolve()
+    return op ? run(w, op, `${r.op} ${r.branch ?? ''} done.`, true) : Promise.resolve()
   }
 
-  const drop = (onto: string) => {
-    const branch = drag
-    setDrag(null)
-    setOver(null)
-    if (!branch || !canDrop(branch, onto)) return
-    const label = onto === w.trunk ? trunkName : onto
-    void run({ op: 'move', branch, onto }, `Moved ${branch} onto ${label}${byName.get(branch)?.children.length ? ', with the branches above it' : ''}.`)
-  }
-
-  const dragProps = (onto: string) => ({
+  const dropProps = (onto: string) => ({
     onDragOver: (e: DragEvent) => {
-      if (!canDrop(drag, onto)) return
+      if (!drag || !canMoveBranch(w, drag, onto)) return
       e.preventDefault()
+      e.stopPropagation()
       e.dataTransfer.dropEffect = 'move'
       setOver(onto)
     },
     onDragLeave: () => setOver((o) => (o === onto ? null : o)),
     onDrop: (e: DragEvent) => {
       e.preventDefault()
-      drop(onto)
+      e.stopPropagation()
+      const branch = drag
+      setDrag(null)
+      setOver(null)
+      if (!branch || !canMoveBranch(w, branch, onto)) return
+      void run(w, { op: 'move', branch, onto }, `Moved ${branch} onto ${onto}${byName.get(branch)?.children.length ? ', with the branches above it' : ''}.`, true)
     },
   })
 
   return (
-    <div className={`wst ${busy ? 'busy' : ''}`}>
+    <div className={`wst ${busy ? 'busy' : ''}`} role="group" aria-label={`${w.name} stack`}>
       {showHead && (
         <div className="wst-head" title={`${w.path}${w.machine ? ` · ${w.machine}` : ''}`}>
           <span className="bname">
@@ -167,43 +91,46 @@ function WorkspaceTree({ w, mine, showHead }: { w: WorkspaceInfo; mine: boolean;
           {w.last_seen ? <span className="bsub">{timeAgo(w.last_seen)}</span> : null}
         </div>
       )}
-      <div className={`brow brow-trunk wst-trunk ${over === w.trunk ? 'drop' : ''}`} {...dragProps(w.trunk)} title={w.base ?? w.trunk}>
-        <span className="gcell g-trunkdot first last" aria-hidden>
-          <i />
-        </span>
-        <span className="blabel">
-          <span className="bname mono">{trunkName}</span>
-          {w.base && <span className="bsub">{shortSha(w.base)}</span>}
-        </span>
-      </div>
-      {w.branches.length === 0 && <p className="wst-empty muted">No stacked branches.</p>}
+      {!showHead && w.state === 'agent_running' && (
+        <div className="wst-head">
+          <span className="bbadge bbadge-run">agent working</span>
+        </div>
+      )}
       {w.pending && (
         <div className="wst-req wst-req-bad">
           <span className="bbadge bbadge-conf">stopped</span>
-          <span className="wst-req-text">Restacking {w.pending.branch} stopped on a clash.</span>
+          <span className="wst-req-text">{w.pending.branch} clashes with its parent.</span>
           <button type="button" className="linkish" onClick={() => go(branchLink(w.id, w.pending!.branch))}>
             Resolve
           </button>
         </div>
       )}
       {w.branches.map((b) => (
-        <BranchRow
-          key={b.name}
-          b={b}
-          movable={!readOnly}
-          dragging={drag === b.name}
-          over={over === b.name}
-          dropProps={dragProps(b.name)}
-          onDragStart={() => setDrag(b.name)}
-          onDragEnd={() => {
-            setDrag(null)
-            setOver(null)
-          }}
-          selected={selected(b.name)}
-          onOpen={() => go(branchLink(w.id, b.name))}
-          onCheckout={() => !b.current && void run({ op: 'checkout', branch: b.name }, `Checked out ${b.name} in ${w.name}.`)}
-          onRestack={() => void run({ op: 'restack', branch: b.name }, `Restacked ${b.name}.`, true)}
-        />
+        <div key={b.name}>
+          <BranchRow
+            b={b}
+            movable={!readOnly}
+            stopped={!!w.pending}
+            dragging={drag === b.name}
+            over={over === b.name}
+            dropProps={dropProps(b.name)}
+            onDragStart={(e) => {
+              e.dataTransfer.effectAllowed = 'move'
+              e.dataTransfer.setData('text/plain', b.name)
+              e.dataTransfer.setData(BRANCH_MIME, JSON.stringify({ workspace: w.id, branch: b.name }))
+              setDrag(b.name)
+            }}
+            onDragEnd={() => {
+              setDrag(null)
+              setOver(null)
+            }}
+            selected={selected(b.name)}
+            onOpen={() => go(branchLink(w.id, b.name))}
+            onCheckout={() => !b.current && void run(w, { op: 'checkout', branch: b.name }, `Checked out ${b.name} in ${w.name}.`)}
+            onRestack={() => void run(w, { op: 'restack', branch: b.name }, `Restacked ${b.name}.`, true)}
+          />
+          {under(b)}
+        </div>
       ))}
       {queued.map((r) => (
         <div key={r.id} className="wst-req">
@@ -217,19 +144,20 @@ function WorkspaceTree({ w, mine, showHead }: { w: WorkspaceInfo; mine: boolean;
           </button>
         </div>
       ))}
-      {failed.map((r) => (
-        <div key={r.id} className="wst-req wst-req-bad" title={r.reason ?? r.code}>
-          <span className="bbadge bbadge-conf">failed</span>
-          <span className="wst-req-text">
-            {r.op} {r.branch ?? ''}: {r.code === 'conflict' ? 'clashes with its parent' : (r.reason ?? r.code)}
-          </span>
-          {r.code === 'conflict' && !w.pending && !readOnly && (
-            <button type="button" className="linkish" onClick={() => void retry(r)}>
-              Resolve
-            </button>
-          )}
-        </div>
-      ))}
+      {!w.pending &&
+        failed.map((r) => (
+          <div key={r.id} className="wst-req wst-req-bad" title={r.reason ?? r.code}>
+            <span className="bbadge bbadge-conf">failed</span>
+            <span className="wst-req-text">
+              {r.op} {r.branch ?? ''}: {r.code === 'conflict' ? 'clashes with its parent' : (r.reason ?? r.code)}
+            </span>
+            {r.code === 'conflict' && !readOnly && (
+              <button type="button" className="linkish" onClick={() => void retry(r)}>
+                Resolve
+              </button>
+            )}
+          </div>
+        ))}
     </div>
   )
 }
@@ -237,6 +165,7 @@ function WorkspaceTree({ w, mine, showHead }: { w: WorkspaceInfo; mine: boolean;
 function BranchRow({
   b,
   movable,
+  stopped,
   dragging,
   over,
   dropProps,
@@ -249,10 +178,12 @@ function BranchRow({
 }: {
   b: WsBranch
   movable: boolean
+  /** A restack in this window stopped on a clash: nothing else runs until it is resolved. */
+  stopped: boolean
   dragging: boolean
   over: boolean
   dropProps: Record<string, unknown>
-  onDragStart: () => void
+  onDragStart: (e: DragEvent) => void
   onDragEnd: () => void
   selected: boolean
   onOpen: () => void
@@ -263,29 +194,23 @@ function BranchRow({
   return (
     <div
       role="treeitem"
-      aria-selected={b.current}
+      aria-selected={selected}
       className={`brow brow-ver wst-branch ${b.current ? 'cur' : ''} ${selected ? 'sel' : ''} ${dragging ? 'dragging' : ''} ${over ? 'drop' : ''}`}
-      style={{ paddingLeft: `${10 + Math.max(0, b.depth) * 14}px` }}
+      style={{ paddingLeft: `${24 + Math.max(0, b.depth) * 14}px` }}
       draggable={movable}
-      onDragStart={(e) => {
-        e.dataTransfer.effectAllowed = 'move'
-        e.dataTransfer.setData('text/plain', b.name)
-        onDragStart()
-      }}
+      onDragStart={onDragStart}
       onDragEnd={onDragEnd}
       onClick={onOpen}
       onDoubleClick={onCheckout}
       {...dropProps}
-      title={`${b.name}${b.tip ? ` · ${shortSha(b.tip)}` : ''} · ${b.commits} commit${b.commits === 1 ? '' : 's'} on ${b.parent}\nClick to open · double-click to check out · drag onto a branch or main to move`}
+      title={`${b.name}${b.tip ? ` · ${shortSha(b.tip)}` : ''} · ${b.commits} commit${b.commits === 1 ? '' : 's'} on ${b.parent}\nClick to open · double-click to check out · drag onto a branch or a main commit to move`}
     >
       <span className="wst-elbow" aria-hidden>
         └
       </span>
       <span className={`bdot bdot-${dot}`} aria-hidden />
       <span className="blabel">
-        <span className="bname mono">
-          {b.name}
-        </span>
+        <span className="bname mono">{b.name}</span>
         {b.current && <span className="bbadge">checked out</span>}
         {b.conflicts > 0 ? (
           <span className="bbadge bbadge-conf">
@@ -298,9 +223,8 @@ function BranchRow({
         ) : null}
         {b.pr && <span className="bbadge bbadge-pr">#{b.pr.number}</span>}
         {b.parent_kind === 'other_window' && <span className="bbadge">on {b.parent_workspace ?? 'another window'}</span>}
-        {b.attempt ? <span className="bbadge">a{b.attempt}</span> : null}
       </span>
-      {movable && b.needs_restack && (
+      {movable && b.needs_restack && b.conflicts === 0 && !stopped && (
         <span className="bhover" onClick={(e) => e.stopPropagation()}>
           <button type="button" className="bicon" title="Restack onto its parent" aria-label="Restack" onClick={onRestack}>
             ↻
