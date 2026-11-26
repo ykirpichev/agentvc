@@ -1,0 +1,44 @@
+name: Restack open PRs
+# When main moves, re-merge every open PR branch of this repository onto it
+# with agentvc's deterministic conflict resolution (see docs/restack.md):
+# clean ones are pushed (one-commit branches rebased, longer ones get a
+# merge commit), the rest get one PR comment naming the files.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: restack
+  cancel-in-progress: true
+
+jobs:
+  restack:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          # Pushes made with the default GITHUB_TOKEN do not start CI on the
+          # restacked PRs; a fine-grained token (contents and pull requests:
+          # write) in AGENTVC_RESTACK_TOKEN does.
+          token: ${{ secrets.AGENTVC_RESTACK_TOKEN || github.token }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release -p agentvc-cli
+      - name: Restack
+        env:
+          GITHUB_TOKEN: ${{ secrets.AGENTVC_RESTACK_TOKEN || github.token }}
+        run: |
+          git config user.name "agentvc restack"
+          git config user.email "agentvc@users.noreply.github.com"
+          target/release/agentvc restack --all-prs --push --comment | tee restack.txt
+          {
+            echo '```'
+            cat restack.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

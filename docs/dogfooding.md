@@ -93,6 +93,14 @@ Promoted or abandoned the wrong attempt, or forked by mistake? `agentvc op log` 
 operation with its id and `agentvc undo [id]` reverses it (siblings reopen, an undone fork's
 view is put aside, not deleted); `agentvc undo <id of the undo>` redoes.
 
+### Open PRs restack themselves when main moves
+
+`.github/workflows/restack.yml` runs `agentvc restack --all-prs --push --comment` after
+every merge to main: each open PR branch is re-merged with the new main using the same
+resolution, pushed when clean, or gets a comment naming the files that still conflict.
+See [restack.md](restack.md), including the `AGENTVC_RESTACK_TOKEN` secret that lets the
+restacked PRs run CI.
+
 ### Combining attempts: take the best parts of each (#71)
 
 When a3 has the better tests and a2 the better code, don't copy files by hand:

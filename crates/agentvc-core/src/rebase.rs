@@ -252,7 +252,7 @@ impl Space {
 }
 
 /// Resolve the commit to rebase onto, fetching the remote for the default.
-fn resolve_onto(repo: &HostRepo, opts: &RebaseOptions) -> Result<(String, String)> {
+pub(crate) fn resolve_onto(repo: &HostRepo, opts: &RebaseOptions) -> Result<(String, String)> {
     if let Some(rev) = &opts.onto {
         let c = repo.rev(rev).ok_or_else(|| Error::NotFound {
             kind: "git revision",
