@@ -91,7 +91,7 @@ pub fn handle(event: &str, input: &Value, fallback_cwd: &Path) -> Result<HookOut
         Err(Error::NotInView(_)) => return skipped("not in an attempt view"),
         Err(e) => return Err(e),
     };
-    if !attempt.status.is_open() {
+    if !attempt.status.takes_snapshots() {
         return skipped(format!("a{} is {}", attempt.id, attempt.status));
     }
     let tool = input.get("tool_name").and_then(Value::as_str);

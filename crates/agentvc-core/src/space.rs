@@ -218,6 +218,14 @@ impl Status {
     pub fn is_open(self) -> bool {
         matches!(self, Status::Exploring | Status::Passed | Status::Failed)
     }
+
+    /// Whether the view's work is still recorded: open attempts, and the
+    /// promoted one, which is still being finished (review and CI fixes
+    /// before `pr` exports it again, #116). Only abandoned attempts are
+    /// frozen.
+    pub fn takes_snapshots(self) -> bool {
+        self != Status::Abandoned
+    }
 }
 
 impl std::fmt::Display for Status {
@@ -1080,7 +1088,7 @@ impl Space {
         always: bool,
     ) -> Result<SnapshotResult> {
         let attempt = self.attempt(attempt_id)?;
-        if !attempt.status.is_open() {
+        if !attempt.status.takes_snapshots() {
             return Err(Error::AttemptClosed {
                 id: attempt_id,
                 status: attempt.status.to_string(),

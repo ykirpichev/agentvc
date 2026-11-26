@@ -708,6 +708,67 @@ pub(crate) fn insert_snapshot(
     space.snapshot_by_id(space.db.last_insert_rowid())
 }
 
+/// The newest export of `attempt`, or of an attempt it descends from (taken
+/// at or before the snapshot it was forked from), that sits on `from` and
+/// whose changes `onto` already contains: its PR was merged, squashed or
+/// not. Merging against it instead of `from` replays only the work done
+/// after it, so the lines it changed don't conflict with themselves.
+fn landed_export(
+    space: &Space,
+    repo: &HostRepo,
+    attempt: &crate::space::Attempt,
+    from: &str,
+    onto: &str,
+) -> Result<Option<String>> {
+    let onto_tree = repo.git(&["rev-parse", &format!("{onto}^{{tree}}")], None)?;
+    // (attempt, newest snapshot of it that this attempt's state includes)
+    let mut chain: Vec<(i64, Option<i64>)> = vec![(attempt.id, None)];
+    let mut cur = attempt.clone();
+    while let (Some(p), Some(snap)) = (cur.parent_attempt, cur.parent_snapshot) {
+        if p == ROOT_ATTEMPT || chain.len() > 64 {
+            break;
+        }
+        chain.push((p, Some(snap)));
+        cur = space.attempt(p)?;
+    }
+    let mut candidates = Vec::new();
+    for (id, upto) in chain {
+        for e in space.exports(id)? {
+            if upto.is_none_or(|s| e.snapshot_id <= s) {
+                candidates.push(e);
+            }
+        }
+    }
+    candidates.sort_by_key(|e| std::cmp::Reverse(e.id));
+    for e in candidates {
+        let Some(commit) = repo.rev(&e.commit) else {
+            continue;
+        };
+        if e.parent.as_deref().and_then(|p| repo.rev(p)).as_deref() != Some(from) {
+            continue;
+        }
+        // Applying the export to `onto` changes nothing: it is already there.
+        let applied = repo.git(
+            &[
+                "merge-tree",
+                "--write-tree",
+                &format!("--merge-base={from}"),
+                onto,
+                &commit,
+            ],
+            None,
+        );
+        if applied
+            .ok()
+            .and_then(|o| o.lines().next().map(str::to_string))
+            == Some(onto_tree.clone())
+        {
+            return Ok(Some(commit));
+        }
+    }
+    Ok(None)
+}
+
 /// Rebase attempt `attempt_id` onto a newer commit of the host repository.
 ///
 /// On conflicts without `keep_conflicts`, returns [`Error::Conflict`] and
@@ -732,7 +793,7 @@ pub fn rebase(space: &Space, attempt_id: i64, opts: &RebaseOptions) -> Result<Re
     let head = space.head_snapshot(attempt_id)?;
     // The state to rebase is the view as it is now. Capture it without
     // recording, so a failed rebase leaves history untouched.
-    let current = if attempt.status.is_open() && view_ok {
+    let current = if attempt.status.takes_snapshots() && view_ok {
         let index = space
             .workdir()
             .join(SPACE_DIR)
@@ -774,6 +835,12 @@ pub fn rebase(space: &Space, attempt_id: i64, opts: &RebaseOptions) -> Result<Re
         });
     }
 
+    // When an export of this attempt (or of the attempt it was forked from)
+    // has landed in `onto`, merge against that export: `onto` already holds
+    // it, so only the work done since is replayed (#110).
+    let merge_base =
+        landed_export(space, &repo, &attempt, &from, &onto)?.unwrap_or_else(|| from.clone());
+
     copy_tree_objects(space, &Oid::from_hex(&current)?, &repo.objects_dir()?)?;
     let rules = if opts.no_auto_resolve {
         Rules::disabled()
@@ -785,7 +852,7 @@ pub fn rebase(space: &Space, attempt_id: i64, opts: &RebaseOptions) -> Result<Re
         theirs: onto_ref.clone(),
         theirs_first: false,
     };
-    let merge = merge_trees(&repo, &from, &current, &onto, &rules, &sides)?;
+    let merge = merge_trees(&repo, &merge_base, &current, &onto, &rules, &sides)?;
     let resolved = merge.resolved();
     let conflict_files: Vec<Resolution> = merge
         .files
@@ -1344,6 +1411,104 @@ mod tests {
                 "README.md\nsrc/lib.rs"
             );
         }
+    }
+
+    /// #110: a follow-up fork of an exported attempt, rebased after that
+    /// export was squash-merged into main, merges against the export (what
+    /// main already holds) instead of the old base, so lines both versions
+    /// changed do not conflict and new files are not doubled.
+    #[test]
+    fn follow_up_of_a_merged_export_rebases_cleanly() {
+        let (tmp, space, _c0) = repo();
+        let w = tmp.path();
+        let a = fork(&space, BackendChoice::Copy).unwrap();
+        let v = &a.view_path;
+        fs::write(v.join("src/lib.rs"), "pub fn f() -> u32 { 2 }\n").unwrap();
+        let module =
+            "//! Stacks.\n\npub fn one() -> u32 {\n    1\n}\n\npub fn two() -> u32 {\n    2\n}\n";
+        fs::write(v.join("src/stack.rs"), module).unwrap();
+        space.snapshot(a.id, "tool", None).unwrap();
+        export(
+            &space,
+            a.id,
+            &ExportOptions {
+                branch: "feat".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        // The PR is squash-merged, and main moves on elsewhere too.
+        git(w, &["merge", "-q", "--squash", "feat"]);
+        git(w, &["commit", "-q", "-m", "feat (#1)"]);
+        let main = advance_main(w, "# demo\n\nline one\nfrom main\n");
+
+        // The follow-up, forked from a after the export, changes the same
+        // lines again.
+        let b = space
+            .fork(&ForkRequest {
+                from: Some(Ref::Attempt(a.id)),
+                actor: "agent:test".into(),
+                backend: BackendChoice::Copy,
+                ..Default::default()
+            })
+            .unwrap()
+            .attempt;
+        let v = &b.view_path;
+        fs::write(v.join("src/lib.rs"), "pub fn f() -> u32 { 3 }\n").unwrap();
+        let module2 =
+            module.replace("    2\n", "    22\n") + "\npub fn three() -> u32 {\n    3\n}\n";
+        fs::write(v.join("src/stack.rs"), &module2).unwrap();
+        space.snapshot(b.id, "tool", None).unwrap();
+
+        let r = rebase(&space, b.id, &onto("main")).unwrap();
+        assert!(r.conflicts.is_empty(), "{:?}", r.conflicts);
+        assert_eq!(r.onto, main);
+        let read = |p: &str| fs::read_to_string(v.join(p)).unwrap();
+        assert_eq!(read("src/lib.rs"), "pub fn f() -> u32 { 3 }\n");
+        assert_eq!(read("src/stack.rs"), module2);
+        assert_eq!(read("README.md"), "# demo\n\nline one\nfrom main\n");
+        assert!(!v.join("old.txt").exists());
+        // The export of b carries only b's own changes on top of main.
+        let e = export(
+            &space,
+            b.id,
+            &ExportOptions {
+                branch: "feat2".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            git(w, &["diff", "--name-only", &main, &e.commit]),
+            "src/lib.rs\nsrc/stack.rs"
+        );
+    }
+
+    /// The export is only used as the base once main really contains it.
+    #[test]
+    fn an_unmerged_export_is_not_used_as_the_base() {
+        let (tmp, space, _c0) = repo();
+        let w = tmp.path();
+        let a = fork(&space, BackendChoice::Copy).unwrap();
+        fs::write(a.view_path.join("src/lib.rs"), "pub fn f() -> u32 { 2 }\n").unwrap();
+        space.snapshot(a.id, "tool", None).unwrap();
+        export(
+            &space,
+            a.id,
+            &ExportOptions {
+                branch: "feat".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        advance_main(w, "# demo\n\nline one\nfrom main\n");
+        let r = rebase(&space, a.id, &onto("main")).unwrap();
+        assert!(r.conflicts.is_empty());
+        // Still a's change on main's tree: the old base was used.
+        assert_eq!(
+            fs::read_to_string(a.view_path.join("src/lib.rs")).unwrap(),
+            "pub fn f() -> u32 { 2 }\n"
+        );
     }
 
     #[test]
