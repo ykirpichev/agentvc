@@ -115,6 +115,28 @@ CREATE INDEX IF NOT EXISTS attempts_task ON attempts(task_id);
 CREATE INDEX IF NOT EXISTS snapshots_attempt ON snapshots(attempt_id);
 "#;
 
+/// Columns added after the first release, as (table, column, type).
+const ADDED_COLUMNS: &[(&str, &str, &str)] = &[
+    // When the attempt was abandoned or promoted (gc retention counts from it).
+    ("attempts", "closed_at", "INTEGER"),
+    // When `agentvc gc` dropped the snapshot's tree; the row stays.
+    ("snapshots", "pruned_at", "INTEGER"),
+];
+
+fn migrate(db: &Connection) -> Result<()> {
+    for (table, col, ty) in ADDED_COLUMNS {
+        let has = db
+            .prepare(&format!(
+                "SELECT 1 FROM pragma_table_info('{table}') WHERE name = ?1"
+            ))?
+            .exists(params![col])?;
+        if !has {
+            db.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {col} {ty}"))?;
+        }
+    }
+    Ok(())
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Status {
@@ -191,6 +213,20 @@ pub struct Snapshot {
     pub trigger: String,
     pub meta: Option<serde_json::Value>,
     pub created_at: i64,
+    /// Set when `agentvc gc` pruned this snapshot's tree: the row, its
+    /// trigger and metadata stay, its files are gone.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pruned_at: Option<i64>,
+}
+
+impl Snapshot {
+    /// The snapshot's tree, or `tree_pruned` when gc dropped it.
+    pub fn tree_oid(&self) -> Result<Oid> {
+        if self.pruned_at.is_some() {
+            return Err(Error::TreePruned(self.id));
+        }
+        Oid::from_hex(&self.tree)
+    }
 }
 
 /// A user-facing reference to history: `aN` is an attempt (its latest
@@ -364,6 +400,7 @@ impl Space {
         db.pragma_update(None, "journal_mode", "WAL")?;
         db.pragma_update(None, "foreign_keys", "ON")?;
         db.execute_batch(SCHEMA)?;
+        migrate(&db)?;
         Ok(Space {
             objects: ObjectStore::new(dir.join("objects")),
             workdir,
@@ -603,7 +640,7 @@ impl Space {
         let made = if warm {
             self.fork_view(&parent_attempt, id, &view_path, req.backend)
         } else {
-            let tree = Oid::from_hex(&parent_snapshot.tree)?;
+            let tree = parent_snapshot.tree_oid()?;
             snapshot::materialize(&self.objects, &tree, &view_path).map(|()| WarmFork {
                 backend: Backend::Materialize,
                 reason: (req.backend != BackendChoice::Auto)
@@ -798,9 +835,10 @@ impl Space {
         if status != Status::Abandoned && self.ensure_view(&attempt)? {
             self.snapshot(id, status.as_str(), None)?;
         }
+        let closed_at = (!status.is_open()).then(now);
         self.db.execute(
-            "UPDATE attempts SET status = ?1, reason = ?2 WHERE id = ?3",
-            params![status.as_str(), reason, id],
+            "UPDATE attempts SET status = ?1, reason = ?2, closed_at = ?3 WHERE id = ?4",
+            params![status.as_str(), reason, closed_at, id],
         )?;
         let mut losers = Vec::new();
         if status == Status::Promoted {
@@ -821,13 +859,15 @@ impl Space {
                     }
                     if ancestors.contains(&sib.id) {
                         self.db.execute(
-                            "UPDATE attempts SET status = 'promoted', reason = ?1 WHERE id = ?2",
-                            params![format!("continued in a{id}"), sib.id],
+                            "UPDATE attempts SET status = 'promoted', reason = ?1, closed_at = ?3
+                             WHERE id = ?2",
+                            params![format!("continued in a{id}"), sib.id, now()],
                         )?;
                     } else {
                         self.db.execute(
-                            "UPDATE attempts SET status = 'abandoned', reason = ?1 WHERE id = ?2",
-                            params![format!("lost to a{id}"), sib.id],
+                            "UPDATE attempts SET status = 'abandoned', reason = ?1, closed_at = ?3
+                             WHERE id = ?2",
+                            params![format!("lost to a{id}"), sib.id, now()],
                         )?;
                         losers.push(sib.id);
                     }
@@ -865,10 +905,12 @@ impl Space {
             trigger: r.get(3)?,
             meta: meta.and_then(|m| serde_json::from_str(&m).ok()),
             created_at: r.get(5)?,
+            pruned_at: r.get(6)?,
         })
     }
 
-    const SNAPSHOT_COLS: &'static str = "id, attempt_id, tree, trigger, meta, created_at";
+    const SNAPSHOT_COLS: &'static str =
+        "id, attempt_id, tree, trigger, meta, created_at, pruned_at";
 
     pub fn snapshot_by_id(&self, id: i64) -> Result<Snapshot> {
         self.db
@@ -987,6 +1029,8 @@ impl Space {
     pub fn capture_view(&self, attempt: &Attempt) -> Result<Oid> {
         // Never capture an unmounted overlay view: it would look empty.
         self.ensure_view(attempt)?;
+        // Keep a pruning `gc` from deleting objects this capture reuses.
+        let _gc = crate::gc::shared_lock(self);
         let index = self
             .workdir
             .join(SPACE_DIR)
@@ -1005,8 +1049,8 @@ impl Space {
 
     /// Files that differ between two references.
     pub fn diff(&self, a: Ref, b: Ref) -> Result<Vec<FileChange>> {
-        let ta = Oid::from_hex(&self.resolve(a)?.tree)?;
-        let tb = Oid::from_hex(&self.resolve(b)?.tree)?;
+        let ta = self.resolve(a)?.tree_oid()?;
+        let tb = self.resolve(b)?.tree_oid()?;
         snapshot::diff(&self.objects, &ta, &tb)
     }
 }

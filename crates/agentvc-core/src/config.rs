@@ -27,6 +27,10 @@ pub const PR_TRAILER: &str = "pr.trailer";
 pub const PR_BODY_PREFIX: &str = "pr.body-prefix";
 pub const GIT_CAPTURE_COMMITS: &str = crate::viewgit::CAPTURE_COMMITS;
 
+pub const GC_AUTO: &str = "gc.auto";
+pub const GC_KEEP_ABANDONED: &str = "gc.keepAbandonedDays";
+pub const GC_KEEP_VIEWS: &str = "gc.keepViewsDays";
+
 pub const KEYS: &[Key] = &[
     Key {
         name: PR_BRANCH,
@@ -51,6 +55,24 @@ pub const KEYS: &[Key] = &[
         multi: false,
         env: Some("AGENTVC_PR_BODY_PREFIX"),
         about: "file whose text goes above the generated PR body",
+    },
+    Key {
+        name: GC_AUTO,
+        multi: false,
+        env: None,
+        about: "loose objects before snapshots start `agentvc gc --auto` (default 4000, 0 turns it off)",
+    },
+    Key {
+        name: GC_KEEP_ABANDONED,
+        multi: false,
+        env: None,
+        about: "days `agentvc gc` keeps the trees of abandoned attempts (default 30)",
+    },
+    Key {
+        name: GC_KEEP_VIEWS,
+        multi: false,
+        env: None,
+        about: "days `agentvc gc` keeps the views of closed attempts (default 7)",
     },
     Key {
         name: GIT_CAPTURE_COMMITS,

@@ -1244,6 +1244,166 @@ impl Space {
     }
 }
 
+/// A layer `agentvc gc` removed (or would remove).
+#[derive(Clone, Debug, Serialize)]
+pub struct RemovedLayer {
+    pub layer: i64,
+    pub source_attempt: i64,
+    pub bytes: u64,
+}
+
+/// Whether a layer directory is a lower dir of a mount this process sees.
+fn layer_in_mountinfo(dir: &Path) -> bool {
+    let Ok(info) = fs::read_to_string("/proc/self/mountinfo") else {
+        return false;
+    };
+    let d = dir.to_string_lossy();
+    info.lines().any(|l| {
+        l.match_indices(&*d).any(|(i, _)| {
+            let after = l[i + d.len()..].chars().next();
+            let before = l[..i].chars().last();
+            matches!(before, Some('=') | Some(':'))
+                && matches!(after, None | Some(':') | Some(',') | Some(' '))
+        })
+    })
+}
+
+impl Space {
+    /// The upper and work dirs of an attempt's overlay view.
+    pub fn overlay_dir(&self, attempt: i64) -> PathBuf {
+        self.space_dir().join("overlay").join(format!("a{attempt}"))
+    }
+
+    /// Unmount and delete an overlay view: its mount point, upper and work
+    /// dirs, and its overlay record. False when it is busy and stays.
+    pub(crate) fn remove_overlay_view(&self, attempt: &Attempt) -> Result<bool> {
+        if let Some((_, m)) = self.overlay_of(attempt.id)? {
+            if unmount(m, &attempt.view_path).is_err() {
+                return Ok(false);
+            }
+        }
+        if is_mounted(&attempt.view_path) {
+            return Ok(false);
+        }
+        remove_tree(&attempt.view_path);
+        remove_tree(&self.overlay_dir(attempt.id));
+        self.db.execute(
+            "DELETE FROM overlays WHERE attempt_id = ?1",
+            params![attempt.id],
+        )?;
+        let _ = fs::remove_file(
+            self.space_dir()
+                .join("layers")
+                .join(format!("a{}.lock", attempt.id)),
+        );
+        Ok(true)
+    }
+
+    /// Layers that no overlay view mounts and that are not the latest
+    /// layer of an open attempt (the next fork from it starts there).
+    /// `dropping` are overlay views about to be removed. Unfinished layers
+    /// (a freeze in progress) and layers under a mount are never listed.
+    pub(crate) fn unused_layers(&self, dropping: &[i64]) -> Result<Vec<RemovedLayer>> {
+        let mut keep = std::collections::HashSet::new();
+        let tops: Vec<(i64, i64)> = self
+            .db
+            .prepare("SELECT attempt_id, top_layer FROM overlays")?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<std::result::Result<_, _>>()?;
+        for (a, top) in tops {
+            if !dropping.contains(&a) {
+                keep.extend(self.layer_chain(top)?);
+            }
+        }
+        for a in self.attempts(None)? {
+            if !a.status.is_open() {
+                continue;
+            }
+            let last: Option<i64> = self
+                .db
+                .query_row(
+                    "SELECT id FROM layers WHERE source_attempt = ?1 AND complete = 1
+                     ORDER BY id DESC LIMIT 1",
+                    params![a.id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            if let Some(l) = last {
+                keep.extend(self.layer_chain(l)?);
+            }
+        }
+        let rows: Vec<(i64, i64)> = self
+            .db
+            .prepare("SELECT id, source_attempt FROM layers WHERE complete = 1 ORDER BY id DESC")?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<std::result::Result<_, _>>()?;
+        let mut out = Vec::new();
+        for (id, source) in rows {
+            let dir = self.layer_dir(id);
+            if keep.contains(&id) || layer_in_mountinfo(&dir) {
+                continue;
+            }
+            out.push(RemovedLayer {
+                layer: id,
+                source_attempt: source,
+                bytes: crate::gc::disk_usage(&dir),
+            });
+        }
+        Ok(out)
+    }
+
+    /// Delete a layer listed by [`Space::unused_layers`] (children first:
+    /// callers pass them in descending id order).
+    pub(crate) fn remove_layer(&self, layer: i64) -> Result<()> {
+        // A layer that is still some other layer's parent stays.
+        let children: i64 = self.db.query_row(
+            "SELECT COUNT(*) FROM layers WHERE parent = ?1",
+            params![layer],
+            |r| r.get(0),
+        )?;
+        if children > 0 {
+            return Ok(());
+        }
+        remove_tree(&self.layer_dir(layer));
+        let _ = fs::remove_file(self.layer_manifest(layer));
+        self.db
+            .execute("DELETE FROM layers WHERE id = ?1", params![layer])?;
+        Ok(())
+    }
+
+    /// Layer ids recorded in the database and whether each is complete.
+    pub(crate) fn layer_rows(&self) -> Result<Vec<(i64, bool)>> {
+        Ok(self
+            .db
+            .prepare("SELECT id, complete FROM layers ORDER BY id")?
+            .query_map([], |r| Ok((r.get(0)?, r.get::<_, i64>(1)? != 0)))?
+            .collect::<std::result::Result<_, _>>()?)
+    }
+
+    /// The path of layer `id` and whether every layer an overlay view
+    /// mounts exists on disk: (attempt, missing layer) pairs.
+    pub(crate) fn missing_layers(&self) -> Result<Vec<(i64, i64)>> {
+        let tops: Vec<(i64, i64)> = self
+            .db
+            .prepare("SELECT attempt_id, top_layer FROM overlays")?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<std::result::Result<_, _>>()?;
+        let mut out = Vec::new();
+        for (a, top) in tops {
+            for l in self.layer_chain(top)? {
+                if !self.layer_dir(l).is_dir() {
+                    out.push((a, l));
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    pub(crate) fn has_overlay_record(&self, attempt: i64) -> Result<bool> {
+        Ok(self.overlay_of(attempt)?.is_some())
+    }
+}
+
 fn now_secs() -> i64 {
     (now_ns() / 1_000_000_000) as i64
 }
@@ -1433,6 +1593,82 @@ mod tests {
 
     /// A space with some backdated files, or None when this host cannot
     /// mount overlays (the test then has nothing to check).
+    #[test]
+    fn gc_removes_closed_overlay_views_and_their_layers() {
+        let Some((_tmp, space)) = overlay_space() else {
+            return;
+        };
+        let a2 = fork(&space, ROOT_ATTEMPT, BackendChoice::Overlay).attempt;
+        fs::write(a2.view_path.join("a2.rs"), "a2").unwrap();
+        let f3 = fork(&space, a2.id, BackendChoice::Overlay);
+        let a3 = f3.attempt;
+        let a2_layer = f3.overlay.unwrap().layer;
+        let root_layer = space.overlay_of(a2.id).unwrap().unwrap().0;
+        assert!(space.layer_dir(a2_layer).is_dir());
+        // Closed, but recently: kept.
+        space
+            .set_status(a3.id, crate::Status::Abandoned, Some("x"))
+            .unwrap();
+        let r = crate::gc::gc(&space, &crate::gc::GcOptions::default()).unwrap();
+        assert!(r.views.is_empty());
+        assert!(r.layers.is_empty(), "{:?}", r.layers);
+        space
+            .set_status(a2.id, crate::Status::Abandoned, Some("x"))
+            .unwrap();
+        space
+            .db
+            .execute("UPDATE attempts SET closed_at = closed_at - 864000", [])
+            .unwrap();
+        let dry = crate::gc::gc(
+            &space,
+            &crate::gc::GcOptions {
+                dry_run: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(dry.views.len(), 2);
+        assert!(dry.layers.iter().any(|l| l.layer == a2_layer));
+        assert!(
+            space.overlay_dir(a2.id).join("upper/a2.rs").exists(),
+            "dry run changes nothing"
+        );
+
+        let r = crate::gc::gc(&space, &crate::gc::GcOptions::default()).unwrap();
+        let removed: Vec<i64> = r.views.iter().map(|v| v.attempt).collect();
+        assert_eq!(removed, vec![a2.id, a3.id]);
+        assert!(r.layers.iter().any(|l| l.layer == a2_layer));
+        assert!(
+            !r.layers.iter().any(|l| l.layer == root_layer),
+            "a1's latest layer stays"
+        );
+        for a in [&a2, &a3] {
+            assert!(!is_mounted(&a.view_path));
+            assert!(!a.view_path.exists());
+            assert!(!space.overlay_dir(a.id).exists());
+            assert_eq!(space.attempt(a.id).unwrap().backend, crate::gc::REMOVED);
+        }
+        assert!(!space.layer_dir(a2_layer).exists());
+        assert!(space.layer_dir(root_layer).is_dir());
+        // History stays: a2's head is still readable, and forking from it
+        // writes it out.
+        let again = fork(&space, a2.id, BackendChoice::Auto);
+        assert_eq!(
+            fs::read_to_string(again.attempt.view_path.join("a2.rs")).unwrap(),
+            "a2"
+        );
+        let d = crate::doctor::doctor(
+            &space,
+            &crate::doctor::DoctorOptions {
+                repair: false,
+                offline: true,
+            },
+        )
+        .unwrap();
+        assert!(d.findings.is_empty(), "{:?}", d.findings);
+        space.unmount_views().unwrap();
+    }
+
     fn overlay_space() -> Option<(crate::testutil::TestDir, Space)> {
         let tmp = crate::testutil::tempdir();
         let w = tmp.path();

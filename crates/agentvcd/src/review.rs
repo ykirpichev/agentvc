@@ -500,7 +500,7 @@ fn build_compare(s: &Space, ids: &[i64]) -> agentvc_core::Result<CompareResponse
                 .join(","),
         })?;
     let base = s.snapshot_by_id(base_id)?;
-    let base_tree = Oid::from_hex(&base.tree)?;
+    let base_tree = base.tree_oid()?;
 
     let heads: Vec<Snapshot> = attempts
         .iter()
@@ -515,7 +515,7 @@ fn build_compare(s: &Space, ids: &[i64]) -> agentvc_core::Result<CompareResponse
 
     let head_trees: Vec<Oid> = heads
         .iter()
-        .map(|h| Oid::from_hex(&h.tree))
+        .map(|h| h.tree_oid())
         .collect::<Result<_, _>>()?;
     let mut text_cache: HashMap<Oid, Option<String>> = HashMap::new();
     let mut text = |oid: &Oid| -> agentvc_core::Result<Option<String>> {

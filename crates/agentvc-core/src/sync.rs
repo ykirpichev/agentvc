@@ -122,7 +122,7 @@ pub struct CloneResult {
     pub objects_imported: usize,
 }
 
-fn remote_name(r: &Option<String>) -> String {
+pub(crate) fn remote_name(r: &Option<String>) -> String {
     r.clone().unwrap_or_else(|| "origin".into())
 }
 
@@ -253,6 +253,11 @@ fn build_tree(space: &Space, doc: &Value) -> Result<Oid> {
         let (Some(id), Some(tree)) = (s["id"].as_i64(), s["tree"].as_str()) else {
             continue;
         };
+        // A tree `agentvc gc` pruned stays reachable from the earlier sync
+        // commits this one is parented on.
+        if !s["pruned_at"].is_null() {
+            continue;
+        }
         snaps.push(TreeEntry {
             name: format!("s{id}"),
             mode: Mode::Tree,
@@ -304,7 +309,7 @@ fn identity_env(repo: &HostRepo) -> Vec<(&'static str, &'static str)> {
 }
 
 /// The commit `refname` points to on `remote`, if it exists there.
-fn remote_tip(repo: &HostRepo, remote: &str, refname: &str) -> Result<Option<String>> {
+pub(crate) fn remote_tip(repo: &HostRepo, remote: &str, refname: &str) -> Result<Option<String>> {
     let out = repo.git(&["ls-remote", remote, refname], None)?;
     Ok(out
         .lines()
@@ -664,6 +669,9 @@ fn restore(
     let mut seen = HashSet::new();
     let rows = |t: &str| doc["tables"][t].as_array().cloned().unwrap_or_default();
     for s in rows("snapshots") {
+        if !s["pruned_at"].is_null() {
+            continue;
+        }
         if let Some(tree) = s["tree"].as_str() {
             if seen.insert(tree.to_string()) {
                 objects_imported += import_tree(&space, &mut git, &Oid::from_hex(tree)?)?;

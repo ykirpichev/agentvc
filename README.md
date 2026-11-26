@@ -46,6 +46,8 @@ agentvc pr a2 --draft                         # push agentvc/a2 and open a PR li
 agentvc sync                                  # push the whole space (losers too) to origin
 agentvc init --from-remote                    # elsewhere: rebuild that space, same ids
 agentvc init --from-pr 12                     # or rebuild it from the comment `agentvc pr` keeps on PR #12
+agentvc doctor [--repair]                     # check objects, db, views, layers, runs, sync; fix what is safe
+agentvc gc [--dry-run]                        # pack objects, prune old losers' trees, drop stale views and layers
 ```
 
 `agentvc pr` reads a token from `GITHUB_TOKEN`, `GH_TOKEN` or `gh auth token`.
@@ -60,6 +62,30 @@ Record `tests` and `cost` with `snapshot --meta` and they show up in the PR body
 Every command takes `--json` and returns one JSON object; errors carry a
 stable `error.code`. Benchmark forks against `git worktree` with
 `scripts/bench-fork.sh <repo>`.
+
+### Keeping a space healthy and small
+
+`agentvc gc` packs live objects into a git packfile (`.agentvc/objects/pack`,
+written with `git pack-objects`), prunes the trees of attempts abandoned more
+than `gc.keepAbandonedDays` (30) ago, deletes views of attempts closed more than
+`gc.keepViewsDays` (7) ago and overlay layers nothing uses. Rows stay, so
+`log`, `show` (which marks `tree pruned`) and the review UI keep the whole
+history. Never pruned: the latest snapshot of each attempt, open, promoted or
+exported work, fork points, rebase bases, snapshots with `--meta name=...` or
+`keep=...`, and, once the space has synced, anything the last sync did not
+carry. Snapshots start `gc --auto` in the background past `gc.auto` (4000)
+loose objects; it only packs. `agentvc config gc.auto 0` turns it off.
+On a 900-snapshot test space, objects went from 25 MB in 4,692 files to
+1.6 MB in one pack; `log` and `diff --patch` took the same time before and after.
+
+`agentvc doctor` checks the database, every object reachable from a snapshot
+(present and hashing to its id), views of open attempts, orphan views,
+overlay dirs and layers, runs whose process is gone, rebase bases missing from
+git, and the sync ref on the remote (`--offline` skips that). Findings have
+stable codes and severities in `--json`; it exits non-zero while errors
+remain. `--repair` remounts views, rewrites missing ones from their latest
+snapshot, copies missing objects back from the host git repo, marks dead runs
+lost and deletes orphans.
 
 ### How views are made
 

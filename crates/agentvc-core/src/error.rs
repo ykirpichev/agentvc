@@ -78,6 +78,10 @@ pub enum Error {
     },
     #[error("several spaces match on the remote: {}; pass --space <id>", ids.join(", "))]
     AmbiguousSpace { ids: Vec<String> },
+    #[error("the tree of snapshot s{0} was pruned by `agentvc gc`; its metadata is kept, its files are gone")]
+    TreePruned(i64),
+    #[error("another `agentvc gc` is running in this space")]
+    GcBusy,
     #[error("the space doesn't fit in a PR comment even without file contents ({0} characters)")]
     BundleTooLarge(usize),
     #[error("the space was not saved: push: {git}; PR comment: {pr}")]
@@ -129,6 +133,8 @@ impl Error {
             Error::RootAttempt => "root_attempt",
             Error::SyncConflict { .. } => "sync_conflict",
             Error::AmbiguousSpace { .. } => "ambiguous_space",
+            Error::TreePruned(_) => "tree_pruned",
+            Error::GcBusy => "gc_busy",
             Error::BundleTooLarge(_) => "bundle_too_large",
             Error::NotSaved { .. } => "not_saved",
             Error::Io { .. } => "io",
