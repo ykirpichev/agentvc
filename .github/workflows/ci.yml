@@ -17,6 +17,7 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
       - run: integrations/claude-code/tests/plugin.sh
+      - run: scripts/package-skills.py
 
   ui:
     runs-on: ubuntu-latest
