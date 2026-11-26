@@ -682,6 +682,8 @@ fn gc_views(space: &Space, cutoff: i64, dry_run: bool, res: &mut GcResult) -> Re
             }
             if !overlay {
                 remove_tree(&a.view_path);
+                // Where `undo` of its fork put the view aside.
+                remove_tree(&space.trash_dir(a.id));
             }
             let _ = fs::remove_file(
                 space

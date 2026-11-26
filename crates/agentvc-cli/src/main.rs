@@ -170,6 +170,23 @@ enum Cmd {
     },
     /// Pick an attempt as the winner; its open siblings are abandoned.
     Promote { attempt: String },
+    /// The operation log: every change to the space, newest first, with the
+    /// ids `agentvc undo` takes.
+    #[command(subcommand)]
+    Op(OpCmd),
+    /// Reverse an operation: a status change, a promote (its siblings and
+    /// ancestors reopen), a task creation, or a fork (the attempt is closed
+    /// as `fork undone` and its view put aside, not deleted). Without an id,
+    /// undoes the newest undoable operation that still stands, so repeated
+    /// `undo` walks back. Undo is itself an operation: `agentvc undo <id of
+    /// the undo>` redoes. Refused with `undo_conflict`, changing nothing,
+    /// when later operations changed the same attempts.
+    Undo {
+        /// Operation id from `agentvc op log` (N or opN).
+        op: Option<String>,
+        #[arg(long, default_value = "human")]
+        actor: String,
+    },
     /// Where am I and what is going on. Inside an attempt's view (or with
     /// aN): its task, status, head snapshot, files changed since it, active
     /// runs, PR, and whether main has moved since its base (`behind`). In the
@@ -505,6 +522,19 @@ enum Cmd {
         /// Revert every file `integrate` wrote, keeping your own settings.
         #[arg(long)]
         remove: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum OpCmd {
+    /// List operations, newest first.
+    Log {
+        /// How many to show.
+        #[arg(long, default_value_t = 20, conflicts_with = "all")]
+        limit: usize,
+        /// Show the whole log.
+        #[arg(long)]
+        all: bool,
     },
 }
 
@@ -1111,6 +1141,62 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
                 out.text += &format!("\nabandoned as lost: {}", list.join(", "));
             }
             out.json["closed_siblings"] = json!(closed);
+            add_sync(&mut out, agentvc_core::github::auto_save(&space));
+            out
+        }
+        Cmd::Op(OpCmd::Log { limit, all }) => {
+            let ops = space.operations((!all).then_some(limit))?;
+            let mut text = String::new();
+            for o in &ops {
+                let mark = match (o.undone_by, o.undoable) {
+                    (Some(by), _) => format!("  [undone by {by}]"),
+                    (None, true) => String::new(),
+                    (None, false) => "  [not undoable]".into(),
+                };
+                text += &format!(
+                    "{:>4}  {:>8}  {:<18}  {}{}\n",
+                    o.id,
+                    ago(o.created_at),
+                    o.actor,
+                    o.summary,
+                    mark
+                );
+            }
+            Out {
+                text: text.trim_end().to_string(),
+                json: json!({ "operations": ops }),
+            }
+        }
+        Cmd::Undo { op, actor } => {
+            let op = op
+                .map(|s| {
+                    s.strip_prefix("op")
+                        .unwrap_or(&s)
+                        .parse::<i64>()
+                        .map_err(|_| {
+                            anyhow::Error::from(Error::NotFound {
+                                kind: "operation",
+                                id: s.clone(),
+                            })
+                        })
+                })
+                .transpose()?;
+            let r = space.undo(&actor, op)?;
+            let mut text = format!(
+                "undid op {} ({}) as op {}",
+                r.undid.id, r.undid.summary, r.op
+            );
+            for line in agentvc_core::undo::describe(&r.changes) {
+                text += &format!("\n  {line}");
+            }
+            for w in &r.warnings {
+                text += &format!("\nwarning: {w}");
+            }
+            text += &format!("\nredo with: agentvc undo {}", r.op);
+            let mut out = Out {
+                text,
+                json: json!({ "op": r.op, "undid": r.undid, "changes": r.changes, "warnings": r.warnings }),
+            };
             add_sync(&mut out, agentvc_core::github::auto_save(&space));
             out
         }

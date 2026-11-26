@@ -101,6 +101,14 @@ pub enum Error {
     BundleTooLarge(usize),
     #[error("the space was not saved: push: {git}; PR comment: {pr}")]
     NotSaved { git: String, pr: String },
+    #[error("nothing to undo")]
+    NothingToUndo,
+    #[error("operation {op} ({kind}) cannot be undone")]
+    NotUndoable { op: i64, kind: String },
+    #[error("operation {op} was already undone by operation {by}; `agentvc undo {by}` redoes it")]
+    AlreadyUndone { op: i64, by: i64 },
+    #[error("cannot undo operation {op}: {reason}; nothing was changed")]
+    UndoConflict { op: i64, reason: String },
     #[error(
         "applying would overwrite local changes in {}: {}; commit or stash them, \
          limit it with --paths, or pass --force",
@@ -165,6 +173,10 @@ impl Error {
             Error::GcBusy => "gc_busy",
             Error::BundleTooLarge(_) => "bundle_too_large",
             Error::NotSaved { .. } => "not_saved",
+            Error::NothingToUndo => "nothing_to_undo",
+            Error::NotUndoable { .. } => "not_undoable",
+            Error::AlreadyUndone { .. } => "already_undone",
+            Error::UndoConflict { .. } => "undo_conflict",
             Error::DirtyWorktree { .. } => "dirty_worktree",
             Error::BadTagName { .. } => "bad_tag_name",
             Error::TagExists(_) => "exists",
@@ -188,6 +200,8 @@ impl Error {
                 "onto": onto,
                 "paths": paths,
             })),
+            Error::AlreadyUndone { op, by } => Some(serde_json::json!({ "op": op, "by": by })),
+            Error::UndoConflict { op, .. } => Some(serde_json::json!({ "op": op })),
             Error::DirtyWorktree { paths } => Some(serde_json::json!({ "paths": paths })),
             Error::TakeConflict {
                 attempt,

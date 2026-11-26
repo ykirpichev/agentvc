@@ -466,16 +466,22 @@ impl Space {
         &self.objects
     }
 
-    fn views_dir(&self) -> PathBuf {
+    pub(crate) fn views_dir(&self) -> PathBuf {
         self.workdir.join(SPACE_DIR).join("views")
     }
 
-    pub(crate) fn record(&self, actor: &str, kind: &str, payload: serde_json::Value) -> Result<()> {
+    /// Append to the operation log; returns the operation's id.
+    pub(crate) fn record(
+        &self,
+        actor: &str,
+        kind: &str,
+        payload: serde_json::Value,
+    ) -> Result<i64> {
         self.db.execute(
             "INSERT INTO operations (actor, kind, payload, created_at) VALUES (?1, ?2, ?3, ?4)",
             params![actor, kind, payload.to_string(), now()],
         )?;
-        Ok(())
+        Ok(self.db.last_insert_rowid())
     }
 
     // ---- tasks ---------------------------------------------------------
@@ -868,6 +874,15 @@ impl Space {
             "UPDATE attempts SET status = ?1, reason = ?2, closed_at = ?3 WHERE id = ?4",
             params![status.as_str(), reason, closed_at, id],
         )?;
+        // Every status this operation changes, so `agentvc undo` can put
+        // them back.
+        let mut changes = vec![crate::undo::Change::status(
+            id,
+            attempt.status,
+            attempt.reason.clone(),
+            status,
+            reason.map(str::to_string),
+        )];
         let mut losers = Vec::new();
         if status == Status::Promoted {
             if let Some(task) = attempt.task_id {
@@ -885,27 +900,32 @@ impl Space {
                     if sib.id == id || !sib.status.is_open() {
                         continue;
                     }
-                    if ancestors.contains(&sib.id) {
-                        self.db.execute(
-                            "UPDATE attempts SET status = 'promoted', reason = ?1, closed_at = ?3
-                             WHERE id = ?2",
-                            params![format!("continued in a{id}"), sib.id, now()],
-                        )?;
+                    let (to, why) = if ancestors.contains(&sib.id) {
+                        (Status::Promoted, format!("continued in a{id}"))
                     } else {
-                        self.db.execute(
-                            "UPDATE attempts SET status = 'abandoned', reason = ?1, closed_at = ?3
-                             WHERE id = ?2",
-                            params![format!("lost to a{id}"), sib.id, now()],
-                        )?;
                         losers.push(sib.id);
-                    }
+                        (Status::Abandoned, format!("lost to a{id}"))
+                    };
+                    self.db.execute(
+                        "UPDATE attempts SET status = ?1, reason = ?2, closed_at = ?3 WHERE id = ?4",
+                        params![to.as_str(), why, now(), sib.id],
+                    )?;
+                    changes.push(crate::undo::Change::status(
+                        sib.id,
+                        sib.status,
+                        sib.reason.clone(),
+                        to,
+                        Some(why),
+                    ));
                 }
             }
         }
         self.record(
             actor,
             &format!("attempt.{}", status.as_str()),
-            serde_json::json!({ "attempt": id, "reason": reason, "closed_siblings": losers }),
+            serde_json::json!({
+                "attempt": id, "reason": reason, "closed_siblings": losers, "changes": changes,
+            }),
         )?;
         // Abandoned views lose their git link; a promoted one keeps it for
         // `rebase` and `pr`.

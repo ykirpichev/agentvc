@@ -1259,6 +1259,43 @@ fn sync_falls_back_to_the_pr_comment_when_the_push_is_refused() {
 }
 
 #[test]
+fn op_log_and_undo_promote_then_redo() {
+    let tmp = tempdir();
+    let w = tmp.path();
+    fs::write(w.join("lib.rs"), "pub fn f() {}\n").unwrap();
+    agentvc(w, &["init"]);
+    agentvc(w, &["task", "new", "goal"]);
+    agentvc(w, &["fork", "--task", "t1", "--actor", "agent:a"]);
+    agentvc(w, &["fork", "--task", "t1", "--actor", "agent:b"]);
+    agentvc(w, &["promote", "a2"]);
+
+    let log = agentvc(w, &["op", "log"]);
+    let ops = log["operations"].as_array().unwrap();
+    assert_eq!(ops[0]["kind"], "attempt.promoted");
+    assert_eq!(ops[0]["undoable"], true);
+    let promote = ops[0]["id"].as_i64().unwrap();
+
+    let u = agentvc(w, &["undo"]);
+    assert_eq!(u["ok"], true);
+    assert_eq!(u["undid"]["id"], promote);
+    let a3 = agentvc(w, &["show", "a3"]);
+    assert_eq!(a3["attempt"]["status"], "exploring");
+
+    let again = agentvc(w, &["undo", &promote.to_string()]);
+    assert_eq!(again["error"]["code"], "already_undone");
+    assert_eq!(again["error"]["by"], u["op"]);
+
+    let redo = agentvc(w, &["undo", &format!("op{}", u["op"])]);
+    assert_eq!(redo["ok"], true);
+    let a3 = agentvc(w, &["show", "a3"]);
+    assert_eq!(a3["attempt"]["status"], "abandoned");
+    let log = agentvc(w, &["op", "log", "--limit", "3"]);
+    assert_eq!(log["operations"].as_array().unwrap().len(), 3);
+    assert_eq!(log["operations"][0]["kind"], "undo");
+    assert_eq!(log["operations"][1]["undone_by"], redo["op"]);
+}
+
+#[test]
 fn doctor_and_gc_report_and_exit_codes() {
     let tmp = tempdir();
     let w = tmp.path();

@@ -943,7 +943,7 @@ impl Space {
     }
 
     /// The overlay record of an attempt: (top layer, mounter).
-    fn overlay_of(&self, attempt: i64) -> Result<Option<(i64, Mounter)>> {
+    pub(crate) fn overlay_of(&self, attempt: i64) -> Result<Option<(i64, Mounter)>> {
         Ok(self
             .db
             .query_row(

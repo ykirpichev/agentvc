@@ -25,6 +25,7 @@ pub mod space;
 pub mod status;
 pub mod sync;
 pub mod tags;
+pub mod undo;
 pub mod view;
 pub mod viewgit;
 
@@ -40,6 +41,7 @@ pub use space::{
     Attempt, ForkRequest, ForkResult, Ref, Snapshot, SnapshotResult, Space, Status, Task,
 };
 pub use sync::{CloneOptions, CloneResult, RemoteSpace, SyncOptions, SyncResult};
+pub use undo::{Operation, UndoResult};
 pub use viewgit::ViewGit;
 
 /// Version of the on-disk format written by this build.
