@@ -247,6 +247,9 @@ pub struct ForkResult {
     /// Set for overlay views.
     #[cfg(target_os = "linux")]
     pub overlay: Option<crate::overlay::OverlayInfo>,
+    /// The view's git link (`.git` file), so git works inside it. `None`
+    /// when the host has no git history.
+    pub git: Option<crate::viewgit::ViewGit>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -631,8 +634,12 @@ impl Space {
             "attempt.fork",
             serde_json::json!({ "attempt": id, "from": from.to_string(), "backend": backend }),
         )?;
+        let attempt = self.attempt(id)?;
+        // Best-effort: a view without git is still a view.
+        let git = self.link_view_git(&attempt).ok().flatten();
         Ok(ForkResult {
-            attempt: self.attempt(id)?,
+            git,
+            attempt,
             parent_snapshot,
             backend,
             backend_reason: made.reason,
@@ -740,6 +747,15 @@ impl Space {
     /// that is not mounted (after a reboot, or in a new process for views
     /// mounted in a user namespace). False when the view directory is gone.
     pub fn ensure_view(&self, attempt: &Attempt) -> Result<bool> {
+        let ok = self.ensure_view_mounted(attempt)?;
+        if ok {
+            // Views made before views had git get their link on first use.
+            self.ensure_view_git(attempt);
+        }
+        Ok(ok)
+    }
+
+    fn ensure_view_mounted(&self, attempt: &Attempt) -> Result<bool> {
         if attempt.backend != Backend::Overlay.as_str() {
             return Ok(attempt.view_path.exists());
         }
@@ -823,6 +839,16 @@ impl Space {
             &format!("attempt.{}", status.as_str()),
             serde_json::json!({ "attempt": id, "reason": reason, "closed_siblings": losers }),
         )?;
+        // Abandoned views lose their git link; a promoted one keeps it for
+        // `rebase` and `pr`.
+        let closed = if status == Status::Abandoned {
+            [&[id][..], &losers].concat()
+        } else {
+            losers.clone()
+        };
+        for a in closed {
+            let _ = self.unlink_view_git(a);
+        }
         #[cfg(target_os = "linux")]
         self.release_views(&[&[id][..], &losers].concat());
         self.attempt(id)

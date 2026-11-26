@@ -25,6 +25,7 @@ pub const PR_BRANCH: &str = "pr.branch";
 pub const PR_BASE: &str = "pr.base";
 pub const PR_TRAILER: &str = "pr.trailer";
 pub const PR_BODY_PREFIX: &str = "pr.body-prefix";
+pub const GIT_CAPTURE_COMMITS: &str = crate::viewgit::CAPTURE_COMMITS;
 
 pub const KEYS: &[Key] = &[
     Key {
@@ -50,6 +51,12 @@ pub const KEYS: &[Key] = &[
         multi: false,
         env: Some("AGENTVC_PR_BODY_PREFIX"),
         about: "file whose text goes above the generated PR body",
+    },
+    Key {
+        name: GIT_CAPTURE_COMMITS,
+        multi: false,
+        env: None,
+        about: "record `git commit` in a view as a snapshot (default true; false leaves host git config alone)",
     },
 ];
 

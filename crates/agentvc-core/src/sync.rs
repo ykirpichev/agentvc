@@ -803,6 +803,7 @@ pub(crate) fn open_views(space: &Space) -> Result<Vec<i64>> {
             continue;
         }
         crate::snapshot::materialize(space.objects(), &head, &a.view_path)?;
+        let _ = space.link_view_git(&a);
         views.push(a.id);
     }
 

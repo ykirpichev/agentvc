@@ -370,6 +370,13 @@ enum Cmd {
         ])]
         event: String,
     },
+    /// Git hook handler for attempt views: `post-commit` records the commit
+    /// just made in the view as a snapshot (trigger `git-commit`).
+    #[command(hide = true)]
+    GitHook {
+        #[arg(value_parser = ["post-commit"])]
+        event: String,
+    },
     /// Set up an editor to work in this space: for Cursor, the MCP server
     /// (.cursor/mcp.json), hooks that snapshot the agent's edits
     /// (.cursor/hooks.json) and a rule describing the attempt workflow
@@ -744,6 +751,16 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
         | Cmd::Hooks { .. }
         | Cmd::Integrate { .. }
         | Cmd::Mcp { .. } => unreachable!(),
+        Cmd::GitHook { event: _ } => {
+            let r = space.record_git_commit(&cwd)?;
+            Out {
+                text: format!(
+                    "a{} s{} recorded git commit",
+                    r.snapshot.attempt_id, r.snapshot.id
+                ),
+                json: json!({ "snapshot": r }),
+            }
+        }
         Cmd::Task(TaskCmd::New { goal, criteria }) => {
             let t = space.create_task(&goal, criteria.as_deref())?;
             Out {

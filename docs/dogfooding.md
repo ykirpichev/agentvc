@@ -82,6 +82,9 @@ thread goes idle. Use your thread's own push branch wherever `<branch>` appears.
    - your own edits: `agentvc fork --task tN --actor agent:claude-code` (or `--from aN` to
      continue a winner), then edit only under `$(agentvc path aN)`, run builds and tests
      there, and `agentvc snapshot aN --meta tests=pass` after each step that works.
+   - git works inside views (see "Git inside a view" below): `git status`, `git diff`,
+     `git log`, `git blame`, pre-commit hooks and IDE git panels. A `git commit` there is
+     fine too; it is recorded as a snapshot. Never `git push` from a view: ship with `agentvc pr`.
 4. **Compare:** `agentvc diff aX aY --stat`, then `--patch` for the unified diff. Inside a
    view, `agentvc diff --patch` shows unsnapshotted work and `agentvc status` says where you
    are (and `behind` when main moved). Abandon losers with a reason:
@@ -104,6 +107,31 @@ thread goes idle. Use your thread's own push branch wherever `<branch>` appears.
 9. **Before the thread ends:** nothing to do. `agentvc pr` saves the space (on the remote,
    or in cloud sessions in a PR comment, #56/#64), and with auto-sync every later
    `run`, `promote` and `abandon` updates it.
+
+## Git inside a view (#68)
+
+Every open view has a `.git` file pointing at its own small git directory,
+`.agentvc/git/aN`, which shares the host repository's objects, refs and config (like
+`git worktree`, but not registered, so `git worktree list` in the host stays clean):
+
+- `HEAD` is the attempt's base commit, detached: the host HEAD at `agentvc init`, or what
+  `agentvc rebase` last moved it onto. So `git status` and `git diff` show exactly the
+  attempt's changes, the same files as `agentvc diff aN --stat` and what `agentvc pr` will
+  export. `git log`, `git blame` and `git show` see the host's history.
+- **`git commit` in a view is recorded as a snapshot** (trigger `git-commit`, with the
+  commit id and subject in its metadata), because agents commit by habit and refusing only
+  makes them work around it. HEAD stays on the new commit as git users expect, and
+  `refs/agentvc/views/aN` keeps it from `git gc`. What ships is still the attempt's
+  snapshot: `agentvc pr` exports one clean commit, and `agentvc rebase` resets HEAD to the
+  new base.
+- The recording is a `post-commit` hook. Views use `.agentvc/git/hooks`, which run the
+  repository's own hooks first (`core.hooksPath` or `.git/hooks`), so pre-commit hooks keep
+  working. This needs `extensions.worktreeConfig` in the host's git config, which agentvc
+  sets on the first fork (it changes nothing for the main checkout).
+  `agentvc config git.capture-commits false` before forking leaves the host config alone;
+  git still works in views and commits are then plain commits.
+- Abandoning an attempt removes its link and git directory. Views made before this get
+  their link the next time agentvc touches them (`agentvc status` in the view does it).
 
 ## Rules while dogfooding
 
@@ -157,7 +185,7 @@ losers kept with a reason, and promote/rebase/pr as one flow with a PR body that
 story. What hurt, filed as `dogfood` issues:
 
 - history dies with the cloud container (#56); hooks silently off in cloud sessions (#57);
-- `diff` lists files but shows no patch, and views have no `.git` (#58);
+- `diff` lists files but shows no patch, and views have no `.git` (#58; `.git` in views is #68);
 - `pr` from a thread needs a body prefix and a fixed branch (#59);
 - no `agentvc status`, and `run --json` lacks the fork stats this guide promised (#60);
   #58 (except `.git` in views), #59 and #60 fixed in PR #65, itself shipped with `agentvc pr`

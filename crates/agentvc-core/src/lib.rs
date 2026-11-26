@@ -21,6 +21,7 @@ pub mod space;
 pub mod status;
 pub mod sync;
 pub mod view;
+pub mod viewgit;
 
 #[cfg(test)]
 pub(crate) mod testutil;
@@ -34,6 +35,7 @@ pub use space::{
     Attempt, ForkRequest, ForkResult, Ref, Snapshot, SnapshotResult, Space, Status, Task,
 };
 pub use sync::{CloneOptions, CloneResult, RemoteSpace, SyncOptions, SyncResult};
+pub use viewgit::ViewGit;
 
 /// Version of the on-disk format written by this build.
 pub const FORMAT_VERSION: u32 = 1;
