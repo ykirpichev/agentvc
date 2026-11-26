@@ -9,6 +9,8 @@ use std::path::PathBuf;
 use std::process::{ExitCode, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
+mod stack_cmd;
+
 use agentvc_core::snapshot::ChangeKind;
 use agentvc_core::view::BackendChoice;
 use agentvc_core::{Attempt, Error, ExportOptions, ForkRequest, PrOptions, Ref, Space, Status};
@@ -169,6 +171,11 @@ enum Cmd {
     /// Create and list tasks.
     #[command(subcommand)]
     Task(TaskCmd),
+    /// Stacked branches that belong to this worktree only, so each editor
+    /// window has its own stack (#107). Works in any git worktree; no space
+    /// needed.
+    #[command(subcommand)]
+    Stack(stack_cmd::StackCmd),
     /// Conflict tools: see how resolution strategies handle real conflicts.
     #[command(subcommand)]
     Conflicts(ConflictsCmd),
@@ -1166,6 +1173,10 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
         }
         _ => {}
     }
+    if let Cmd::Stack(c) = cli.cmd {
+        let (json, text) = stack_cmd::run(&cwd, c)?;
+        return Ok(Out { json, text });
+    }
     let space = Space::discover(&cwd)?;
     let current = || -> anyhow::Result<i64> { Ok(space.attempt_for_path(&cwd)?.id) };
 
@@ -1284,7 +1295,8 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
         | Cmd::Integrate { .. }
         | Cmd::Mcp { .. }
         | Cmd::Import { .. }
-        | Cmd::Restack { .. } => unreachable!(),
+        | Cmd::Restack { .. }
+        | Cmd::Stack(_) => unreachable!(),
         Cmd::GitHook { event: _ } => {
             let r = space.record_git_commit(&cwd)?;
             Out {

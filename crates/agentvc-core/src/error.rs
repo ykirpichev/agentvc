@@ -36,6 +36,13 @@ pub enum Error {
         branch: String,
         stderr: String,
     },
+    /// `agentvc stack` errors (#107), each with its own stable code.
+    #[error("{message}")]
+    Stack {
+        code: &'static str,
+        message: String,
+        details: Option<serde_json::Value>,
+    },
     #[error("git {cmd} failed: {stderr}")]
     Git { cmd: String, stderr: String },
     #[error("bad merge rule: {0}")]
@@ -180,6 +187,7 @@ impl Error {
     pub fn code(&self) -> &'static str {
         match self {
             Error::NoSpace(_) => "no_space",
+            Error::Stack { code, .. } => code,
             Error::SpaceExists(_) => "space_exists",
             Error::NotFound { .. } => "not_found",
             Error::BadRef(_) => "bad_ref",
@@ -277,6 +285,7 @@ impl Error {
             Error::SyncDiverged { tip, conflicts } => {
                 Some(serde_json::json!({ "tip": tip, "conflicts": conflicts }))
             }
+            Error::Stack { details, .. } => details.clone(),
             Error::RateLimited { reset_at } => Some(serde_json::json!({ "reset_at": reset_at })),
             Error::AmbiguousSpace { ids } => Some(serde_json::json!({ "spaces": ids })),
             Error::SyncConflict { refname, tip, .. } => {

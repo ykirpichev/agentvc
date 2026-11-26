@@ -29,6 +29,7 @@ pub mod restack;
 pub mod run;
 pub mod snapshot;
 pub mod space;
+pub mod stack;
 pub mod status;
 pub mod story;
 pub mod sync;

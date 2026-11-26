@@ -8,6 +8,7 @@ and ship it as a clean GitHub PR.
 Status: early. Milestone M1 (core model and views) is in progress.
 
 - Design: [docs/design.md](docs/design.md)
+- One stack per editor window (instead of Graphite's shared tree): [docs/stacks.md](docs/stacks.md)
 - Core library: [crates/agentvc-core](crates/agentvc-core)
 - CLI: [crates/agentvc-cli](crates/agentvc-cli)
 - MCP server: [crates/agentvc-mcp](crates/agentvc-mcp)
