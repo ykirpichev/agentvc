@@ -78,6 +78,49 @@ enum Cmd {
     /// Imported tasks and attempts get fresh ids; each space keeps only its
     /// newest comment, and importing again replaces the earlier copy. Creates
     /// the space here first if there is none.
+    /// Keep open PR branches mergeable as main moves: re-merge each branch
+    /// with the remote's default branch using the conflict resolution
+    /// strategies. A branch with one commit is rebased (pushed with a lease),
+    /// a longer one gets a merge commit. Branches that still conflict are not
+    /// touched; with --comment their PR says which files. Needs no space, so
+    /// it runs in CI (see .github/workflows/restack.yml). Without --push it
+    /// only reports.
+    Restack {
+        /// Branches on the remote to restack.
+        branches: Vec<String>,
+        /// Also every open PR into the default branch from this repository
+        /// (skips PRs labelled agentvc:no-restack).
+        #[arg(long)]
+        all_prs: bool,
+        /// GitHub repository as owner/name. Defaults to the remote's.
+        #[arg(long)]
+        repo: Option<String>,
+        #[arg(long, default_value = "origin")]
+        remote: String,
+        /// What to restack onto. Defaults to the remote's default branch.
+        #[arg(long)]
+        onto: Option<String>,
+        #[arg(long)]
+        no_fetch: bool,
+        /// auto (rebase one-commit branches, merge main into longer ones),
+        /// rebase or merge.
+        #[arg(long, default_value = "auto")]
+        mode: String,
+        /// Push restacked branches.
+        #[arg(long)]
+        push: bool,
+        /// Comment on PRs that still conflict, and update that comment once
+        /// they restack cleanly.
+        #[arg(long)]
+        comment: bool,
+        /// Extra `<glob>=<strategy>` rules, before the space's
+        /// `merge.strategy`. Repeatable.
+        #[arg(long = "strategy", value_name = "GLOB=STRATEGY")]
+        strategies: Vec<String>,
+        /// Report git's conflicts without resolution strategies.
+        #[arg(long)]
+        no_auto_resolve: bool,
+    },
     Import {
         /// Every PR of the repository, open and closed.
         #[arg(long, conflicts_with = "pr")]
@@ -1067,6 +1110,54 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
         Cmd::Import { all_prs, pr, repo } => {
             return import_cmd(&cwd, *all_prs, pr, repo.as_deref())
         }
+        Cmd::Restack {
+            branches,
+            all_prs,
+            repo,
+            remote,
+            onto,
+            no_fetch,
+            mode,
+            push,
+            comment,
+            strategies,
+            no_auto_resolve,
+        } => {
+            use agentvc_core::resolve::Rules;
+            let mut rules = if *no_auto_resolve {
+                Rules::disabled()
+            } else {
+                Rules::new()
+            };
+            if !*no_auto_resolve {
+                for r in strategies {
+                    rules.add_strategy(r)?;
+                }
+                // A space here adds its merge.strategy and merge.formatter.
+                if let Ok(space) = Space::discover(&cwd) {
+                    let from_space = Rules::from_space(&space)?;
+                    rules.extend(from_space);
+                }
+            }
+            if branches.is_empty() && !*all_prs {
+                anyhow::bail!("name branches to restack, or pass --all-prs");
+            }
+            let mode = agentvc_core::restack::Mode::parse(mode)
+                .ok_or_else(|| anyhow::anyhow!("--mode is auto, rebase or merge, not {mode:?}"))?;
+            let opts = agentvc_core::restack::RestackOptions {
+                branches: branches.clone(),
+                all_prs: *all_prs,
+                repo: repo.clone(),
+                remote: Some(remote.clone()),
+                onto: onto.clone(),
+                no_fetch: *no_fetch,
+                mode,
+                push: *push,
+                comment: *comment,
+                rules,
+            };
+            return Ok(restack_out(agentvc_core::restack::restack(&cwd, &opts)?));
+        }
         _ => {}
     }
     let space = Space::discover(&cwd)?;
@@ -1162,7 +1253,8 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
         | Cmd::Hooks { .. }
         | Cmd::Integrate { .. }
         | Cmd::Mcp { .. }
-        | Cmd::Import { .. } => unreachable!(),
+        | Cmd::Import { .. }
+        | Cmd::Restack { .. } => unreachable!(),
         Cmd::GitHook { event: _ } => {
             let r = space.record_git_commit(&cwd)?;
             Out {
@@ -2694,6 +2786,51 @@ fn replay_out(r: agentvc_core::resolve::Replay) -> Out {
     Out {
         text: t,
         json: json!({ "replay": r }),
+    }
+}
+
+fn restack_out(r: agentvc_core::restack::RestackReport) -> Out {
+    let short = |c: &str| c[..12.min(c.len())].to_string();
+    let mut t = format!("onto {} ({})", r.onto_ref, short(&r.onto));
+    for b in &r.branches {
+        let pr = b.pr.map(|n| format!(" (#{n})")).unwrap_or_default();
+        let line = match b.outcome {
+            "up_to_date" => "up to date".to_string(),
+            "restacked" => format!(
+                "{} as {}{}",
+                if b.how == Some("rebase") {
+                    "rebased"
+                } else {
+                    "merged main"
+                },
+                short(b.commit.as_deref().unwrap_or_default()),
+                if b.pushed {
+                    ", pushed"
+                } else {
+                    " (not pushed; pass --push)"
+                }
+            ),
+            "conflicts" => format!(
+                "conflicts in {}",
+                b.conflicts
+                    .iter()
+                    .map(|c| c.path.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            other => format!("{other}: {}", b.message.as_deref().unwrap_or_default()),
+        };
+        t += &format!("\n  {}{pr}  {line}", b.branch);
+        for f in &b.resolved {
+            t += &format!("\n    R  {}  ({}, {} hunks)", f.path, f.strategy, f.hunks);
+        }
+        if let Some(c) = &b.comment {
+            t += &format!("\n    comment: {c}");
+        }
+    }
+    Out {
+        text: t,
+        json: json!({ "restack": r }),
     }
 }
 

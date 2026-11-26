@@ -168,6 +168,12 @@ impl Rules {
         Ok(rules)
     }
 
+    /// Append another set's rules after these (first match still wins).
+    pub fn extend(&mut self, other: Rules) {
+        self.strategies.extend(other.strategies);
+        self.formatters.extend(other.formatters);
+    }
+
     /// Add a `<glob>=<strategy>` rule after the existing ones.
     pub fn add_strategy(&mut self, rule: &str) -> Result<()> {
         let (glob, name) = split_rule(rule)?;
@@ -521,8 +527,46 @@ fn squash(lines: &[&str]) -> String {
         .join(" ")
 }
 
+/// The lines of `a` that a minimal diff matches in `b`, in order.
+fn common<'a>(a: &[&'a str], b: &[&'a str]) -> Vec<&'a str> {
+    let mut out = Vec::new();
+    for op in similar::capture_diff_slices(similar::Algorithm::Myers, a, b) {
+        if let similar::DiffOp::Equal { old_index, len, .. } = op {
+            out.extend_from_slice(&a[old_index..old_index + len]);
+        }
+    }
+    out
+}
+
+/// Whether two blocks inserted at the same point are versions of the same
+/// text (a file added on both sides, the same function added twice with a
+/// tweak) rather than two different additions: at least 80% of the smaller
+/// block's non-blank lines are common to both.
+fn same_text(ours: &[&str], theirs: &[&str]) -> bool {
+    let solid = |s: &[&str]| -> Vec<String> {
+        s.iter()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| l.trim_end().to_string())
+            .collect()
+    };
+    let (o, t) = (solid(ours), solid(theirs));
+    let smaller = o.len().min(t.len());
+    if smaller == 0 {
+        return false;
+    }
+    let o: Vec<&str> = o.iter().map(String::as_str).collect();
+    let t: Vec<&str> = t.iter().map(String::as_str).collect();
+    common(&o, &t).len() * 5 >= smaller * 4
+}
+
 /// Resolve one conflict hunk the `auto` way.
-fn auto_hunk(base: &[&str], ours: &[&str], theirs: &[&str], sides: &Sides) -> Option<Vec<String>> {
+fn auto_hunk(
+    base: &[&str],
+    ours: &[&str],
+    theirs: &[&str],
+    sides: &Sides,
+    keep_both: bool,
+) -> Option<Vec<String>> {
     let (sb, so, st) = (squash(base), squash(ours), squash(theirs));
     // The same change up to whitespace, or one side only reformatted.
     if so == st {
@@ -534,9 +578,26 @@ fn auto_hunk(base: &[&str], ours: &[&str], theirs: &[&str], sides: &Sides) -> Op
     if st == sb {
         return Some(concat(&[ours]));
     }
+    // One side made the other's change and added lines before or after it
+    // (both renamed a function, one also added a helper above it): the
+    // larger side has everything. Only when the smaller side is all new
+    // lines, so a line deleted on one side is never quietly kept.
+    let fresh = |side: &[&str]| !side.is_empty() && side.iter().all(|l| !base.contains(l));
+    if fresh(ours)
+        && theirs.len() > ours.len()
+        && (theirs.starts_with(ours) || theirs.ends_with(ours))
+    {
+        return Some(concat(&[theirs]));
+    }
+    if fresh(theirs)
+        && ours.len() > theirs.len()
+        && (ours.starts_with(theirs) || ours.ends_with(theirs))
+    {
+        return Some(concat(&[ours]));
+    }
     // Both sides inserted at the same point: keep both, unless one
     // insertion already contains the other at its start or end.
-    if base.iter().all(|l| l.trim().is_empty()) {
+    if keep_both && base.iter().all(|l| l.trim().is_empty()) {
         let (first, second) = if sides.theirs_first {
             (theirs, ours)
         } else {
@@ -606,7 +667,33 @@ pub fn merge_lines(
     let mut out: Vec<String> = Vec::new();
     let mut conflicts = 0;
     let mut resolved = 0;
+    // Blocks both sides inserted that are versions of the same text are
+    // merged against their common lines, and what still differs inside them
+    // is not doubled up (`keep_both` false): concatenating two copies of
+    // one file or function would duplicate it.
+    let mut pieces: Vec<(Chunk<&str>, bool)> = Vec::new();
     for chunk in diff3(&b, &o, &t) {
+        match chunk {
+            Chunk::Conflict { base, ours, theirs }
+                if base.iter().all(|l| l.trim().is_empty())
+                    && !matches!(
+                        strategy,
+                        Strategy::Union | Strategy::Ours | Strategy::Theirs
+                    )
+                    && same_text(&ours, &theirs) =>
+            {
+                let lcs = common(&ours, &theirs);
+                let mut sub = diff3(&lcs, &ours, &theirs);
+                // Blank lines of the base region are kept in front.
+                if !base.is_empty() {
+                    pieces.push((Chunk::Clean(base.clone()), true));
+                }
+                pieces.extend(sub.drain(..).map(|c| (c, false)));
+            }
+            c => pieces.push((c, true)),
+        }
+    }
+    for (chunk, keep_both) in pieces {
         match chunk {
             Chunk::Clean(ls) => out.extend(ls.iter().map(|l| l.to_string())),
             Chunk::Conflict { base, ours, theirs } => {
@@ -619,7 +706,7 @@ pub fn merge_lines(
                         concat(&[&ours, &theirs])
                     }),
                     Strategy::None => None,
-                    _ => auto_hunk(&base, &ours, &theirs, sides),
+                    _ => auto_hunk(&base, &ours, &theirs, sides, keep_both),
                 };
                 match r {
                     Some(ls) => {
@@ -1348,6 +1435,37 @@ mod tests {
             m.text,
             "        Cmd::Init { .. } | Cmd::Hook { .. } | Cmd::Mcp { .. } => unreachable!(),\n"
         );
+    }
+
+    #[test]
+    fn a_file_added_on_both_sides_is_not_doubled() {
+        // The same new file landed on main while the attempt extended it.
+        let theirs = "use x;\n\nfn a() {\n    1\n}\n\nfn b() {\n    2\n}\n";
+        let ours = "use x;\n\nfn a() {\n    1\n}\n\nfn extra() {}\n\nfn b() {\n    2\n}\n";
+        let m = merge_file(None, ours, theirs, Strategy::Auto, None, &Sides::default());
+        assert_eq!((m.conflicts, m.text.as_str()), (0, ours));
+        // Versions that really differ conflict instead of doubling.
+        let o2 = "use x;\n\nfn a() {\n    1\n}\n\nfn b() {\n    3\n}\n";
+        let m = merge_file(None, o2, theirs, Strategy::Auto, None, &Sides::default());
+        assert_eq!(m.conflicts, 1, "{}", m.text);
+        assert_eq!(m.text.matches("fn a()").count(), 1);
+        // Two different additions at one point are still both kept.
+        let m = auto("x\n", "x\n## A\n\ntext a\n", "x\n## B\n\ntext b\n");
+        assert_eq!(m.text, "x\n## A\n\ntext a\n## B\n\ntext b\n");
+    }
+
+    #[test]
+    fn one_side_containing_the_others_change_wins() {
+        let base = "    fn call(&self) {\n";
+        let ours = "    pub(crate) fn call(&self) {\n";
+        let theirs = "    fn set_base(&mut self) {}\n\n    pub(crate) fn call(&self) {\n";
+        let m = auto(base, ours, theirs);
+        assert_eq!((m.conflicts, m.text.as_str()), (0, theirs));
+        let m = auto(base, theirs, ours);
+        assert_eq!((m.conflicts, m.text.as_str()), (0, theirs));
+        // Ours keeps a base line: not taken as contained.
+        let m = auto("a\n}\n", "}\n", "b\n}\n");
+        assert_eq!(m.conflicts, 1);
     }
 
     #[test]

@@ -25,6 +25,7 @@ pub mod patch;
 pub mod query;
 pub mod rebase;
 pub mod resolve;
+pub mod restack;
 pub mod run;
 pub mod snapshot;
 pub mod space;
