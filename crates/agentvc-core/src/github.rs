@@ -624,6 +624,69 @@ pub fn load_space_comment(
     ))
 }
 
+/// Spaces found by [`space_comments`], and the PRs whose comment didn't decode.
+pub type SpaceComments = (Vec<PrSpace>, Vec<(u64, String)>);
+
+/// One PR's space comment, found by [`space_comments`].
+#[derive(Clone, Debug)]
+pub struct PrSpace {
+    pub pr: u64,
+    pub title: String,
+    /// When the comment was last written; newer copies of a space win.
+    pub updated_at: String,
+    /// The decoded payload (see [`crate::bundle::decode`]).
+    pub payload: Value,
+}
+
+/// The space comments of `prs`, or of every PR in `repo` (open and closed)
+/// when `prs` is empty. PRs without one are skipped; a comment that does
+/// not decode is reported in `errors` as (PR, message).
+pub fn space_comments(repo: &str, prs: &[u64]) -> Result<SpaceComments> {
+    let api = Api::new(token()?);
+    let mut list: Vec<(u64, String)> = Vec::new();
+    if prs.is_empty() {
+        let mut page = 1;
+        loop {
+            let v = api.call(
+                "GET",
+                &format!("/repos/{repo}/pulls?state=all&per_page=100&page={page}"),
+                None,
+            )?;
+            let items = v.as_array().cloned().unwrap_or_default();
+            for p in &items {
+                if let Some(n) = p["number"].as_u64() {
+                    list.push((n, p["title"].as_str().unwrap_or_default().to_string()));
+                }
+            }
+            if items.len() < 100 {
+                break;
+            }
+            page += 1;
+        }
+    } else {
+        for &n in prs {
+            let p = api.call("GET", &format!("/repos/{repo}/pulls/{n}"), None)?;
+            list.push((n, p["title"].as_str().unwrap_or_default().to_string()));
+        }
+    }
+    let (mut found, mut errors) = (Vec::new(), Vec::new());
+    for (pr, title) in list {
+        let Some(c) = find_space_comment(&api, repo, pr)? else {
+            continue;
+        };
+        match crate::bundle::decode(c["body"].as_str().unwrap_or_default()) {
+            Ok(payload) => found.push(PrSpace {
+                pr,
+                title,
+                updated_at: c["updated_at"].as_str().unwrap_or_default().to_string(),
+                payload,
+            }),
+            Err(e) => errors.push((pr, e.to_string())),
+        }
+    }
+    Ok((found, errors))
+}
+
 /// Where [`save_space`] put the space.
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct SaveResult {

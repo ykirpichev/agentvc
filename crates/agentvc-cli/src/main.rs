@@ -71,6 +71,24 @@ enum Cmd {
         #[arg(long, requires = "from_pr")]
         repo: Option<String>,
     },
+    /// Merge spaces saved in PR comments (by `agentvc pr` / `sync`) into this
+    /// space, so every PR's attempt tree shows in one place: the review UI,
+    /// editors and `agentvc overview`.
+    ///
+    /// Imported tasks and attempts get fresh ids; each space keeps only its
+    /// newest comment, and importing again replaces the earlier copy. Creates
+    /// the space here first if there is none.
+    Import {
+        /// Every PR of the repository, open and closed.
+        #[arg(long, conflicts_with = "pr")]
+        all_prs: bool,
+        /// PR numbers to import from. Repeatable.
+        #[arg(long, value_name = "N")]
+        pr: Vec<u64>,
+        /// GitHub repository as owner/name. Defaults to origin's.
+        #[arg(long)]
+        repo: Option<String>,
+    },
     /// Save this space's history (tasks, attempts, snapshots, reasons, runs)
     /// so it outlives this machine: push it to a git remote as
     /// refs/agentvc/spaces/<id> (restore with `agentvc init --from-remote`),
@@ -892,6 +910,9 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
         Cmd::Hook { event } => return Ok(run_hook(event, &cwd, cli.json)),
         Cmd::Hooks { user, uninstall } => return hooks_cmd(&cwd, *user, *uninstall),
         Cmd::Integrate { remove, .. } => return integrate_cmd(&cwd, *remove),
+        Cmd::Import { all_prs, pr, repo } => {
+            return import_cmd(&cwd, *all_prs, pr, repo.as_deref())
+        }
         _ => {}
     }
     let space = Space::discover(&cwd)?;
@@ -986,7 +1007,8 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
         | Cmd::Hook { .. }
         | Cmd::Hooks { .. }
         | Cmd::Integrate { .. }
-        | Cmd::Mcp { .. } => unreachable!(),
+        | Cmd::Mcp { .. }
+        | Cmd::Import { .. } => unreachable!(),
         Cmd::GitHook { event: _ } => {
             let r = space.record_git_commit(&cwd)?;
             Out {
@@ -2658,6 +2680,82 @@ fn run_hook(event: &str, cwd: &std::path::Path, as_json: bool) -> Out {
         text: String::new(),
         json: if as_json { json } else { Value::Null },
     }
+}
+
+/// `agentvc import`: merge the spaces kept in PR comments into this one.
+fn import_cmd(
+    cwd: &std::path::Path,
+    all_prs: bool,
+    prs: &[u64],
+    repo: Option<&str>,
+) -> anyhow::Result<Out> {
+    if !all_prs && prs.is_empty() {
+        anyhow::bail!("pass --all-prs or at least one --pr N");
+    }
+    let (space, created) = match Space::discover(cwd) {
+        Ok(s) => (s, false),
+        Err(Error::NoSpace(_)) => (Space::init(cwd)?, true),
+        Err(e) => return Err(e.into()),
+    };
+    let repo = agentvc_core::github::repo_for(space.workdir(), "origin", repo)?;
+    let (found, errors) = agentvc_core::github::space_comments(&repo, prs)?;
+    // One space can be saved on several PRs (a thread that opened more than
+    // one): its newest comment carries everything the older ones did.
+    let mut newest: std::collections::BTreeMap<String, &agentvc_core::github::PrSpace> =
+        std::collections::BTreeMap::new();
+    for f in &found {
+        let id = f.payload["space"]["space_id"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        match newest.get(&id) {
+            Some(prev) if (&prev.updated_at, prev.pr) >= (&f.updated_at, f.pr) => {}
+            _ => {
+                newest.insert(id, f);
+            }
+        }
+    }
+    let mut results = Vec::new();
+    let mut text = String::new();
+    if created {
+        text += &format!(
+            "Initialized agentvc space in {}\n",
+            space.workdir().display()
+        );
+    }
+    for f in newest.values() {
+        let source = format!("{repo}#{}", f.pr);
+        let r = agentvc_core::import::merge_bundle(&space, &f.payload, &source, &f.updated_at)?;
+        text += &format!(
+            "{source}  space {}  {}: {} tasks ({}), {} attempts",
+            r.space_id,
+            r.outcome,
+            r.tasks.len(),
+            r.tasks.join(", "),
+            r.attempts
+        );
+        if !r.incomplete.is_empty() {
+            text += &format!(", history only: {}", r.incomplete.join(", "));
+        }
+        text.push('\n');
+        results.push(json!({ "pr": f.pr, "title": f.title, "import": r }));
+    }
+    if newest.is_empty() {
+        text += &format!("no PR in {repo} has an agentvc space comment\n");
+    }
+    for (pr, e) in &errors {
+        text += &format!("warning: {repo}#{pr}: {e}\n");
+    }
+    Ok(Out {
+        text,
+        json: json!({
+            "repo": repo,
+            "created": created,
+            "prs_with_spaces": found.len(),
+            "imports": results,
+            "errors": errors.iter().map(|(pr, e)| json!({ "pr": pr, "message": e })).collect::<Vec<_>>(),
+        }),
+    })
 }
 
 fn integrate_cmd(cwd: &std::path::Path, remove: bool) -> anyhow::Result<Out> {

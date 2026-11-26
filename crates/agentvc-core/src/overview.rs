@@ -13,7 +13,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::export::HostRepo;
 use crate::run::Run;
 use crate::snapshot::ChangeKind;
@@ -92,6 +92,9 @@ pub struct TaskNode {
     pub state: TaskState,
     /// The promoted attempt, `aN`.
     pub winner: Option<String>,
+    /// Where an imported task came from (`owner/repo#N`, see
+    /// `agentvc import`); `None` for this space's own tasks.
+    pub source: Option<String>,
     pub counts: Counts,
     /// In creation order; `parent` links them into a tree.
     pub attempts: Vec<AttemptNode>,
@@ -222,11 +225,20 @@ impl Space {
 
         let mut nodes: BTreeMap<Option<i64>, Vec<AttemptNode>> = BTreeMap::new();
         for a in self.attempts(None)? {
-            if a.task_id.is_none() && a.id == crate::space::ROOT_ATTEMPT {
+            if a.task_id.is_none()
+                && (a.id == crate::space::ROOT_ATTEMPT || a.actor == crate::import::IMPORT_ACTOR)
+            {
                 continue;
             }
             let node = self.attempt_node(&a, runs.get(&a.id))?;
             nodes.entry(a.task_id).or_default().push(node);
+        }
+
+        let mut sources: BTreeMap<i64, String> = BTreeMap::new();
+        for rec in crate::import::imported(self)?.into_values() {
+            for t in &rec.tasks {
+                sources.insert(*t, rec.source.clone());
+            }
         }
 
         let mut counts = Counts::default();
@@ -268,6 +280,7 @@ impl Space {
                 updated_at,
                 state,
                 winner,
+                source: sources.remove(&t.id),
                 counts: c,
                 attempts,
             });
@@ -329,8 +342,9 @@ impl Space {
                     }
                     Some(c)
                 }
-                Err(Error::NotFound { .. }) => None,
-                Err(e) => return Err(e),
+                // Missing objects (an imported attempt kept as history only)
+                // leave the counts out rather than failing the overview.
+                Err(_) => None,
             },
             None => None,
         };
