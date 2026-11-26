@@ -173,7 +173,10 @@ thread goes idle. Use your thread's own push branch wherever `<branch>` appears.
    For a big change, tell it as a series of commits before `pr`:
    `agentvc story aX --at sN:"First step" --last "Second step"` (see `agentvc log aX` for
    snapshot ids); `pr` then pushes one commit per change and lists them in the body.
-7. **Follow-up work in the same PR** (review fixes): `agentvc fork --from aX`, edit, snapshot,
+7. **Follow-up work in the same PR** (review fixes): `agentvc pr --refresh aX` pulls the
+   checks and review comments (`agentvc status aX` sums them up, `agentvcd` refreshes open
+   PRs every 5 minutes), then `agentvc fork --from aX` and `agentvc comments aY` in the new
+   attempt lists what to fix with file and line. Edit, snapshot,
    promote the new attempt, `agentvc pr aY` again. The PR body then shows
    the winning path aX -> aY. With a story, the fork inherits it: run
    `agentvc story aY --absorb` (fixes go into the commit that last touched each file) or

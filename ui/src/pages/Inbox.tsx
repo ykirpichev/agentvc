@@ -11,6 +11,8 @@ import { money, timeAgo } from '../lib/format'
 const REASON: Record<string, { label: string; cls: string }> = {
   ready_to_pick: { label: 'Ready to pick', cls: 'reason-ready' },
   failed: { label: 'Failed run', cls: 'reason-failed' },
+  checks_failed: { label: 'PR checks fail', cls: 'reason-failed' },
+  changes_requested: { label: 'Changes requested', cls: 'reason-failed' },
 }
 
 export function Inbox() {

@@ -46,6 +46,8 @@ pub struct Config {
     pub poll_interval: Duration,
     /// Who review actions from the UI are recorded as, e.g. `human:ana`.
     pub actor: String,
+    /// How often to refresh open PRs from GitHub; `None` never does.
+    pub pr_poll: Option<Duration>,
 }
 
 impl Config {
@@ -54,6 +56,7 @@ impl Config {
             dir: dir.into(),
             poll_interval: Duration::from_millis(500),
             actor: "human".into(),
+            pr_poll: None,
         }
     }
 }
@@ -91,6 +94,9 @@ impl AppState {
             }),
         };
         events::spawn_poller(state.clone(), watcher, config.poll_interval);
+        if let Some(every) = config.pr_poll {
+            spawn_pr_poller(state.clone(), every);
+        }
         Ok(state)
     }
 
@@ -134,6 +140,38 @@ impl AppState {
         .map_err(|e| ApiError::internal(e.to_string()))?
         .map_err(ApiError::from)
     }
+}
+
+/// Refresh open PRs every `every` (#76), on a space of its own so network
+/// calls never hold the one the API uses. Waits out rate limits; quiet when
+/// there is no token or no open PR.
+fn spawn_pr_poller(state: AppState, every: Duration) {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(every).await;
+            let workdir = state.workdir().to_path_buf();
+            let res = tokio::task::spawn_blocking(move || {
+                let space = Space::discover(&workdir)?;
+                if space.open_prs()?.is_empty() || agentvc_core::github::token().is_err() {
+                    return Ok::<_, agentvc_core::Error>((0, None));
+                }
+                let (done, err) = agentvc_core::feedback::refresh_open(&space);
+                Ok((done.len(), err))
+            })
+            .await;
+            if let Ok(Ok((n, err))) = res {
+                if n > 0 {
+                    state.poke();
+                }
+                if let Some(agentvc_core::Error::RateLimited { reset_at }) = err {
+                    let wait = reset_at
+                        .map(|t| (t - agentvc_core::space::now()).max(0) as u64)
+                        .unwrap_or(900);
+                    tokio::time::sleep(Duration::from_secs(wait.min(3600))).await;
+                }
+            }
+        }
+    });
 }
 
 /// The full application: API, events and UI.

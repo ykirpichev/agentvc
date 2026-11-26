@@ -419,14 +419,14 @@ fn roots_from_env() -> Option<ureq::tls::RootCerts> {
     (!certs.is_empty()).then(|| ureq::tls::RootCerts::new_with_certs(&certs))
 }
 
-struct Api {
+pub(crate) struct Api {
     base: String,
     token: String,
     agent: ureq::Agent,
 }
 
 impl Api {
-    fn new(token: String) -> Api {
+    pub(crate) fn new(token: String) -> Api {
         let mut config = ureq::Agent::config_builder()
             .http_status_as_error(false)
             .timeout_global(Some(Duration::from_secs(60)));
@@ -446,7 +446,12 @@ impl Api {
         }
     }
 
-    fn call(&self, method: &str, path: &str, body: Option<Value>) -> Result<Value> {
+    #[cfg(test)]
+    pub(crate) fn set_base(&mut self, base: &str) {
+        self.base = base.trim_end_matches('/').to_string();
+    }
+
+    pub(crate) fn call(&self, method: &str, path: &str, body: Option<Value>) -> Result<Value> {
         let url = format!("{}{path}", self.base);
         let net = |e: ureq::Error| Error::GitHub {
             status: 0,
@@ -476,6 +481,19 @@ impl Api {
             }
         };
         let status = resp.status().as_u16();
+        let header = |k: &str| {
+            resp.headers()
+                .get(k)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string)
+        };
+        let remaining = header("x-ratelimit-remaining");
+        let reset = header("x-ratelimit-reset").and_then(|v| v.parse::<i64>().ok());
+        let retry_after = header("retry-after").and_then(|v| v.parse::<i64>().ok());
+        if status == 429 || (status == 403 && remaining.as_deref() == Some("0")) {
+            let reset_at = reset.or_else(|| retry_after.map(|s| crate::space::now() + s));
+            return Err(Error::RateLimited { reset_at });
+        }
         let text = resp.body_mut().read_to_string().map_err(net)?;
         let v: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
         if !(200..300).contains(&status) {

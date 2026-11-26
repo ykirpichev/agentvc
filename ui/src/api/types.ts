@@ -88,6 +88,36 @@ export interface AttemptDetail {
   pr_url?: string | null
   /** The local branch `agentvc land` put it on. */
   landed?: Landing | null
+  /** GitHub's checks, reviews and comment threads on its PR, as of the last refresh. */
+  pr?: PrFeedback | null
+}
+
+/** What GitHub said about a PR at the last `agentvc pr --refresh`. */
+export interface PrFeedback {
+  url: string
+  number: number
+  state: 'open' | 'closed' | 'merged'
+  draft: boolean
+  merge_commit: string | null
+  checks: {
+    state: 'pass' | 'fail' | 'pending' | 'none'
+    passed: number
+    failed: number
+    pending: number
+    failing: string[]
+    running: string[]
+  }
+  reviews: { author: string; state: string; body: string }[]
+  decision: 'approved' | 'changes_requested' | 'none'
+  threads: {
+    path: string
+    line: number | null
+    resolved: boolean | null
+    outdated: boolean
+    comments: { author: string; body: string; url: string | null }[]
+  }[]
+  unresolved: number
+  refreshed_at: Timestamp
 }
 
 /** Where `agentvc land` put an attempt. */
@@ -176,7 +206,7 @@ export interface AttemptStats {
   last_activity: Timestamp
 }
 
-export type InboxReason = 'ready_to_pick' | 'failed'
+export type InboxReason = 'ready_to_pick' | 'failed' | 'checks_failed' | 'changes_requested'
 
 export interface InboxItem {
   task: Task
@@ -186,6 +216,8 @@ export interface InboxItem {
   candidates: number[]
   cost_usd: number | null
   updated_at: Timestamp
+  /** The promoted attempt's PR feedback, for `checks_failed` and `changes_requested`. */
+  pr?: PrFeedback | null
 }
 
 export type CellKind = 'unchanged' | 'added' | 'modified' | 'removed'

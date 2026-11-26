@@ -28,6 +28,11 @@ struct Cli {
     /// How often to check for new snapshots and status changes, in ms.
     #[arg(long, default_value_t = 500, value_name = "MS")]
     poll_ms: u64,
+    /// How often to refresh open PRs' checks, reviews and comments from
+    /// GitHub (`agentvc pr --refresh`), in seconds; 0 turns it off. Needs a
+    /// GitHub token.
+    #[arg(long, default_value_t = 300, value_name = "SECS")]
+    pr_poll_secs: u64,
     /// Print machine-readable JSON instead of text.
     #[arg(long)]
     json: bool,
@@ -70,6 +75,7 @@ async fn main() -> ExitCode {
     let cli = Cli::parse();
     let mut config = Config::new(&cli.dir);
     config.poll_interval = Duration::from_millis(cli.poll_ms.max(50));
+    config.pr_poll = (cli.pr_poll_secs > 0).then(|| Duration::from_secs(cli.pr_poll_secs.max(30)));
     config.actor = agentvcd::human_actor(reviewer_name(&cli.dir, cli.user).as_deref());
 
     let state = match AppState::start(&config) {

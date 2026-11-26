@@ -159,10 +159,14 @@ struct InboxItem {
     candidates: Vec<i64>,
     cost_usd: Option<f64>,
     updated_at: i64,
+    /// The promoted attempt's PR feedback, for `checks_failed` and
+    /// `changes_requested`.
+    pr: Option<agentvc_core::feedback::PrFeedback>,
 }
 
 /// Tasks waiting on a human: two or more passed attempts and no winner yet
-/// (ready to pick), or failed attempts and no winner (needs a decision).
+/// (ready to pick), failed attempts and no winner (needs a decision), or a
+/// winner whose open PR has failing checks or a change request.
 async fn inbox(State(st): State<AppState>) -> ApiResult<Vec<InboxItem>> {
     let out = st
         .with_space(|s| {
@@ -177,10 +181,41 @@ async fn inbox(State(st): State<AppState>) -> ApiResult<Vec<InboxItem>> {
                 let attempts = by_task.remove(&task.id).unwrap_or_default();
                 let mut counts = StatusCounts::default();
                 attempts.iter().for_each(|a| counts.add(a));
+                let mut reasons = Vec::new();
                 if counts.promoted > 0 {
+                    // Picked and shipped: back in the inbox only when its
+                    // open PR needs attention (#76).
+                    let mut feedback = None;
+                    for a in attempts.iter().filter(|a| a.status == Status::Promoted) {
+                        if let Some(f) = s.pr_feedback(a.id)?.filter(|f| f.is_open()) {
+                            feedback = Some((a.id, f));
+                        }
+                    }
+                    let Some((winner, f)) = feedback else {
+                        continue;
+                    };
+                    if f.checks.state == "fail" {
+                        reasons.push("checks_failed");
+                    }
+                    if f.decision == "changes_requested" {
+                        reasons.push("changes_requested");
+                    }
+                    if reasons.is_empty() {
+                        continue;
+                    }
+                    let updated_at = f.refreshed_at.max(task.created_at);
+                    items.push(InboxItem {
+                        task,
+                        attempts: counts,
+                        reasons,
+                        best_check: None,
+                        candidates: vec![winner],
+                        cost_usd: None,
+                        updated_at,
+                        pr: Some(f),
+                    });
                     continue;
                 }
-                let mut reasons = Vec::new();
                 if counts.passed >= 2 {
                     reasons.push("ready_to_pick");
                 }
@@ -233,6 +268,7 @@ async fn inbox(State(st): State<AppState>) -> ApiResult<Vec<InboxItem>> {
                     candidates,
                     cost_usd: cost,
                     updated_at,
+                    pr: None,
                 });
             }
             // Ready-to-pick first, then most recently active.
