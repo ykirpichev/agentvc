@@ -125,4 +125,30 @@ describe('agentvc extension', function () {
     assert.equal(api.statusBar.current?.attempt.id, 3)
     assert.ok(api.statusBar.current?.head, 'shows its last snapshot')
   })
+
+  it("shows this window's stack and moves a branch by drop", async () => {
+    // Branches without commits: the checkout's files stay as they are.
+    cli('stack', 'create', 'st1')
+    cli('stack', 'create', 'st2')
+    cli('stack', 'create', 'st3')
+    await api.stack.reload()
+    const roots = api.stack.getChildren()
+    assert.equal(roots[0].kind, 'trunk')
+    const st1 = roots.find((r) => r.kind === 'branch')!
+    assert.equal(api.stack.getTreeItem(st1).label, 'st1')
+    const st2 = api.stack.getChildren(st1)[0]
+    const st3 = api.stack.getChildren(st2)[0]
+    const item = api.stack.getTreeItem(st3)
+    assert.equal(item.label, 'st3')
+    assert.equal(item.contextValue, 'stackBranch:current')
+    // Drop st3 onto the trunk row.
+    const data = new vscode.DataTransfer()
+    api.stack.handleDrag([st3], data)
+    await api.stack.handleDrop(roots[0], data)
+    const st3now = api.stack.log!.branches.find((b) => b.name === 'st3')!
+    assert.equal(st3now.parent, api.stack.log!.trunk)
+    assert.equal(st3now.depth, 0)
+    // Leave the checkout on the trunk for anything after this.
+    cli('stack', 'untrack', 'st3')
+  })
 })

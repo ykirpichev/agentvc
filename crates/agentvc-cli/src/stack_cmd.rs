@@ -4,7 +4,9 @@
 use std::collections::HashSet;
 use std::path::Path;
 
-use agentvc_core::stack::{BranchInfo, LogResult, ParentKind, RestackResult, Window};
+use agentvc_core::stack::{
+    BranchInfo, LogResult, ParentKind, RestackResult, SubmitOptions, Window,
+};
 use clap::Subcommand;
 use serde_json::{json, Value};
 
@@ -86,6 +88,65 @@ pub enum StackCmd {
         /// Only this branch, not the ones below it.
         #[arg(long)]
         no_chain: bool,
+    },
+    /// Push this window's stack and open or update one PR per branch, with
+    /// the parent branch as base and the whole stack listed in each body.
+    /// Pushes with a lease, so others' pushes are never overwritten.
+    Submit {
+        /// Only this branch and the ones below it (default: the whole stack
+        /// the current branch is in).
+        #[arg(long, conflicts_with = "all")]
+        branch: Option<String>,
+        /// Every branch of this window.
+        #[arg(long)]
+        all: bool,
+        /// Open new PRs as drafts.
+        #[arg(long)]
+        draft: bool,
+        /// Overwrite remote branches that changed since this window pushed.
+        #[arg(long)]
+        force: bool,
+        /// GitHub repository as owner/name (default: from the remote URL).
+        #[arg(long)]
+        repo: Option<String>,
+        /// Push only, no PRs.
+        #[arg(long)]
+        no_pr: bool,
+    },
+    /// Put a branch (and what is stacked on it) onto another branch or the
+    /// trunk; only its own commits move.
+    Move {
+        branch: String,
+        /// The new parent: a branch, or the trunk (`main` or `origin/main`).
+        #[arg(long)]
+        onto: String,
+        #[arg(long)]
+        keep_conflicts: bool,
+    },
+    /// Rename a branch of this window; branches on it follow.
+    Rename { branch: String, new_name: String },
+    /// Delete a branch and its commits; branches on it move to its parent
+    /// without them.
+    Delete {
+        branch: String,
+        #[arg(long)]
+        keep_conflicts: bool,
+    },
+    /// Squash the current branch's commits into one, then restack above.
+    Squash {
+        /// Message for the squashed commit (default: the first commit's).
+        #[arg(short, long)]
+        message: Option<String>,
+        #[arg(long)]
+        keep_conflicts: bool,
+    },
+    /// Hand a branch and the branches above it to the window (worktree) at
+    /// --to.
+    Give {
+        branch: String,
+        /// The other worktree's directory.
+        #[arg(long)]
+        to: std::path::PathBuf,
     },
     /// Stop tracking a branch; branches above it keep its commits. The git
     /// branch stays.
@@ -311,6 +372,79 @@ pub fn run(cwd: &Path, cmd: StackCmd) -> anyhow::Result<(Value, String)> {
                 text = format!("{branch} is already tracked");
             }
             (json!({ "adopted": added }), text)
+        }
+        StackCmd::Submit {
+            branch,
+            all,
+            draft,
+            force,
+            repo,
+            no_pr,
+        } => {
+            let r = w.submit(&SubmitOptions {
+                branch,
+                all,
+                draft,
+                force,
+                repo,
+                no_pr,
+            })?;
+            let mut text = String::new();
+            if r.pushed.is_empty() {
+                text += "branches already up to date on the remote\n";
+            } else {
+                text += &format!("pushed {}\n", r.pushed.join(", "));
+            }
+            for p in &r.prs {
+                text += &format!(
+                    "{} #{} {} (into {})\n",
+                    if p.created { "opened " } else { "updated" },
+                    p.number,
+                    p.url,
+                    p.base
+                );
+            }
+            (json!(r), text)
+        }
+        StackCmd::Move {
+            branch,
+            onto,
+            keep_conflicts,
+        } => {
+            let r = w.move_onto(&branch, &onto, keep_conflicts)?;
+            let text = format!("moved {branch} onto {onto}\n{}", restack_text(&r));
+            (json!(r), text)
+        }
+        StackCmd::Rename { branch, new_name } => {
+            let t = w.rename(&branch, &new_name)?;
+            (
+                json!({ "branch": t }),
+                format!("renamed {branch} to {}", t.name),
+            )
+        }
+        StackCmd::Delete {
+            branch,
+            keep_conflicts,
+        } => {
+            let r = w.delete(&branch, keep_conflicts)?;
+            let text = format!("deleted {branch}\n{}", restack_text(&r));
+            (json!(r), text)
+        }
+        StackCmd::Squash {
+            message,
+            keep_conflicts,
+        } => {
+            let (c, r) = w.squash(message.as_deref(), keep_conflicts)?;
+            let text = format!("squashed into {}\n{}", short(&c), restack_text(&r));
+            (json!({ "commit": c, "restack": r }), text)
+        }
+        StackCmd::Give { branch, to } => {
+            let to = if to.is_absolute() { to } else { cwd.join(to) };
+            let moved = w.give(&branch, &to)?;
+            (
+                json!({ "moved": moved, "to": to }),
+                format!("gave {} to {}", moved.join(", "), to.display()),
+            )
         }
         StackCmd::Untrack { branch } => {
             let t = w.untrack(&branch)?;

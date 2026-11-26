@@ -71,10 +71,17 @@ agentvc stack restack                    # carries on with the branches above
 | `stack restack [--branch B] [--keep-conflicts]` | Replay branches onto their parents' tips |
 | `stack sync [--no-fetch] [--keep-merged]` | Fetch trunk, drop merged branches, restack |
 | `stack adopt B [--parent P] [--no-chain]` | Track existing branches: B and the untracked branches below it; parents from Graphite's `refs/branch-metadata` or git history |
+| `stack submit [--branch B \| --all] [--draft] [--force] [--no-pr]` | Push with a lease; one PR per branch with its parent as base; the stack listed in every PR body; new PRs get the `agentvc:no-restack` label |
+| `stack move B --onto P` | Re-parent B (and its upstack) onto P or the trunk; only B's own commits move |
+| `stack rename B NEW` | Rename B; branches on it follow (its PR is forgotten, submit opens a new one) |
+| `stack delete B` | Delete B and its commits; branches on it move to its parent without them |
+| `stack squash [-m msg]` | Squash the current branch into one commit, restack above |
+| `stack give B --to DIR` | Hand B and the branches above it to the window at DIR |
 | `stack untrack B` | Stop tracking B; branches above keep its commits |
 | `stack up / down / top / bottom` | Move along this window's stack |
 
-Every command takes `--json`. Error codes: `not_in_stack`,
+Every command takes `--json`. Error codes: `needs_restack`, `push_rejected`,
+`parent_not_pushed`, `no_remote`, `same_window`, `other_repository`, `not_in_stack`,
 `owned_by_other_window`, `checked_out_elsewhere`, `conflict`,
 `rebase_in_progress`, `merge_commit`, `at_top`, `at_bottom`, `ambiguous`,
 `no_trunk`, `parent_missing`, `branch_missing`, `message_required`.
@@ -84,5 +91,24 @@ Every command takes `--json`. Error codes: `not_in_stack`,
 In each worktree, `agentvc stack adopt <top branch of your stack>` tracks the
 chain (parents read from gt's metadata where present, else inferred from
 history). Stop running `gt` in that worktree: it would still write the shared
-tree. Next: `stack submit` (one PR per branch, parent as base) and a Stack
-panel in the VS Code/Cursor extension.
+tree. `agentvc stack submit` then finds the existing PRs by branch and keeps
+them (bases and the stack list in the body), so Graphite's web review keeps
+showing them as a stack.
+
+## Pull requests
+
+`submit` pushes the branches that changed, all at once (`--atomic`), with a
+lease on what this window last pushed: if anyone else pushed to one of them
+(a teammate, or the restack Action), nothing is pushed and the command fails
+with `push_rejected`. It opens a PR for each branch that has none (title and
+body from its commits; base = the parent branch, or the trunk), retargets
+existing ones whose parent changed, and keeps a list of the stack between
+`<!-- agentvc:stack:begin -->` markers in every body; the rest of the body is
+left alone.
+
+New PRs get the `agentvc:no-restack` label, so the restack Action
+(`.github/workflows/restack.yml`) leaves them to `stack sync` in their window.
+
+`sync` also drops branches whose PR GitHub reports merged (when a token is
+available and the local branch is what was pushed), so a PR that was edited on
+GitHub before merging is still recognized.

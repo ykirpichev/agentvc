@@ -40,6 +40,7 @@ use serde_json::json;
 
 use crate::error::{Error, IoContext, Result};
 use crate::export::HostRepo;
+use crate::github::Api;
 use crate::rebase::merge_commits;
 use crate::resolve::{Rules, Sides};
 
@@ -294,6 +295,71 @@ fn read_state(git_dir: &Path) -> Result<Option<State>> {
     }
 }
 
+fn write_state(git_dir: &Path, state: &State) -> Result<()> {
+    let path = state_path(git_dir);
+    let dir = path.parent().expect("has a parent");
+    fs::create_dir_all(dir).at(dir)?;
+    let tmp = dir.join(format!("stack.json.{}.tmp", std::process::id()));
+    let text = serde_json::to_string_pretty(state).expect("state serializes");
+    fs::write(&tmp, text + "\n").at(&tmp)?;
+    fs::rename(&tmp, &path).at(&path)?;
+    Ok(())
+}
+
+/// Markers around the stack list `submit` keeps in each PR body.
+pub const STACK_BEGIN: &str = "<!-- agentvc:stack:begin -->";
+pub const STACK_END: &str = "<!-- agentvc:stack:end -->";
+
+/// `body` with its stack section replaced by `section` (or added on top).
+pub fn with_stack_section(body: &str, section: &str) -> String {
+    if let (Some(a), Some(b)) = (body.find(STACK_BEGIN), body.find(STACK_END)) {
+        if a < b {
+            return format!("{}{section}{}", &body[..a], &body[b + STACK_END.len()..]);
+        }
+    }
+    if body.trim().is_empty() {
+        section.to_string()
+    } else {
+        format!("{section}\n\n{body}")
+    }
+}
+
+/// Options for [`Window::submit`].
+#[derive(Clone, Debug, Default)]
+pub struct SubmitOptions {
+    /// Only this branch and the ones below it. Default: the whole stack
+    /// the current branch is in.
+    pub branch: Option<String>,
+    /// Every branch of this window.
+    pub all: bool,
+    /// Open new PRs as drafts.
+    pub draft: bool,
+    /// Overwrite remote branches even if they changed since our last push.
+    pub force: bool,
+    /// GitHub `owner/name`; defaults to the remote's.
+    pub repo: Option<String>,
+    /// Push only.
+    pub no_pr: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct SubmittedPr {
+    pub branch: String,
+    pub number: u64,
+    pub url: String,
+    /// The PR's base branch: the parent, or the trunk.
+    pub base: String,
+    pub created: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct SubmitResult {
+    pub repo: String,
+    /// Branches pushed (the others were already up to date).
+    pub pushed: Vec<String>,
+    pub prs: Vec<SubmittedPr>,
+}
+
 /// A branch name from a commit message: `Fix the parser!` -> `fix-the-parser`.
 pub fn slug(message: &str) -> String {
     let mut out = String::new();
@@ -353,14 +419,7 @@ impl Window {
     }
 
     pub fn save(&self) -> Result<()> {
-        let path = state_path(&self.git_dir);
-        let dir = path.parent().expect("has a parent");
-        fs::create_dir_all(dir).at(dir)?;
-        let tmp = dir.join(format!("stack.json.{}.tmp", std::process::id()));
-        let text = serde_json::to_string_pretty(&self.state).expect("state serializes");
-        fs::write(&tmp, text + "\n").at(&tmp)?;
-        fs::rename(&tmp, &path).at(&path)?;
-        Ok(())
+        write_state(&self.git_dir, &self.state)
     }
 
     /// Set the trunk branch and remote (`agentvc stack init`).
@@ -1003,6 +1062,52 @@ impl Window {
     /// Fetch the trunk, drop branches merged into it (bottom up), then
     /// restack everything onto it.
     pub fn sync(&mut self, fetch: bool, delete: bool, keep_conflicts: bool) -> Result<SyncResult> {
+        // PRs merged on GitHub count too, when a token is at hand; offline,
+        // the history check alone decides.
+        let api = if self.state.branches.iter().any(|b| b.pr.is_some()) {
+            crate::github::token().ok().map(Api::new)
+        } else {
+            None
+        };
+        self.sync_with(fetch, delete, keep_conflicts, api.as_ref())
+    }
+
+    /// Branches whose PR GitHub reports merged, and whose local tip is what
+    /// was pushed (so no local work is lost by dropping them).
+    fn merged_on_github(&self, api: &Api) -> HashSet<String> {
+        let mut out = HashSet::new();
+        let Ok(repo) = crate::github::repo_for(&self.repo.workdir, &self.state.remote, None) else {
+            return out;
+        };
+        for b in &self.state.branches {
+            let Some(n) = b.pr else { continue };
+            let Ok(v) = api.call("GET", &format!("/repos/{repo}/pulls/{n}"), None) else {
+                continue;
+            };
+            if v["merged"].as_bool() != Some(true) {
+                continue;
+            }
+            let Some(tip) = self.branch_tip(&b.name) else {
+                continue;
+            };
+            let pushed = self
+                .repo
+                .rev(&format!("refs/remotes/{}/{}", self.state.remote, b.name));
+            let head = v["head"]["sha"].as_str().unwrap_or_default();
+            if tip == head || pushed.is_some_and(|p| self.repo.is_ancestor(&tip, &p)) {
+                out.insert(b.name.clone());
+            }
+        }
+        out
+    }
+
+    pub(crate) fn sync_with(
+        &mut self,
+        fetch: bool,
+        delete: bool,
+        keep_conflicts: bool,
+        api: Option<&Api>,
+    ) -> Result<SyncResult> {
         self.settle()?;
         let mut fetched = false;
         if fetch && !self.state.remote.is_empty() {
@@ -1017,10 +1122,13 @@ impl Window {
         }
         let base = self.require_base()?;
         let mut merged: Vec<String> = Vec::new();
+        let merged_prs = api.map(|a| self.merged_on_github(a)).unwrap_or_default();
         loop {
             let mut found = None;
             for b in &self.state.branches {
-                if b.parent == self.state.trunk && self.is_merged(b, &base)? {
+                if b.parent == self.state.trunk
+                    && (merged_prs.contains(&b.name) || self.is_merged(b, &base)?)
+                {
                     found = Some(b.clone());
                     break;
                 }
@@ -1345,6 +1453,172 @@ impl Window {
         Ok(t)
     }
 
+    /// Put `branch` (and what is stacked on it) on `onto`: another branch,
+    /// or the trunk. Only the branch's own commits move; then it and its
+    /// upstack are restacked.
+    pub fn move_onto(
+        &mut self,
+        branch: &str,
+        onto: &str,
+        keep_conflicts: bool,
+    ) -> Result<RestackResult> {
+        self.settle()?;
+        let i = self.require_tracked(branch)?;
+        let onto = if onto == self.base_ref() {
+            self.state.trunk.clone()
+        } else {
+            onto.to_string()
+        };
+        let up = self.upstack(branch);
+        if up.contains(&onto) {
+            return Err(stack_err_with(
+                "bad_move",
+                format!("{onto} is {branch} or stacked on it"),
+                json!({ "branch": branch, "onto": onto }),
+            ));
+        }
+        self.parent_tip(&onto)?;
+        if let Some(p) = (onto != self.state.trunk && !self.tracks(&onto))
+            .then(|| self.owner_elsewhere(&onto))
+            .flatten()
+        {
+            let _ = p; // a read-only base in another window is fine
+        }
+        let old = self.state.branches[i].parent.clone();
+        self.state.branches[i].parent = onto.clone();
+        match self.restack(Some(&up), keep_conflicts) {
+            Ok(r) => Ok(r),
+            Err(e) => {
+                // Nothing moved: put the parent back.
+                if let Some(i) = self.find(branch) {
+                    self.state.branches[i].parent = old;
+                    let _ = self.save();
+                }
+                Err(e)
+            }
+        }
+    }
+
+    /// Rename a tracked branch; branches on it follow. Its PR (GitHub
+    /// cannot rename a PR's branch) is forgotten: the next submit opens one
+    /// for the new name.
+    pub fn rename(&mut self, old: &str, new: &str) -> Result<Tracked> {
+        self.settle()?;
+        let i = self.require_tracked(old)?;
+        if self
+            .repo
+            .git(&["check-ref-format", "--branch", new], None)
+            .is_err()
+            || new.starts_with('-')
+        {
+            return Err(Error::BadBranch(new.to_string()));
+        }
+        if self.branch_tip(new).is_some() {
+            return Err(Error::BranchExists(new.to_string()));
+        }
+        if let Some(p) = self.checkouts_elsewhere().get(old) {
+            return Err(stack_err_with(
+                "checked_out_elsewhere",
+                format!("branch {old} is checked out in {}", p.display()),
+                json!({ "branch": old, "worktree": p }),
+            ));
+        }
+        self.repo.git(&["branch", "-m", old, new], None)?;
+        self.state.branches[i].name = new.to_string();
+        self.state.branches[i].pr = None;
+        for c in self.state.branches.iter_mut() {
+            if c.parent == old {
+                c.parent = new.to_string();
+            }
+        }
+        self.save()?;
+        Ok(self.state.branches[i].clone())
+    }
+
+    /// Delete a tracked branch and its commits from the stack: the branches
+    /// on it move to its parent without its commits.
+    pub fn delete(&mut self, branch: &str, keep_conflicts: bool) -> Result<RestackResult> {
+        self.settle()?;
+        let i = self.require_tracked(branch)?;
+        if let Some(p) = self.checkouts_elsewhere().get(branch) {
+            return Err(stack_err_with(
+                "checked_out_elsewhere",
+                format!("branch {branch} is checked out in {}", p.display()),
+                json!({ "branch": branch, "worktree": p }),
+            ));
+        }
+        let t = self.state.branches[i].clone();
+        let kids = self.children_of(branch);
+        if self.current_branch().as_deref() == Some(branch) {
+            if self.tracks(&t.parent) {
+                self.repo.git(&["switch", "--quiet", &t.parent], None)?;
+            } else {
+                let at = self.parent_tip(&t.parent)?;
+                self.repo
+                    .git(&["switch", "--quiet", "--detach", &at], None)?;
+            }
+        }
+        // Children keep parent_rev (a commit of the deleted branch), so
+        // restack replays only their own commits.
+        let mut scope = HashSet::new();
+        for k in &kids {
+            scope.extend(self.upstack(k));
+        }
+        for c in self.state.branches.iter_mut() {
+            if c.parent == branch {
+                c.parent = t.parent.clone();
+            }
+        }
+        self.state.branches.remove(i);
+        self.save()?;
+        self.repo.git(&["branch", "-D", branch], None)?;
+        if scope.is_empty() {
+            return Ok(RestackResult::default());
+        }
+        self.restack(Some(&scope), keep_conflicts)
+    }
+
+    /// Squash the current branch's commits into one (the first commit's
+    /// message, or `message`), then restack the branches above it.
+    pub fn squash(
+        &mut self,
+        message: Option<&str>,
+        keep_conflicts: bool,
+    ) -> Result<(String, RestackResult)> {
+        self.settle()?;
+        let cur = self.require_current()?;
+        let b = self.state.branches[self.find(&cur).expect("tracked")].clone();
+        let tip = self.branch_tip(&cur).expect("checked out");
+        let commits = self.commits_between(&b.parent_rev, &tip)?;
+        if commits.len() <= 1 && message.is_none() {
+            return Ok((tip, RestackResult::default()));
+        }
+        let first = commits.first().ok_or_else(|| {
+            stack_err(
+                "message_required",
+                format!("{cur} has no commits to squash"),
+            )
+        })?;
+        let tree = self.tree_of(&tip)?;
+        let msg = message
+            .map(str::to_string)
+            .unwrap_or_else(|| first.message.clone());
+        let new = self.repo.git_env(
+            &["commit-tree", &tree, "-p", &b.parent_rev, "-F", "-"],
+            Some(&msg),
+            &[
+                ("GIT_AUTHOR_NAME", first.author_name.as_str()),
+                ("GIT_AUTHOR_EMAIL", first.author_email.as_str()),
+                ("GIT_AUTHOR_DATE", first.author_date.as_str()),
+            ],
+        )?;
+        self.repo.git(&["reset", "--keep", &new], None)?;
+        let mut scope = self.upstack(&cur);
+        scope.remove(&cur);
+        let r = self.restack(Some(&scope), keep_conflicts)?;
+        Ok((new, r))
+    }
+
     // ---- navigation ----
 
     fn switch(&self, branch: &str) -> Result<String> {
@@ -1435,6 +1709,342 @@ impl Window {
             at = parent;
         }
         self.switch(&at)
+    }
+
+    // ---- submit ----
+
+    /// The branches `submit` works on, parents first.
+    fn submit_set(&self, opts: &SubmitOptions) -> Result<Vec<String>> {
+        let set: HashSet<String> = if opts.all {
+            self.state.branches.iter().map(|b| b.name.clone()).collect()
+        } else {
+            let start = match &opts.branch {
+                Some(b) => {
+                    self.require_tracked(b)?;
+                    b.clone()
+                }
+                None => self.require_current()?,
+            };
+            if opts.branch.is_some() {
+                // The branch and what it sits on.
+                let mut set = HashSet::new();
+                let mut at = start;
+                loop {
+                    set.insert(at.clone());
+                    let parent = self.state.branches[self.find(&at).expect("tracked")]
+                        .parent
+                        .clone();
+                    if !self.tracks(&parent) {
+                        break;
+                    }
+                    at = parent;
+                }
+                set
+            } else {
+                // The whole stack the current branch is in.
+                let mut root = start;
+                loop {
+                    let parent = self.state.branches[self.find(&root).expect("tracked")]
+                        .parent
+                        .clone();
+                    if !self.tracks(&parent) {
+                        break;
+                    }
+                    root = parent;
+                }
+                self.upstack(&root)
+            }
+        };
+        Ok(self
+            .ordered()
+            .into_iter()
+            .map(|(n, _)| n)
+            .filter(|n| set.contains(n))
+            .collect())
+    }
+
+    /// Push this window's branches and open or update one PR per branch,
+    /// based on its parent branch (the trunk for the bottom one), with the
+    /// stack listed in every PR body.
+    pub fn submit(&mut self, opts: &SubmitOptions) -> Result<SubmitResult> {
+        let api = if opts.no_pr {
+            None
+        } else {
+            Some(Api::new(crate::github::token()?))
+        };
+        self.submit_with(opts, api.as_ref())
+    }
+
+    pub(crate) fn submit_with(
+        &mut self,
+        opts: &SubmitOptions,
+        api: Option<&Api>,
+    ) -> Result<SubmitResult> {
+        self.settle()?;
+        if self.state.remote.is_empty() {
+            return Err(stack_err(
+                "no_remote",
+                "this repository has no remote to push to",
+            ));
+        }
+        let remote = self.state.remote.clone();
+        let names = self.submit_set(opts)?;
+        let stale: Vec<String> = names
+            .iter()
+            .filter(|n| {
+                let b = &self.state.branches[self.find(n).expect("tracked")];
+                match (self.parent_tip(&b.parent).ok(), self.branch_tip(n)) {
+                    (Some(p), Some(t)) => p != b.parent_rev && !self.on_top(&b.parent_rev, &p, &t),
+                    _ => true,
+                }
+            })
+            .cloned()
+            .collect();
+        if !stale.is_empty() {
+            return Err(stack_err_with(
+                "needs_restack",
+                format!(
+                    "{} need{} a restack first (`agentvc stack restack`); nothing was pushed",
+                    stale.join(", "),
+                    if stale.len() == 1 { "s" } else { "" }
+                ),
+                json!({ "branches": stale }),
+            ));
+        }
+        // A parent from another window must be on the remote to be a PR base.
+        for n in &names {
+            let parent = &self.state.branches[self.find(n).expect("tracked")].parent;
+            if parent != &self.state.trunk && !self.tracks(parent) {
+                let found = self
+                    .repo
+                    .git(&["ls-remote", "--heads", &remote, parent], None)
+                    .unwrap_or_default();
+                if found.is_empty() {
+                    return Err(stack_err_with(
+                        "parent_not_pushed",
+                        format!("{n} sits on {parent}, which is not on {remote} yet; submit it from its window first"),
+                        json!({ "branch": n, "parent": parent }),
+                    ));
+                }
+            }
+        }
+        // Push what changed, all or nothing, with a lease on what we last
+        // saw on the remote so nobody else's push is overwritten.
+        let mut pushed = Vec::new();
+        let mut args: Vec<String> = vec!["push".into(), "--quiet".into(), "--atomic".into()];
+        let mut specs = Vec::new();
+        for n in &names {
+            let tip = self.branch_tip(n).expect("checked");
+            let tracking = self.repo.rev(&format!("refs/remotes/{remote}/{n}"));
+            if tracking.as_deref() == Some(tip.as_str()) {
+                continue;
+            }
+            if opts.force {
+                specs.push(format!("+refs/heads/{n}:refs/heads/{n}"));
+            } else {
+                args.push(format!(
+                    "--force-with-lease=refs/heads/{n}:{}",
+                    tracking.unwrap_or_default()
+                ));
+                specs.push(format!("refs/heads/{n}:refs/heads/{n}"));
+            }
+            pushed.push(n.clone());
+        }
+        if !specs.is_empty() {
+            args.push(remote.clone());
+            args.extend(specs);
+            let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+            if let Err(e) = self.repo.git(&refs, None) {
+                let stderr = match &e {
+                    Error::Git { stderr, .. } => stderr.clone(),
+                    _ => String::new(),
+                };
+                if stderr.contains("stale info") || stderr.contains("rejected") {
+                    return Err(stack_err_with(
+                        "push_rejected",
+                        format!("{remote} has changes on these branches that this window has not seen (another push, or the restack Action); nothing was pushed. Look with `git fetch {remote}` and `git log`, then `agentvc stack submit --force` to overwrite: {stderr}"),
+                        json!({ "branches": pushed }),
+                    ));
+                }
+                return Err(crate::github::push_error(e, &remote, &pushed.join(" ")));
+            }
+        }
+        let mut result = SubmitResult {
+            repo: String::new(),
+            pushed,
+            prs: Vec::new(),
+        };
+        let Some(api) = api else {
+            return Ok(result);
+        };
+        let repo = crate::github::repo_for(&self.repo.workdir, &remote, opts.repo.as_deref())?;
+        let owner = repo.split('/').next().unwrap_or_default().to_string();
+        result.repo = repo.clone();
+        let mut bodies: Vec<(u64, String)> = Vec::new();
+        for n in &names {
+            let i = self.find(n).expect("tracked");
+            let b = self.state.branches[i].clone();
+            let base_branch = b.parent.clone();
+            let mut existing: Option<serde_json::Value> = None;
+            if let Some(pr) = b.pr {
+                if let Ok(v) = api.call("GET", &format!("/repos/{repo}/pulls/{pr}"), None) {
+                    if v["state"] == "open" {
+                        existing = Some(v);
+                    }
+                }
+            }
+            if existing.is_none() {
+                let open = api.call(
+                    "GET",
+                    &format!("/repos/{repo}/pulls?state=open&head={owner}:{n}"),
+                    None,
+                )?;
+                existing = open.as_array().and_then(|a| a.first().cloned());
+            }
+            let (v, created) = match existing {
+                Some(v) => {
+                    let number = v["number"].as_u64().unwrap_or(0);
+                    let v = if v["base"]["ref"].as_str() != Some(base_branch.as_str()) {
+                        api.call(
+                            "PATCH",
+                            &format!("/repos/{repo}/pulls/{number}"),
+                            Some(json!({ "base": base_branch })),
+                        )?
+                    } else {
+                        v
+                    };
+                    (v, false)
+                }
+                None => {
+                    let tip = self.branch_tip(n).expect("checked");
+                    let commits = self.commits_between(&b.parent_rev, &tip)?;
+                    let title = commits
+                        .first()
+                        .map(|c| c.subject())
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or_else(|| n.clone());
+                    let mut body = String::new();
+                    for c in &commits {
+                        let rest = c.message.split_once('\n').map(|x| x.1.trim()).unwrap_or("");
+                        if commits.len() > 1 {
+                            body += &format!("- {}\n", c.subject());
+                        } else if !rest.is_empty() {
+                            body += rest;
+                            body.push('\n');
+                        }
+                    }
+                    let v = api.call(
+                        "POST",
+                        &format!("/repos/{repo}/pulls"),
+                        Some(json!({
+                            "title": title, "head": n, "base": base_branch,
+                            "body": body, "draft": opts.draft,
+                        })),
+                    )?;
+                    let number = v["number"].as_u64().unwrap_or(0);
+                    // Local `stack sync` keeps stacked branches current; the
+                    // restack Action would rewrite them under this window.
+                    let _ = api.call(
+                        "POST",
+                        &format!("/repos/{repo}/issues/{number}/labels"),
+                        Some(json!({ "labels": [crate::restack::SKIP_LABEL] })),
+                    );
+                    (v, true)
+                }
+            };
+            let number = v["number"].as_u64().unwrap_or(0);
+            self.state.branches[i].pr = Some(number);
+            bodies.push((number, v["body"].as_str().unwrap_or_default().to_string()));
+            result.prs.push(SubmittedPr {
+                branch: n.clone(),
+                number,
+                url: v["html_url"].as_str().unwrap_or_default().to_string(),
+                base: base_branch,
+                created,
+            });
+        }
+        self.save()?;
+        // Every PR lists the whole stack.
+        let depth: HashMap<String, usize> = self.ordered().into_iter().collect();
+        for (number, body) in bodies {
+            let mut section = format!(
+                "{STACK_BEGIN}\n**Stack** (bottom first, kept up to date by `agentvc stack submit`)\n\n"
+            );
+            for p in &result.prs {
+                section += &format!(
+                    "{}- #{} `{}`{}\n",
+                    "  ".repeat(depth.get(&p.branch).copied().unwrap_or(0)),
+                    p.number,
+                    p.branch,
+                    if p.number == number {
+                        " 👈 this PR"
+                    } else {
+                        ""
+                    }
+                );
+            }
+            section += &format!("\nOn `{}`.\n{STACK_END}", self.state.trunk);
+            let new_body = with_stack_section(&body, &section);
+            if new_body != body {
+                api.call(
+                    "PATCH",
+                    &format!("/repos/{repo}/pulls/{number}"),
+                    Some(json!({ "body": new_body })),
+                )?;
+            }
+        }
+        Ok(result)
+    }
+
+    // ---- give ----
+
+    /// Hand `branch` and the branches above it to the window at `to`. They
+    /// keep their parents; a parent staying here becomes a read-only base
+    /// there.
+    pub fn give(&mut self, branch: &str, to: &Path) -> Result<Vec<String>> {
+        self.settle()?;
+        self.require_tracked(branch)?;
+        let probe = HostRepo {
+            workdir: to.to_path_buf(),
+        };
+        let their_git = probe
+            .git(&["rev-parse", "--absolute-git-dir"], None)
+            .map_err(|_| Error::NotGitRepo(to.to_path_buf()))?;
+        let their_git = canon(Path::new(&their_git));
+        let their_common = canon(&to.join(probe.git(&["rev-parse", "--git-common-dir"], None)?));
+        if their_common != self.common_dir {
+            return Err(stack_err(
+                "other_repository",
+                format!("{} is a worktree of another repository", to.display()),
+            ));
+        }
+        if their_git == self.git_dir {
+            return Err(stack_err("same_window", "that is this window"));
+        }
+        let moving: Vec<String> = {
+            let set = self.upstack(branch);
+            self.ordered()
+                .into_iter()
+                .map(|(n, _)| n)
+                .filter(|n| set.contains(n))
+                .collect()
+        };
+        let mut theirs = read_state(&their_git)?.unwrap_or_else(|| State {
+            version: STATE_VERSION,
+            trunk: self.state.trunk.clone(),
+            remote: self.state.remote.clone(),
+            branches: Vec::new(),
+            pending: None,
+        });
+        for n in &moving {
+            let t = self.state.branches[self.find(n).expect("tracked")].clone();
+            theirs.branches.retain(|x| x.name != t.name);
+            theirs.branches.push(t);
+        }
+        write_state(&their_git, &theirs)?;
+        self.state.branches.retain(|b| !moving.contains(&b.name));
+        self.save()?;
+        Ok(moving)
     }
 
     // ---- log ----
@@ -1871,6 +2481,200 @@ mod tests {
         assert_eq!(w2.down().unwrap_err().code(), "at_bottom");
     }
 
+    /// A tiny in-memory GitHub: pulls (create, list by head, get, patch)
+    /// and labels.
+    fn fake_github() -> (
+        Api,
+        std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+    ) {
+        use std::io::{BufRead, BufReader, Read, Write};
+        use std::sync::{Arc, Mutex};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let prs: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
+        let store = prs.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                let mut parts = line.split_whitespace();
+                let method = parts.next().unwrap_or_default().to_string();
+                let path = parts.next().unwrap_or_default().to_string();
+                let mut len = 0usize;
+                loop {
+                    let mut h = String::new();
+                    reader.read_line(&mut h).unwrap();
+                    if h.trim().is_empty() {
+                        break;
+                    }
+                    if let Some(v) = h.to_ascii_lowercase().strip_prefix("content-length:") {
+                        len = v.trim().parse().unwrap_or(0);
+                    }
+                }
+                let mut body = vec![0u8; len];
+                reader.read_exact(&mut body).unwrap();
+                let req: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
+                let mut prs = store.lock().unwrap();
+                let num =
+                    |p: &str| -> Option<usize> { p.split('/').nth(5).and_then(|n| n.parse().ok()) };
+                let out = if method == "POST" && path == "/repos/o/r/pulls" {
+                    let n = prs.len() + 1;
+                    let pr = json!({
+                        "number": n, "html_url": format!("https://github.com/o/r/pull/{n}"),
+                        "state": "open", "merged": false, "body": req["body"],
+                        "title": req["title"], "head": { "ref": req["head"], "sha": "" },
+                        "base": { "ref": req["base"] }, "labels": [],
+                    });
+                    prs.push(pr.clone());
+                    pr
+                } else if method == "GET" && path.starts_with("/repos/o/r/pulls?") {
+                    let head = path.split("head=o:").nth(1).unwrap_or_default().to_string();
+                    json!(prs
+                        .iter()
+                        .filter(|p| p["head"]["ref"] == head.as_str() && p["state"] == "open")
+                        .cloned()
+                        .collect::<Vec<_>>())
+                } else if path.starts_with("/repos/o/r/pulls/") {
+                    let i = num(&path).unwrap() - 1;
+                    if method == "PATCH" {
+                        if let Some(b) = req["base"].as_str() {
+                            prs[i]["base"]["ref"] = json!(b);
+                        }
+                        if let Some(b) = req["body"].as_str() {
+                            prs[i]["body"] = json!(b);
+                        }
+                    }
+                    prs[i].clone()
+                } else if path.contains("/labels") {
+                    let i = num(&path).unwrap() - 1;
+                    prs[i]["labels"] = req["labels"].clone();
+                    json!([])
+                } else {
+                    json!({ "message": "not found" })
+                };
+                let text = out.to_string();
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{text}",
+                    text.len()
+                );
+            }
+        });
+        let mut api = Api::new("t".into());
+        api.set_base(&base);
+        (api, prs)
+    }
+
+    #[test]
+    fn submit_opens_one_pr_per_branch_on_its_parent() {
+        let f = setup();
+        let mut w = Window::open(&f.w1).unwrap();
+        for i in 1..=3 {
+            fs::write(f.w1.join(format!("s{i}.txt")), "x\n").unwrap();
+            w.create(
+                Some(&format!("s{i}")),
+                Some(&format!("Step {i}\n\nWhy {i}.")),
+                true,
+            )
+            .unwrap();
+        }
+        let (api, prs) = fake_github();
+        let opts = SubmitOptions {
+            repo: Some("o/r".into()),
+            ..Default::default()
+        };
+        let r = w.submit_with(&opts, Some(&api)).unwrap();
+        assert_eq!(r.pushed, vec!["s1", "s2", "s3"]);
+        let bases: Vec<_> = r.prs.iter().map(|p| (p.number, p.base.as_str())).collect();
+        assert_eq!(bases, vec![(1, "main"), (2, "s1"), (3, "s2")]);
+        {
+            let prs = prs.lock().unwrap();
+            assert_eq!(prs[0]["title"], "Step 1");
+            assert_eq!(prs[0]["labels"], json!([crate::restack::SKIP_LABEL]));
+            let body = prs[1]["body"].as_str().unwrap();
+            assert!(body.contains("- #2 `s2` 👈 this PR"), "{body}");
+            assert!(body.contains("- #1 `s1`\n"), "{body}");
+            assert!(body.contains("Why 2."), "{body}");
+        }
+        assert_eq!(git(&f.origin, &["rev-parse", "s3"]), rev(&f.w1, "s3"));
+        assert_eq!(w.state.branches[2].pr, Some(3));
+
+        // Amend the middle: only s2 and s3 are pushed again, no new PRs.
+        git(&f.w1, &["switch", "-q", "s2"]);
+        fs::write(f.w1.join("s2.txt"), "y\n").unwrap();
+        w.modify(None, true, false, false).unwrap();
+        let r = w.submit_with(&opts, Some(&api)).unwrap();
+        assert_eq!(r.pushed, vec!["s2", "s3"]);
+        assert!(r.prs.iter().all(|p| !p.created));
+        assert_eq!(prs.lock().unwrap().len(), 3);
+
+        // Someone else pushed to s3: the lease refuses, nothing is pushed.
+        let tmp = f.origin.parent().unwrap().join("other");
+        git(
+            f.origin.parent().unwrap(),
+            &[
+                "clone",
+                "-q",
+                "-b",
+                "s3",
+                f.origin.to_str().unwrap(),
+                tmp.to_str().unwrap(),
+            ],
+        );
+        commit_file(&tmp, "z.txt", "z\n", "theirs");
+        git(&tmp, &["push", "-q", "origin", "s3"]);
+        git(&f.w1, &["switch", "-q", "s3"]);
+        fs::write(f.w1.join("s3.txt"), "mine\n").unwrap();
+        w.modify(None, true, false, false).unwrap();
+        let e = w.submit_with(&opts, Some(&api)).unwrap_err();
+        assert_eq!(e.code(), "push_rejected");
+    }
+
+    #[test]
+    fn give_moves_a_branch_and_its_upstack_to_another_window() {
+        let f = setup();
+        let mut w = Window::open(&f.w1).unwrap();
+        for n in ["g1", "g2", "g3"] {
+            fs::write(f.w1.join(format!("{n}.txt")), "x\n").unwrap();
+            w.create(Some(n), Some(n), true).unwrap();
+        }
+        git(&f.w1, &["switch", "-q", "g1"]);
+        let moved = w.give("g2", &f.w2).unwrap();
+        assert_eq!(moved, vec!["g2", "g3"]);
+        assert_eq!(w.state.branches.len(), 1);
+        let w2 = Window::open(&f.w2).unwrap();
+        let l = w2.log(false).unwrap();
+        assert_eq!(l.branches[0].name, "g2");
+        assert_eq!(l.branches[0].parent_kind, ParentKind::OtherWindow);
+        assert_eq!(l.branches[1].name, "g3");
+        assert_eq!(w.give("g1", &f.w1).unwrap_err().code(), "same_window");
+    }
+
+    #[test]
+    fn move_onto_takes_only_the_branch_commits() {
+        let f = setup();
+        let mut w = Window::open(&f.w1).unwrap();
+        for n in ["x", "a"] {
+            fs::write(f.w1.join(format!("{n}.txt")), "x\n").unwrap();
+            w.create(Some(n), Some(n), true).unwrap();
+        }
+        git(&f.w1, &["switch", "-q", "--detach", "origin/main"]);
+        fs::write(f.w1.join("y.txt"), "y\n").unwrap();
+        w.create(Some("y"), Some("y"), true).unwrap();
+        // a sits on x; move it onto y: x's commit must not come along.
+        let r = w.move_onto("a", "y", false).unwrap();
+        assert_eq!(r.updated.len(), 1);
+        assert_eq!(rev(&f.w1, "a~1"), rev(&f.w1, "y"));
+        let files = git(&f.w1, &["ls-tree", "--name-only", "a"]);
+        assert!(files.contains("a.txt") && files.contains("y.txt") && !files.contains("x.txt"));
+        assert_eq!(w.move_onto("x", "x", false).unwrap_err().code(), "bad_move");
+        // Back onto the trunk.
+        w.move_onto("a", "origin/main", false).unwrap();
+        assert_eq!(rev(&f.w1, "a~1"), rev(&f.w1, "origin/main"));
+    }
+
     #[test]
     fn a_parent_reset_backwards_drops_its_commit_from_children() {
         let f = setup();
@@ -1887,5 +2691,50 @@ mod tests {
         assert_eq!(r.updated.len(), 1);
         assert_eq!(rev(&f.w1, "c~1"), rev(&f.w1, "p"));
         assert!(!git(&f.w1, &["ls-tree", "--name-only", "c"]).contains("p2.txt"));
+    }
+
+    #[test]
+    fn rename_delete_and_squash_keep_the_stack_whole() {
+        let f = setup();
+        let mut w = Window::open(&f.w1).unwrap();
+        for n in ["d1", "d2", "d3"] {
+            fs::write(f.w1.join(format!("{n}.txt")), "x\n").unwrap();
+            w.create(Some(n), Some(n), true).unwrap();
+        }
+        // Two more commits on d3, then squash them into one.
+        for i in 0..2 {
+            fs::write(f.w1.join(format!("d3-{i}.txt")), "y\n").unwrap();
+            w.modify(Some("more"), true, true, false).unwrap();
+        }
+        let (_, r) = w.squash(None, false).unwrap();
+        assert!(r.updated.is_empty());
+        assert_eq!(rev(&f.w1, "d3~1"), rev(&f.w1, "d2"));
+        assert_eq!(git(&f.w1, &["log", "-1", "--format=%s", "d3"]), "d3");
+        assert!(git(&f.w1, &["ls-tree", "--name-only", "d3"]).contains("d3-1.txt"));
+
+        w.rename("d2", "middle").unwrap();
+        assert_eq!(
+            w.state
+                .branches
+                .iter()
+                .find(|b| b.name == "d3")
+                .unwrap()
+                .parent,
+            "middle"
+        );
+        assert!(w
+            .log(false)
+            .unwrap()
+            .branches
+            .iter()
+            .all(|b| !b.needs_restack));
+
+        // Deleting the middle drops its commit from d3.
+        let r = w.delete("middle", false).unwrap();
+        assert_eq!(r.updated.len(), 1);
+        assert_eq!(rev(&f.w1, "d3~1"), rev(&f.w1, "d1"));
+        let files = git(&f.w1, &["ls-tree", "--name-only", "d3"]);
+        assert!(!files.contains("d2.txt") && files.contains("d3.txt"));
+        assert_eq!(w.state.branches.len(), 2);
     }
 }
