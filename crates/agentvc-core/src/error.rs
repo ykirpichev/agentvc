@@ -103,6 +103,16 @@ pub enum Error {
     BundleTooLarge(usize),
     #[error("the space was not saved: push: {git}; PR comment: {pr}")]
     NotSaved { git: String, pr: String },
+    #[error("the repository's {hook} hook failed{}; nothing was committed: {output}", exit_code.map(|c| format!(" (exit {c})")).unwrap_or_default())]
+    HookFailed {
+        hook: String,
+        exit_code: Option<i32>,
+        output: String,
+    },
+    #[error("the host checkout is on a detached HEAD; pass --onto <branch>")]
+    DetachedHead,
+    #[error("cannot run git hooks in the view of a{id}: {reason}")]
+    NoViewGit { id: i64, reason: String },
     #[error("nothing to undo")]
     NothingToUndo,
     #[error("operation {op} ({kind}) cannot be undone")]
@@ -186,6 +196,9 @@ impl Error {
             Error::GcBusy => "gc_busy",
             Error::BundleTooLarge(_) => "bundle_too_large",
             Error::NotSaved { .. } => "not_saved",
+            Error::HookFailed { .. } => "hook_failed",
+            Error::DetachedHead => "detached_head",
+            Error::NoViewGit { .. } => "no_view_git",
             Error::NothingToUndo => "nothing_to_undo",
             Error::NotUndoable { .. } => "not_undoable",
             Error::AlreadyUndone { .. } => "already_undone",
@@ -216,6 +229,13 @@ impl Error {
                 "onto": onto,
                 "paths": paths,
             })),
+            Error::HookFailed {
+                hook,
+                exit_code,
+                output,
+            } => {
+                Some(serde_json::json!({ "hook": hook, "exit_code": exit_code, "output": output }))
+            }
             Error::AlreadyUndone { op, by } => Some(serde_json::json!({ "op": op, "by": by })),
             Error::UndoConflict { op, .. } => Some(serde_json::json!({ "op": op })),
             Error::DirtyWorktree { paths } => Some(serde_json::json!({ "paths": paths })),

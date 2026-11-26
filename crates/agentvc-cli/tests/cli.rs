@@ -1432,6 +1432,51 @@ fn git_works_in_views_and_commits_become_snapshots() {
 }
 
 #[test]
+fn land_with_verify_reports_hook_failures_then_lands() {
+    let tmp = tempdir();
+    let w = tmp.path();
+    git(w, &["init", "-q", "-b", "main"]);
+    fs::write(w.join("lib.rs"), "pub fn f() {}\n").unwrap();
+    git(w, &["add", "-A"]);
+    git(w, &["commit", "-q", "-m", "base"]);
+    agentvc(w, &["init", "--no-prepare"]);
+    agentvc(w, &["task", "new", "edit lib"]);
+    let fork = agentvc(w, &["fork", "--task", "t1", "--actor", "agent:x"]);
+    let view = std::path::PathBuf::from(fork["fork"]["attempt"]["view_path"].as_str().unwrap());
+    fs::write(view.join("lib.rs"), "pub fn f() -> u8 { 2 }\n").unwrap();
+    let hook = w.join(".git/hooks/pre-commit");
+    fs::write(&hook, "#!/bin/sh\necho 'lint: bad style' >&2\nexit 1\n").unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    let before = git(w, &["rev-parse", "main"]);
+
+    let v = agentvc(w, &["land", "a2", "--verify"]);
+    assert_eq!(v["error"]["code"], "hook_failed", "{v}");
+    assert_eq!(v["error"]["hook"], "pre-commit");
+    assert_eq!(v["error"]["exit_code"], 1);
+    assert!(v["error"]["output"]
+        .as_str()
+        .unwrap()
+        .contains("lint: bad style"));
+    assert_eq!(git(w, &["rev-parse", "main"]), before);
+
+    let v = agentvc(w, &["land", "a2"]);
+    assert_eq!(v["ok"], true, "{v}");
+    assert_eq!(v["land"]["branch"], "main");
+    assert_eq!(v["land"]["previous"], before.as_str());
+    assert_eq!(
+        git(w, &["rev-parse", "main"]),
+        v["land"]["commit"].as_str().unwrap()
+    );
+    assert_eq!(
+        fs::read_to_string(w.join("lib.rs")).unwrap(),
+        "pub fn f() -> u8 { 2 }\n"
+    );
+    let st = agentvc(w, &["status", "a2"]);
+    assert_eq!(st["status"]["landed"]["branch"], "main");
+}
+
+#[test]
 fn fork_from_worktree_and_apply_round_trip() {
     let tmp = tempdir();
     let w = tmp.path();

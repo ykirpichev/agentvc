@@ -27,6 +27,8 @@ pub const PR_TRAILER: &str = "pr.trailer";
 pub const PR_BODY_PREFIX: &str = "pr.body-prefix";
 pub const GIT_CAPTURE_COMMITS: &str = crate::viewgit::CAPTURE_COMMITS;
 
+pub const EXPORT_VERIFY: &str = "export.verify";
+
 pub const GC_AUTO: &str = "gc.auto";
 pub const GC_KEEP_ABANDONED: &str = "gc.keepAbandonedDays";
 pub const GC_KEEP_VIEWS: &str = "gc.keepViewsDays";
@@ -57,6 +59,12 @@ pub const KEYS: &[Key] = &[
         about: "file whose text goes above the generated PR body",
     },
     Key {
+        name: EXPORT_VERIFY,
+        multi: false,
+        env: Some("AGENTVC_EXPORT_VERIFY"),
+        about: "run the repo's pre-commit and commit-msg hooks in the view before export, pr and land write a commit (default false)",
+    },
+    Key {
         name: GC_AUTO,
         multi: false,
         env: None,
@@ -81,6 +89,14 @@ pub const KEYS: &[Key] = &[
         about: "record `git commit` in a view as a snapshot (default true; false leaves host git config alone)",
     },
 ];
+
+/// Whether a setting's value means on (`true`, `1`, `yes`, `on`).
+pub fn is_true(v: &str) -> bool {
+    matches!(
+        v.trim().to_ascii_lowercase().as_str(),
+        "true" | "1" | "yes" | "on"
+    )
+}
 
 pub fn key(name: &str) -> Result<&'static Key> {
     KEYS.iter()

@@ -384,6 +384,14 @@ enum Cmd {
         /// Extra commit trailer, as "Key: value". Repeatable.
         #[arg(long = "trailer", value_name = "KEY: VALUE")]
         trailers: Vec<String>,
+        /// Run the repository's pre-commit and commit-msg hooks in the
+        /// attempt's view first; a failing hook stops it (code
+        /// `hook_failed`). Default: `agentvc config export.verify`.
+        #[arg(long, conflicts_with = "no_verify")]
+        verify: bool,
+        /// Do not run the hooks, even with `export.verify` on.
+        #[arg(long)]
+        no_verify: bool,
         /// One commit even if the attempt has a story.
         #[arg(long)]
         squash: bool,
@@ -391,6 +399,40 @@ enum Cmd {
         /// changes below the top.
         #[arg(long, conflicts_with = "squash")]
         stack: bool,
+    },
+    /// Put an attempt on a local branch, without GitHub: rebase it onto the
+    /// branch if the branch moved (a conflict fails with `conflict` and
+    /// changes nothing), then fast-forward the branch to one clean commit
+    /// (default), or write a merge commit (`--merge`). Defaults to the
+    /// checked-out branch, whose working tree moves along; local edits the
+    /// move would overwrite fail with `checkout_dirty`. Then `git push`
+    /// works with any remote.
+    Land {
+        attempt: String,
+        /// Local branch to land on. Defaults to the checked-out branch.
+        #[arg(long)]
+        onto: Option<String>,
+        /// One commit on top of the branch (the default).
+        #[arg(long, conflicts_with = "merge")]
+        squash: bool,
+        /// A merge commit of the branch and the attempt's own commit.
+        #[arg(long)]
+        merge: bool,
+        /// Commit message. Defaults to the task goal.
+        #[arg(long, short = 'm')]
+        message: Option<String>,
+        /// Extra commit trailer, as "Key: value". Repeatable; added to those
+        /// in `agentvc config pr.trailer`.
+        #[arg(long = "trailer", value_name = "KEY: VALUE")]
+        trailers: Vec<String>,
+        /// Run the repository's pre-commit and commit-msg hooks in the
+        /// attempt's view first; a failing hook stops it (code
+        /// `hook_failed`). Default: `agentvc config export.verify`.
+        #[arg(long, conflicts_with = "no_verify")]
+        verify: bool,
+        /// Do not run the hooks, even with `export.verify` on.
+        #[arg(long)]
+        no_verify: bool,
     },
     /// Rebase an attempt onto a newer commit of the host repo, so `export`
     /// and `pr` carry only its own changes. Three-way merges the attempt's
@@ -489,6 +531,14 @@ enum Cmd {
         /// Do not sync the space to the remote afterwards.
         #[arg(long)]
         no_sync: bool,
+        /// Run the repository's pre-commit and commit-msg hooks in the
+        /// attempt's view first; a failing hook stops it (code
+        /// `hook_failed`). Default: `agentvc config export.verify`.
+        #[arg(long, conflicts_with = "no_verify")]
+        verify: bool,
+        /// Do not run the hooks, even with `export.verify` on.
+        #[arg(long)]
+        no_verify: bool,
     },
     /// Read or change this space's settings. With no key, lists them all.
     ///
@@ -750,6 +800,15 @@ fn parse_id(s: &str, prefix: char, kind: &'static str) -> anyhow::Result<i64> {
         }
         .into()
     })
+}
+
+/// `--verify` / `--no-verify`: `None` follows `agentvc config export.verify`.
+fn verify_flag(verify: bool, no_verify: bool) -> Option<bool> {
+    match (verify, no_verify) {
+        (true, _) => Some(true),
+        (_, true) => Some(false),
+        _ => None,
+    }
 }
 
 fn attempt_id(s: &str) -> anyhow::Result<i64> {
@@ -1948,6 +2007,8 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
             base,
             force,
             trailers,
+            verify,
+            no_verify,
             squash,
             stack,
         } => {
@@ -1957,6 +2018,7 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
                 message,
                 force,
                 trailers,
+                verify: verify_flag(verify, no_verify),
                 squash,
                 stack,
             };
@@ -1975,6 +2037,59 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
                 ) + &story_commits_text(&r.story),
                 json: json!({ "export": r }),
             }
+        }
+        Cmd::Land {
+            attempt,
+            onto,
+            squash: _,
+            merge,
+            message,
+            trailers,
+            verify,
+            no_verify,
+        } => {
+            use agentvc_core::land::{LandMode, LandOptions};
+            let r = agentvc_core::land::land(
+                &space,
+                attempt_id(&attempt)?,
+                &LandOptions {
+                    onto,
+                    mode: if merge {
+                        LandMode::Merge
+                    } else {
+                        LandMode::Squash
+                    },
+                    message,
+                    trailers,
+                    verify: verify_flag(verify, no_verify),
+                    actor: None,
+                },
+            )?;
+            let mut text = format!(
+                "a{} landed on {} at {} ({}, was {}){}",
+                r.attempt,
+                r.branch,
+                &r.commit[..12],
+                if r.mode == LandMode::Merge {
+                    "merge"
+                } else {
+                    "squash"
+                },
+                &r.previous[..12],
+                if r.rebased { ", rebased first" } else { "" }
+            );
+            if r.checkout_updated {
+                text += "\ncheckout moved along";
+            }
+            if !r.hooks.is_empty() {
+                text += &format!("\nhooks passed: {}", r.hooks.join(", "));
+            }
+            let mut out = Out {
+                text,
+                json: json!({ "land": r }),
+            };
+            add_sync(&mut out, agentvc_core::github::auto_save(&space));
+            out
         }
         Cmd::Rebase {
             attempt,
@@ -2092,6 +2207,8 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
             squash,
             stack,
             no_sync,
+            verify,
+            no_verify,
         } => {
             let body_prefix = match body_prefix {
                 Some(p) if p.as_os_str() == "-" => {
@@ -2115,6 +2232,7 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
                 force,
                 body_prefix,
                 trailers,
+                verify: verify_flag(verify, no_verify),
                 squash,
                 stack,
             };
@@ -2400,6 +2518,13 @@ fn attempt_status_out(st: agentvc_core::status::AttemptStatus) -> Out {
     }
     if let Some(u) = &st.pr_url {
         t += &format!("pr       {u}\n");
+    }
+    if let Some(l) = &st.landed {
+        t += &format!(
+            "landed   on {} at {}\n",
+            l.branch,
+            &l.commit[..12.min(l.commit.len())]
+        );
     }
     Out {
         text: t,

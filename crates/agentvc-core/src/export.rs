@@ -40,6 +40,10 @@ pub struct ExportOptions {
     pub force: bool,
     /// Extra `Key: value` trailers for the commit message, after agentvc's.
     pub trailers: Vec<String>,
+    /// Run the repository's `pre-commit` and `commit-msg` hooks in the
+    /// attempt's view first (see [`crate::land::verify`]). `None` follows
+    /// `agentvc config export.verify` (default off).
+    pub verify: Option<bool>,
     /// Export one commit even when the attempt has a story (#21).
     pub squash: bool,
     /// With a story, also point a branch `<branch>-<k>` at each change but
@@ -73,6 +77,8 @@ pub struct ExportResult {
     /// and working tree were moved to the new commit too.
     pub checkout_updated: bool,
     pub objects_copied: usize,
+    /// Git hooks that ran and passed before the commit was written.
+    pub hooks: Vec<String>,
     /// The story's commits, oldest first, when the attempt was exported as a
     /// story; the last one is `commit`.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -427,6 +433,17 @@ pub fn export(space: &Space, attempt_id: i64, opts: &ExportOptions) -> Result<Ex
         repo.git_env(&args, Some(message), &env)
     };
 
+    let verify = match opts.verify {
+        Some(v) => v,
+        None => crate::config::is_true(
+            space
+                .config(crate::config::EXPORT_VERIFY)?
+                .as_deref()
+                .unwrap_or("false"),
+        ),
+    };
+    let mut hooks = Vec::new();
+
     let story = if opts.squash {
         None
     } else {
@@ -442,6 +459,13 @@ pub fn export(space: &Space, attempt_id: i64, opts: &ExportOptions) -> Result<Ex
                 opts.message.as_deref(),
                 &opts.trailers,
             )?;
+            let message = if verify {
+                let (m, h) = crate::land::verify(space, &attempt, &snapshot, message)?;
+                hooks = h;
+                m
+            } else {
+                message
+            };
             let commit = commit_tree(&snapshot.tree, parent.as_ref(), &message)?;
             (parent, commit)
         }
@@ -458,10 +482,22 @@ pub fn export(space: &Space, attempt_id: i64, opts: &ExportOptions) -> Result<Ex
             let parent = Some(story.base_commit.clone());
             let mut prev = parent.clone();
             let n = story.changes.len();
-            for c in &story.changes {
+            let mut messages = story
+                .changes
+                .iter()
+                .map(|c| story_message(space, &attempt, c, n, &opts.trailers))
+                .collect::<Result<Vec<_>>>()?;
+            // Hooks check the story's final tree, which is the snapshot,
+            // and the top commit's message.
+            if verify {
+                let last = messages.pop().expect("a story has changes");
+                let (m, h) = crate::land::verify(space, &attempt, &snapshot, last)?;
+                messages.push(m);
+                hooks = h;
+            }
+            for (c, message) in story.changes.iter().zip(messages) {
                 objects_copied +=
                     copy_tree_objects(space, &Oid::from_hex(&c.tree)?, &repo.objects_dir()?)?;
-                let message = story_message(space, &attempt, c, n, &opts.trailers)?;
                 let commit = commit_tree(&c.tree, prev.as_ref(), &message)?;
                 prev = Some(commit.clone());
                 story_commits.push(StoryCommit {
@@ -482,36 +518,15 @@ pub fn export(space: &Space, attempt_id: i64, opts: &ExportOptions) -> Result<Ex
             return Err(Error::BranchExists(opts.branch.clone()));
         }
     }
-    // A checked-out branch (a cloud thread's own branch) carries its index
-    // and working tree along, so the checkout does not look dirty. The
-    // two-tree read-tree refuses, changing nothing, when local edits would
-    // be overwritten.
-    if checked_out {
-        let old = existing.as_deref().expect("checked out branch exists");
-        repo.git(&["read-tree", "-m", "-u", old, &commit], None)
-            .map_err(|e| match e {
-                Error::Git { stderr, .. } => Error::CheckoutDirty {
-                    branch: opts.branch.clone(),
-                    stderr,
-                },
-                other => other,
-            })?;
-    }
-
-    // Compare-and-swap: creation fails if the branch appeared meanwhile, and a
-    // move fails if it changed since we looked.
-    let old = existing.clone().unwrap_or_else(|| ZERO_OID.to_string());
     let reflog = format!("agentvc export a{attempt_id}");
-    if let Err(e) = repo.git(
-        &["update-ref", "-m", &reflog, &refname, &commit, &old],
-        None,
-    ) {
-        if checked_out {
-            // Put the checkout back where the branch still is.
-            let _ = repo.git(&["read-tree", "-m", "-u", &commit, &old], None);
-        }
-        return Err(e);
-    }
+    move_branch(
+        &repo,
+        &opts.branch,
+        existing.as_deref(),
+        &commit,
+        checked_out,
+        &reflog,
+    )?;
 
     // Stacked branches: one per change below the top, which is `branch`.
     if opts.stack {
@@ -559,8 +574,139 @@ pub fn export(space: &Space, attempt_id: i64, opts: &ExportOptions) -> Result<Ex
         replaced: existing,
         checkout_updated: checked_out,
         objects_copied,
+        hooks,
         story: story_commits,
     })
+}
+
+/// A commit written for an attempt, not yet on any branch.
+pub(crate) struct Made {
+    pub snapshot: Snapshot,
+    pub parent: Option<String>,
+    pub commit: String,
+    pub hooks: Vec<String>,
+}
+
+/// Write the commit for an attempt's head (snapshotting an open view
+/// first): its tree on `opts.base` or the commit the state is based on,
+/// after the repository's hooks when verifying.
+pub(crate) fn make_commit(
+    space: &Space,
+    repo: &HostRepo,
+    attempt: &Attempt,
+    opts: &ExportOptions,
+) -> Result<Made> {
+    let attempt_id = attempt.id;
+    let base = match &opts.base {
+        Some(b) => Some(repo.rev(b).ok_or_else(|| Error::NotFound {
+            kind: "git revision",
+            id: b.clone(),
+        })?),
+        None => None,
+    };
+
+    let snapshot = if attempt.status.is_open() && space.ensure_view(attempt)? {
+        space.snapshot(attempt_id, "export", None)?.snapshot
+    } else {
+        space.head_snapshot(attempt_id)?
+    };
+    // By default, parent on the commit this state is based on: the one it was
+    // last rebased onto, else the host HEAD recorded at init.
+    let parent = match base {
+        Some(b) => Some(b),
+        None => space
+            .git_base_commit(&snapshot)?
+            .and_then(|h| repo.rev(&h))
+            .or_else(|| repo.rev("HEAD")),
+    };
+    let tree = snapshot.tree_oid()?;
+    copy_tree_objects(space, &tree, &repo.objects_dir()?)?;
+
+    let message = commit_message(
+        space,
+        attempt,
+        &snapshot,
+        opts.message.as_deref(),
+        &opts.trailers,
+    )?;
+    let verify = match opts.verify {
+        Some(v) => v,
+        None => crate::config::is_true(
+            space
+                .config(crate::config::EXPORT_VERIFY)?
+                .as_deref()
+                .unwrap_or("false"),
+        ),
+    };
+    let (message, hooks) = if verify {
+        crate::land::verify(space, attempt, &snapshot, message)?
+    } else {
+        (message, Vec::new())
+    };
+    let mut args = vec!["commit-tree", snapshot.tree.as_str()];
+    if let Some(p) = &parent {
+        args.extend(["-p", p.as_str()]);
+    }
+    args.extend(["-F", "-"]);
+    // Commit as the user when git knows who that is; otherwise as agentvc,
+    // so export never fails on a fresh machine.
+    let mut env = Vec::new();
+    if repo.git(&["config", "user.email"], None).is_err() {
+        env.extend([
+            ("GIT_AUTHOR_NAME", "agentvc"),
+            ("GIT_AUTHOR_EMAIL", "agentvc@localhost"),
+            ("GIT_COMMITTER_NAME", "agentvc"),
+            ("GIT_COMMITTER_EMAIL", "agentvc@localhost"),
+        ]);
+    }
+    let commit = repo.git_env(&args, Some(&message), &env)?;
+    Ok(Made {
+        snapshot,
+        parent,
+        commit,
+        hooks,
+    })
+}
+
+/// Point `branch` at `new`, compare-and-swap against `old` (`None`: the
+/// branch must not exist). A checked-out branch carries its index and
+/// working tree along; that refuses with `checkout_dirty`, changing nothing,
+/// when local edits would be overwritten.
+pub(crate) fn move_branch(
+    repo: &HostRepo,
+    branch: &str,
+    old: Option<&str>,
+    new: &str,
+    checked_out: bool,
+    reflog: &str,
+) -> Result<()> {
+    let refname = format!("refs/heads/{branch}");
+    // A checked-out branch (a cloud thread's own branch) carries its index
+    // and working tree along, so the checkout does not look dirty. The
+    // two-tree read-tree refuses, changing nothing, when local edits would
+    // be overwritten.
+    if checked_out {
+        let old = old.expect("checked out branch exists");
+        repo.git(&["read-tree", "-m", "-u", old, new], None)
+            .map_err(|e| match e {
+                Error::Git { stderr, .. } => Error::CheckoutDirty {
+                    branch: branch.to_string(),
+                    stderr,
+                },
+                other => other,
+            })?;
+    }
+    // Compare-and-swap: creation fails if the branch appeared meanwhile, and a
+    // move fails if it changed since we looked.
+    let expect = old.unwrap_or(ZERO_OID);
+    if let Err(e) = repo.git(&["update-ref", "-m", reflog, &refname, new, expect], None) {
+        if checked_out {
+            // Put the checkout back where the branch still is.
+            let _ = repo.git(&["read-tree", "-m", "-u", new, expect], None);
+        }
+        return Err(e);
+    }
+    Ok(())
 }
 
 const EXPORT_COLS: &str =

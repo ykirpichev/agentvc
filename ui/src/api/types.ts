@@ -84,6 +84,18 @@ export interface AttemptDetail {
   git_base: GitBase | null
   /** The git commit the head is based on (what `agentvc pr` parents on). */
   base_commit: string | null
+  /** Its pull request, if `agentvc pr` opened one. */
+  pr_url?: string | null
+  /** The local branch `agentvc land` put it on. */
+  landed?: Landing | null
+}
+
+/** Where `agentvc land` put an attempt. */
+export interface Landing {
+  branch: string
+  commit: string
+  mode: string
+  created_at: Timestamp
 }
 
 /** A commit an attempt was rebased onto. */

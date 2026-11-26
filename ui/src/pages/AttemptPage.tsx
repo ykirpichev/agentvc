@@ -136,6 +136,25 @@ function AttemptView({ detail }: { detail: AttemptDetail }) {
                 </dd>
               </div>
             )}
+            {detail.pr_url && (
+              <div>
+                <dt>Pull request</dt>
+                <dd>
+                  <a href={detail.pr_url} target="_blank" rel="noreferrer">
+                    {detail.pr_url.replace(/^https:\/\/github\.com\//, '')}
+                  </a>
+                </dd>
+              </div>
+            )}
+            {detail.landed && (
+              <div>
+                <dt>Landed</dt>
+                <dd title={detail.landed.commit}>
+                  on <code>{detail.landed.branch}</code> at{' '}
+                  <code>{detail.landed.commit.slice(0, 7)}</code>
+                </dd>
+              </div>
+            )}
           </>
         }
       />

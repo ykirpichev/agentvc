@@ -602,6 +602,7 @@ mod tests {
             replaced: None,
             checkout_updated: false,
             objects_copied: 0,
+            hooks: vec![],
             story: Vec::new(),
         };
         let body = crate::github::pr_body(&space, &winner, &exp).unwrap();
