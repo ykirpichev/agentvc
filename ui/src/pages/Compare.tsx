@@ -10,6 +10,7 @@ import { StatChips } from '../components/StatChips'
 import { useHotkeys } from '../keyboard/hotkeys'
 import { align, lineEdits, splitLines, type Block, type Line } from '../lib/align'
 import { actorName, plural, timeAgo } from '../lib/format'
+import { versionName } from '../core/words'
 
 /** Unchanged lines kept around each change. */
 const CONTEXT = 3
@@ -36,7 +37,7 @@ export function Compare() {
   )
 }
 
-function CompareView({ data }: { data: CompareResponse }) {
+export function CompareView({ data, embedded }: { data: CompareResponse; embedded?: boolean }) {
   const navigate = useNavigate()
   const cols = data.columns
   const n = cols.length
@@ -105,6 +106,7 @@ function CompareView({ data }: { data: CompareResponse }) {
   const gridStyle = { '--cols': n } as React.CSSProperties
   return (
     <>
+      {!embedded && (<>
       <Link to={taskId ? `/tasks/${taskId}` : '/tasks'} className="back">
         <Icon name="back" size={14} /> {taskId ? `Task t${taskId}` : 'Tasks'}
       </Link>
@@ -118,9 +120,10 @@ function CompareView({ data }: { data: CompareResponse }) {
         title={task.data?.task.goal ?? `Compare ${cols.map((c) => `a${c.attempt.id}`).join(' · ')}`}
       >
         <span className="muted hint-line">
-          <Kbd keys="h" /> <Kbd keys="l" /> column · <Kbd keys="j" /> <Kbd keys="k" /> file · <Kbd keys="p" /> pick
+          <Kbd keys="h" /> <Kbd keys="l" /> column · <Kbd keys="j" /> <Kbd keys="k" /> file · <Kbd keys="p" /> choose
         </span>
       </PageHeader>
+      </>)}
 
       <div className="cmp-heads" style={gridStyle}>
         {cols.map((c, i) => (
@@ -303,14 +306,14 @@ function FileHeader({
                 )}
               </>
             )}
-            <span className="muted cell-col">a{cols[i]!.attempt.id}</span>
+            <span className="muted cell-col">{versionName(cols[i]!.attempt)}</span>
             {canTake && i !== focus && c.kind !== 'unchanged' && (
               <button
                 className="take-file"
                 onClick={() => onTake(i)}
-                title={`Take this file's change from a${cols[i]!.attempt.id} into a${cols[focus]!.attempt.id} (agentvc take)`}
+                title={`Copy this file's change from ${versionName(cols[i]!.attempt)} into ${versionName(cols[focus]!.attempt)} (agentvc take)`}
               >
-                Take into a{cols[focus]!.attempt.id}
+                Use in {versionName(cols[focus]!.attempt)}
               </button>
             )}
           </span>

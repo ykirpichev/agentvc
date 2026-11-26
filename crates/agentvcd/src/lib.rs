@@ -26,6 +26,7 @@ mod api;
 mod assets;
 mod conflicts;
 mod events;
+mod graph;
 mod history;
 mod live;
 mod rebase;

@@ -8,12 +8,17 @@ import { Inbox } from './pages/Inbox'
 import { Live } from './pages/Live'
 import { TaskPage } from './pages/TaskPage'
 import { Tasks } from './pages/Tasks'
+import { CommitReview, ReviewHome, TaskReview, VersionReview } from './pages/Review'
 
 export function App() {
   return (
     <Routes>
       <Route element={<Shell />}>
-        <Route index element={<Navigate to="/inbox" replace />} />
+        <Route index element={<Navigate to="/review" replace />} />
+        <Route path="review" element={<ReviewHome />} />
+        <Route path="review/t/:id" element={<TaskReview />} />
+        <Route path="review/v/:id" element={<VersionReview />} />
+        <Route path="review/c/:sha" element={<CommitReview />} />
         <Route path="inbox" element={<Inbox />} />
         <Route path="tasks" element={<Tasks />} />
         <Route path="tasks/:id" element={<TaskPage />} />

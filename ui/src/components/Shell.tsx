@@ -9,9 +9,12 @@ import { Kbd } from './bits'
 import { CommandPalette } from './CommandPalette'
 import { Icon, type IconName } from './Icon'
 import { ShortcutHelp } from './ShortcutHelp'
+import { BranchGraph } from './BranchGraph'
+import { ToastProvider } from './Toaster'
+import type { ReviewContext } from '../pages/reviewContext'
 
 const NAV: { to: string; label: string; icon: IconName; keys: string }[] = [
-  { to: '/inbox', label: 'Inbox', icon: 'inbox', keys: 'g i' },
+  { to: '/review', label: 'Review', icon: 'inbox', keys: 'g r' },
   { to: '/tasks', label: 'Tasks', icon: 'tasks', keys: 'g t' },
   { to: '/live', label: 'Live', icon: 'live', keys: 'g l' },
   { to: '/find', label: 'Find', icon: 'search', keys: 'g f' },
@@ -24,12 +27,12 @@ export function Shell() {
   const [paletteOpen, setPaletteOpen] = useState(false)
   const { connection } = useLive()
   const space = useResource('space', api.space)
-  const inbox = useResource('inbox', api.inbox)
-  const attempts = useResource('attempts', () => api.attempts())
+  const graph = useResource('graph', api.graph)
+  const tasks = useResource('tasks', api.tasks)
 
-  const inboxCount = inbox.data?.length ?? 0
-  const liveCount = attempts.data?.filter((a) => a.status === 'exploring' && a.id !== 1).length ?? 0
-  const counts: Record<string, number> = { '/inbox': inboxCount, '/live': liveCount }
+  const liveCount = graph.data?.attempts.filter((g) => g.attempt.status === 'exploring' && g.attempt.id !== 1).length ?? 0
+  const counts: Record<string, number> = { '/live': liveCount }
+  const ctx: ReviewContext = { graph: graph.data, tasks: tasks.data }
 
   useHotkeys([
     ...NAV.map((n) => ({
@@ -62,6 +65,7 @@ export function Shell() {
     theme.pref === 'system' ? 'system' : theme.pref === 'dark' ? 'moon' : 'sun'
 
   return (
+    <ToastProvider>
     <div className="shell">
       <aside className="sidebar">
         <div className="brand">
@@ -82,18 +86,21 @@ export function Shell() {
           <Kbd keys="mod+k" />
         </button>
 
-        <nav className="nav">
+        <nav className="nav nav-row">
           {NAV.map((n) => (
             <NavLink key={n.to} to={n.to} className="nav-item">
               <Icon name={n.icon} />
               <span className="nav-label">{n.label}</span>
               {(counts[n.to] ?? 0) > 0 && <span className="nav-count">{counts[n.to]}</span>}
-              <span className="nav-keys">
-                <Kbd keys={n.keys} />
-              </span>
             </NavLink>
           ))}
         </nav>
+
+        {graph.data && tasks.data ? (
+          <BranchGraph graph={graph.data} tasks={tasks.data} />
+        ) : (
+          <div className="bgraph bgraph-empty muted">{graph.error ? `Graph: ${graph.error.message}` : 'Loading branches…'}</div>
+        )}
 
         <div className="sidebar-foot">
           <span className={`conn conn-${connection}`} title={`Event stream: ${connection}`}>
@@ -122,11 +129,12 @@ export function Shell() {
       </aside>
 
       <main className="main">
-        <Outlet />
+        <Outlet context={ctx} />
       </main>
 
       <ShortcutHelp />
       {paletteOpen && <CommandPalette onClose={() => setPaletteOpen(false)} />}
     </div>
+    </ToastProvider>
   )
 }

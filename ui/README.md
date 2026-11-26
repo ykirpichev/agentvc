@@ -21,6 +21,34 @@ AGENTVCD_URL=http://127.0.0.1:7421 npm run dev    # daemon on another port
 Debug builds of `agentvcd` read `ui/dist` from disk at runtime; release builds
 embed it, so build the UI before `cargo build --release`.
 
+## The review screen
+
+The sidebar holds the **branch graph**: main's recent commits down the left,
+each task's versions (attempts) hung off the commit they are based on, forks
+nested under the version they came from. Badges show what needs you: `↓N`
+behind main, conflicts, the PR number. The pane on the right shows what is
+selected:
+
+- **What needs you** (`/review`): every task with its next step.
+- **A task** (`/review/t/N`): one card per version with *Choose this version*,
+  the next step as a pill and button (choose, resolve, update from main, open
+  the PR), and the two best versions side by side, where *Use in …* copies a
+  file from one version into the other.
+- **A version** (`/review/v/N`): *Update from main*, *Rebase onto…*, *Open
+  PR*, *Discard*, its conflicts (Keep main / Keep mine / Keep both / Edit),
+  and its changed files.
+- **A main commit** (`/review/c/SHA`): versions that started before it.
+
+Drag a version onto a main commit (or use ↻ / ⤴ on its row) to rebase it: the
+version pane first previews what merges cleanly, what auto-resolves and what
+conflicts, and changes nothing until you press Rebase. Every change shows a
+toast with Undo (`POST /api/undo`).
+
+The UI speaks git and GitHub (version, choose, update from main, open PR);
+`src/core/words.ts` keeps those words in one place, `src/core/graph.ts` lays
+out the graph and `src/core/next.ts` decides the next step, so other surfaces
+(the VS Code and Cursor extension, the Claude Code panel) can share them.
+
 ## Layout
 
 | Path | What |
@@ -29,6 +57,8 @@ embed it, so build the UI before `cargo build --release`.
 | `src/keyboard/` | Shortcut framework: `useHotkeys` (keys, `mod+k`, sequences like `g i`, scoped dialogs) and `useListNavigation` (j/k/enter) |
 | `src/theme/` | Light, dark and system themes, persisted per browser |
 | `src/components/` | Shell, command palette, shortcut overlay, diff view, shared bits |
+| `src/core/` | Shared by every surface: words, graph layout, next step, links |
+| `src/pages/Review.tsx` | The review screen's panes (home, task, version, main commit) |
 | `src/pages/` | Inbox, Tasks, Task (attempt tree), Compare (2 to 4 attempts side by side), Attempt (file diffs), Live |
 | `src/lib/align.ts` | Patience line diff and the multi-way alignment behind Compare |
 | `src/components/ReviewActions.tsx` | Pick winner, abandon and mark, with their dialogs |

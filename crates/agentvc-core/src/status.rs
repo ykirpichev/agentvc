@@ -134,6 +134,84 @@ fn upstream(space: &Space, head: &Snapshot) -> Result<Option<Upstream>> {
     }))
 }
 
+/// A commit of main as the review UI's branch graph draws it.
+#[derive(Clone, Debug, Serialize)]
+pub struct TrunkCommit {
+    pub commit: String,
+    pub summary: String,
+    /// Commit time, Unix seconds.
+    pub time: i64,
+    /// False for a base commit that is not on the upstream branch.
+    pub on_upstream: bool,
+}
+
+impl Space {
+    /// The remote-tracking branch `origin` defaults to, like `origin/main`.
+    pub fn upstream_branch(&self) -> Option<String> {
+        upstream_ref(&HostRepo::open(self.workdir()).ok()?, "origin")
+    }
+
+    /// Commits on `upstream` that `base` lacks.
+    pub fn commits_behind(&self, base: &str, upstream: &str) -> Option<u64> {
+        let repo = HostRepo::open(self.workdir()).ok()?;
+        repo.git(
+            &["rev-list", "--count", &format!("{base}..{upstream}")],
+            None,
+        )
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+    }
+
+    /// `upstream`'s commits, newest first, down to the oldest of `bases` on
+    /// it (at most `max`; at least the newest), then the bases not on it.
+    pub fn trunk(
+        &self,
+        upstream: &str,
+        bases: &std::collections::BTreeSet<String>,
+        max: usize,
+    ) -> Vec<TrunkCommit> {
+        let Ok(repo) = HostRepo::open(self.workdir()) else {
+            return Vec::new();
+        };
+        let log = |args: &[&str]| -> Vec<TrunkCommit> {
+            let mut full = vec!["log", "--format=%H%x00%ct%x00%s"];
+            full.extend_from_slice(args);
+            repo.git(&full, None)
+                .unwrap_or_default()
+                .lines()
+                .filter_map(|l| {
+                    let mut p = l.splitn(3, '\0');
+                    Some(TrunkCommit {
+                        commit: p.next()?.to_string(),
+                        time: p.next()?.parse().ok()?,
+                        summary: p.next().unwrap_or("").to_string(),
+                        on_upstream: true,
+                    })
+                })
+                .collect()
+        };
+        let limit = format!("-n{max}");
+        let mut trunk = log(&[&limit, upstream]);
+        let keep = trunk
+            .iter()
+            .rposition(|c| bases.contains(&c.commit))
+            .map_or(1, |i| i + 1);
+        trunk.truncate(keep);
+        for base in bases {
+            if trunk.iter().any(|c| &c.commit == base) {
+                continue;
+            }
+            if let Some(mut c) = log(&["-n1", base]).pop() {
+                c.on_upstream = false;
+                trunk.push(c);
+            }
+        }
+        trunk
+    }
+}
+
 impl Space {
     /// Status of one attempt, see [`AttemptStatus`].
     pub fn attempt_status(&self, id: i64) -> Result<AttemptStatus> {
