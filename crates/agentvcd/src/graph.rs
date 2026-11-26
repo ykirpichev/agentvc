@@ -53,6 +53,18 @@ struct GraphAttempt {
     conflicts: usize,
     head_snapshot: Option<i64>,
     pr: Option<PrRef>,
+    /// The version its base stands for, when it was stacked onto another
+    /// version (`rebase --onto aN`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stacked_on: Option<StackedOn>,
+}
+
+#[derive(Serialize)]
+struct StackedOn {
+    attempt: i64,
+    /// That version's snapshot it was stacked on; older than the version's
+    /// head when the version moved on since.
+    snapshot: i64,
 }
 
 #[derive(Serialize)]
@@ -108,11 +120,24 @@ fn build(s: &Space) -> agentvc_core::Result<Graph> {
             behind: None,
             conflicts,
             pr,
+            stacked_on: None,
         });
     }
 
+    // A base that stands for another version is drawn under that version,
+    // not as a commit of its own.
+    let mut stacked: HashMap<String, Option<(i64, i64)>> = HashMap::new();
+    for a in &mut attempts {
+        if let Some(base) = &a.base_commit {
+            let on = *stacked
+                .entry(base.clone())
+                .or_insert_with(|| s.stacked_on(base));
+            a.stacked_on = on.map(|(attempt, snapshot)| StackedOn { attempt, snapshot });
+        }
+    }
     let bases: BTreeSet<String> = attempts
         .iter()
+        .filter(|a| a.stacked_on.is_none())
         .filter_map(|a| a.base_commit.clone())
         .collect();
     let trunk = s.trunk(&upstream, &bases, MAX_TRUNK);

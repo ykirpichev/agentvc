@@ -1,12 +1,13 @@
 // The branch graph: main's commits down the left, each task's versions off
 // the commit they are based on. Drag a version onto a main commit to rebase
-// it there; the detail pane then previews the move before anything changes.
+// it there, or onto another version to stack it on top; the detail pane then
+// previews the move before anything changes.
 
 import { useMemo, useState, type DragEvent } from 'react'
 import { useLocation } from 'react-router'
 import { commitLink, selectionFromPath, taskLink, useGo, usePick, versionLink } from '../core/links'
 import type { Graph, GraphAttempt, TaskSummary } from '../api/types'
-import { canMoveOnto, layout, type Cell, type GraphRow } from '../core/graph'
+import { canMoveOnto, canStackOnto, layout, stackStale, type Cell, type GraphRow } from '../core/graph'
 import { shortSha, versionName } from '../core/words'
 import { timeAgo } from '../lib/format'
 
@@ -39,6 +40,22 @@ export function BranchGraph({ graph, tasks }: { graph: Graph; tasks: TaskSummary
     setDrag(null)
     setOver(null)
     if (canMoveOnto(byId.get(id), commit)) navigate(versionLink(id, commit))
+  }
+
+  /** Stack `id` on top of version `target`: previewed on the moving version's page. */
+  const stackOn = (id: number, target: number) => {
+    setDrag(null)
+    setOver(null)
+    const t = byId.get(target)
+    if (t && canStackOnto(graph, byId.get(id), t)) navigate(versionLink(id, `a${target}`))
+  }
+
+  const onDragOverVersion = (e: DragEvent, target: number) => {
+    const t = byId.get(target)
+    if (drag === null || !t || !canStackOnto(graph, byId.get(drag), t)) return
+    e.preventDefault()
+    e.dataTransfer.dropEffect = 'move'
+    setOver(`a${target}`)
   }
 
   const onDragOver = (e: DragEvent, commit: string) => {
@@ -115,21 +132,41 @@ export function BranchGraph({ graph, tasks }: { graph: Graph; tasks: TaskSummary
             )
           }
           const g = byId.get(r.id)!
+          const stackTarget = movingG !== undefined && canStackOnto(graph, movingG, g)
+          const stale = stackStale(graph, g)
           return (
             <VersionRow
               key={r.key}
               g={g}
+              stale={stale ? versionName(stale.attempt) : null}
+              taskLabel={
+                g.stacked_on && byId.get(g.stacked_on.attempt)?.attempt.task_id !== g.attempt.task_id && g.attempt.task_id !== null
+                  ? (taskName.get(g.attempt.task_id) ?? `Task ${g.attempt.task_id}`)
+                  : null
+              }
+              drop={over === `a${r.id}`}
+              target={pick !== null && stackTarget}
+              onDragOver={(e) => onDragOverVersion(e, r.id)}
+              onDragLeave={() => setOver((o) => (o === `a${r.id}` ? null : o))}
+              onDrop={(e) => {
+                e.preventDefault()
+                if (drag !== null) stackOn(drag, r.id)
+              }}
               prefix={r.prefix}
               selected={isSel(r)}
               dragging={drag === r.id}
               picking={pick === r.id}
-              onOpen={() => navigate(versionLink(r.id))}
+              onOpen={() => (pick !== null && stackTarget ? stackOn(pick, r.id) : navigate(versionLink(r.id)))}
               onDragStart={() => setDrag(r.id)}
               onDragEnd={() => {
                 setDrag(null)
                 setOver(null)
               }}
-              onUpdate={() => graph.trunk[0] && navigate(versionLink(r.id, graph.trunk[0].commit))}
+              onUpdate={() =>
+                g.stacked_on
+                  ? navigate(versionLink(r.id, `a${g.stacked_on.attempt}`))
+                  : graph.trunk[0] && navigate(versionLink(r.id, graph.trunk[0].commit))
+              }
               onPick={() => navigate(`${versionLink(r.id)}?pick=${r.id}`)}
             />
           )
@@ -138,13 +175,13 @@ export function BranchGraph({ graph, tasks }: { graph: Graph; tasks: TaskSummary
       <p className="bgraph-foot">
         {pick !== null ? (
           <>
-            Click the main commit to move {movingG ? <b>{versionName(movingG.attempt)}</b> : 'it'} onto.{' '}
+            Click a main commit to move {movingG ? <b>{versionName(movingG.attempt)}</b> : 'it'} onto, or a version to stack it on.{' '}
             <button type="button" className="linkish" onClick={() => navigate(versionLink(pick))}>
               Cancel
             </button>
           </>
         ) : (
-          <>Drag a version onto a main commit to rebase it. Hover for ↻ (update from main) and ⤴ (rebase onto…).</>
+          <>Drag a version onto a main commit to rebase it, or onto another version to stack it on top. Hover for ↻ (update) and ⤴ (rebase onto…).</>
         )}
       </p>
     </div>
@@ -153,6 +190,13 @@ export function BranchGraph({ graph, tasks }: { graph: Graph; tasks: TaskSummary
 
 function VersionRow({
   g,
+  stale,
+  taskLabel,
+  drop,
+  target,
+  onDragOver,
+  onDragLeave,
+  onDrop,
   prefix,
   selected,
   dragging,
@@ -164,6 +208,15 @@ function VersionRow({
   onPick,
 }: {
   g: GraphAttempt
+  /** Name of the version it is stacked on, when that one moved on since. */
+  stale: string | null
+  /** The task's name, when the row sits under another task's version. */
+  taskLabel: string | null
+  drop: boolean
+  target: boolean
+  onDragOver: (e: DragEvent) => void
+  onDragLeave: () => void
+  onDrop: (e: DragEvent) => void
   prefix: Cell[]
   selected: boolean
   dragging: boolean
@@ -188,12 +241,14 @@ function VersionRow({
             : a.status === 'abandoned'
               ? 'mute'
               : 'run'
-  const behind = g.behind ?? 0
+  // A stacked version updates from the version below it, not from main.
+  const behind = g.stacked_on ? 0 : (g.behind ?? 0)
+  const canUpdate = (behind > 0 || stale !== null) && g.conflicts === 0
   return (
     <div
       role="treeitem"
       aria-selected={selected}
-      className={`brow brow-ver ${selected ? 'sel' : ''} ${dragging || picking ? 'dragging' : ''} ${a.status === 'abandoned' ? 'closed' : ''}`}
+      className={`brow brow-ver ${selected ? 'sel' : ''} ${dragging || picking ? 'dragging' : ''} ${a.status === 'abandoned' ? 'closed' : ''} ${drop ? 'drop' : ''} ${target ? 'target' : ''}`}
       draggable={movable}
       onDragStart={(e) => {
         e.dataTransfer.effectAllowed = 'move'
@@ -201,6 +256,9 @@ function VersionRow({
         onDragStart()
       }}
       onDragEnd={onDragEnd}
+      onDragOver={onDragOver}
+      onDragLeave={onDragLeave}
+      onDrop={onDrop}
       onClick={onOpen}
       title={`a${a.id} · ${a.actor}${a.model ? ` · ${a.model}` : ''}`}
     >
@@ -215,15 +273,26 @@ function VersionRow({
           <span className="bbadge bbadge-conf">{g.conflicts} conflict{g.conflicts === 1 ? '' : 's'}</span>
         ) : behind > 0 && a.status !== 'abandoned' ? (
           <span className="bbadge bbadge-behind">↓{behind}</span>
+        ) : stale !== null && a.status !== 'abandoned' ? (
+          <span className="bbadge bbadge-behind" title={`${stale} changed since this was stacked on it`}>
+            ↓
+          </span>
         ) : null}
         {g.pr && <span className="bbadge bbadge-pr">#{g.pr.number}</span>}
         {a.status === 'failed' && <span className="bbadge">fails</span>}
         {a.status === 'exploring' && <span className="bbadge">working</span>}
+        {taskLabel && <span className="bsub btask">{taskLabel}</span>}
       </span>
       {movable && (
         <span className="bhover" onClick={(e) => e.stopPropagation()}>
-          {behind > 0 && g.conflicts === 0 && (
-            <button type="button" className="bicon" title="Update from main" aria-label="Update from main" onClick={onUpdate}>
+          {canUpdate && (
+            <button
+              type="button"
+              className="bicon"
+              title={stale !== null ? `Update from ${stale}` : 'Update from main'}
+              aria-label={stale !== null ? `Update from ${stale}` : 'Update from main'}
+              onClick={onUpdate}
+            >
               ↻
             </button>
           )}

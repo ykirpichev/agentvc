@@ -14,6 +14,7 @@ export const WORDS = {
   discard: 'Discard',
   updateFromMain: 'Update from main',
   rebaseOnto: 'Rebase onto…',
+  updateFromParent: (name: string) => `Update from ${name}`,
   useIn: (name: string) => `Use in ${name}`,
   openPr: 'Open PR',
   undo: 'Undo',
@@ -30,7 +31,9 @@ export const HELP = {
   choose: 'Pick this as the version to ship. The task\'s other versions are set aside; Undo brings them back.',
   updateFromMain: (n: number) =>
     `Main has ${n} new commit${n === 1 ? '' : 's'}. Replays this version's changes on top; you see a preview first and settle any clashes here.`,
-  rebaseOnto: 'Like Update from main, onto a main commit you click in the branch graph.',
+  rebaseOnto: 'Like Update from main, onto a main commit or another version you click in the branch graph. Onto a version stacks this one on top of it.',
+  updateFromParent: (name: string) => `${name} changed since this was stacked on it. Replays this version on ${name}'s latest state; you see a preview first.`,
+  openPrStacked: (name: string) => `Pushes this version as a branch and opens a pull request. It is stacked on ${name}, so the PR carries ${name}'s changes too.`,
   openPr: 'Pushes this version as a branch and opens a pull request on GitHub.',
   updatePr: 'Pushes this version again; the pull request updates.',
   take: (name: string) => `Copies this version's changes into ${name}, the version you chose.`,

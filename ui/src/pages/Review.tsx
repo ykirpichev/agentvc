@@ -16,7 +16,7 @@ import { ConflictResolver } from '../components/ConflictResolver'
 import { DiffView } from '../components/DiffView'
 import { MovePreview } from '../components/MovePreview'
 import { useToast } from '../components/Toaster'
-import { visibleVersions } from '../core/graph'
+import { stackStale, visibleVersions } from '../core/graph'
 import { nextStep, type NextStep } from '../core/next'
 import { HELP, shortSha, statusWords, versionName, WORDS } from '../core/words'
 import { money, plural, timeAgo } from '../lib/format'
@@ -211,7 +211,9 @@ export function VersionReview() {
   const chosen = siblings.find((s) => s.attempt.status === 'promoted')
   const isOpen = a.status === 'exploring' || a.status === 'passed' || a.status === 'failed'
   const base = graph.trunk.find((c) => c.commit === g.base_commit)
-  const behind = g.behind ?? 0
+  const below = g.stacked_on ? graph.attempts.find((x) => x.attempt.id === g.stacked_on!.attempt) : undefined
+  const stale = stackStale(graph, g)
+  const behind = g.stacked_on ? 0 : (g.behind ?? 0)
   const s = statusWords(a.status)
   // Rebasing a chosen version with conflicts reopens it; its siblings still
   // say they lost to it, so choose it again once the conflicts are resolved.
@@ -244,8 +246,17 @@ export function VersionReview() {
             {versionName(a)} <span className="muted mono rv-id" title="agentvc attempt id">a{a.id}</span>
           </h1>
           <p className="muted">
-            {base ? <>on <Link to={commitLink(base.commit)}>{base.summary}</Link> ({shortSha(base.commit)})</> : g.base_commit ? <>on {shortSha(g.base_commit)}</> : 'no base commit'}
-            {behind > 0 ? ` · main has ${plural(behind, 'new commit')}` : base ? ' · up to date with main' : ''}
+            {below ? (
+              <>
+                stacked on <Link to={versionLink(below.attempt.id)}>{versionName(below.attempt)}</Link>
+                {stale ? ` · ${versionName(below.attempt)} changed since` : ' · up to date with it'}
+              </>
+            ) : (
+              <>
+                {base ? <>on <Link to={commitLink(base.commit)}>{base.summary}</Link> ({shortSha(base.commit)})</> : g.base_commit ? <>on {shortSha(g.base_commit)}</> : 'no base commit'}
+                {behind > 0 ? ` · main has ${plural(behind, 'new commit')}` : base ? ' · up to date with main' : ''}
+              </>
+            )}
           </p>
         </div>
         <span className={`tone tone-${g.conflicts > 0 ? 'conf' : s.tone}`}>{g.conflicts > 0 ? plural(g.conflicts, 'conflict') : s.label}</span>
@@ -270,6 +281,14 @@ export function VersionReview() {
             <span className="act-help">{HELP.updateFromMain(behind)}</span>
           </div>
         )}
+        {(isOpen || a.status === 'promoted') && stale && g.conflicts === 0 && (
+          <div className="act">
+            <button type="button" className="btn btn-primary" disabled={busy} onClick={() => navigate(versionLink(a.id, `a${stale.attempt.id}`))}>
+              ↻ {WORDS.updateFromParent(versionName(stale.attempt))}
+            </button>
+            <span className="act-help">{HELP.updateFromParent(versionName(stale.attempt))}</span>
+          </div>
+        )}
         {(isOpen || a.status === 'promoted') && (
           <div className="act">
             <button type="button" className="btn btn-ghost" disabled={busy} onClick={() => navigate(`${versionLink(a.id)}?pick=${a.id}`)}>
@@ -283,7 +302,7 @@ export function VersionReview() {
             <button type="button" className="btn btn-primary" disabled={busy} onClick={() => void act(() => api.openPr(a.id), g.pr ? 'PR updated' : 'PR opened', false)}>
               {g.pr ? 'Update PR' : WORDS.openPr}
             </button>
-            <span className="act-help">{g.pr ? HELP.updatePr : HELP.openPr}</span>
+            <span className="act-help">{g.pr ? HELP.updatePr : below ? HELP.openPrStacked(versionName(below.attempt)) : HELP.openPr}</span>
           </div>
         )}
         {g.pr && (
@@ -337,6 +356,7 @@ export function VersionReview() {
           version={g}
           onto={onto}
           target={graph.trunk.find((c) => c.commit === onto)}
+          targetVersion={/^a\d+$/.test(onto) ? graph.attempts.find((x) => `a${x.attempt.id}` === onto) : undefined}
           onDone={() => navigate(versionLink(a.id), { replace: true })}
           onCancel={() => navigate(versionLink(a.id), { replace: true })}
         />

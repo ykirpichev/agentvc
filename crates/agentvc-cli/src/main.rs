@@ -562,8 +562,9 @@ enum Cmd {
     /// `conflict`) lists the paths.
     Rebase {
         attempt: String,
-        /// Git revision to rebase onto. Defaults to the remote's default
-        /// branch, fetched first.
+        /// Git revision to rebase onto, or `aN` to stack it on version N
+        /// (its latest snapshot). Defaults to the remote's default branch,
+        /// fetched first.
         #[arg(long)]
         onto: Option<String>,
         /// Remote whose default branch is the default target.

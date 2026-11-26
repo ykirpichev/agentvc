@@ -1,4 +1,5 @@
-// Before a version moves onto another commit: what merges cleanly, what was
+// Before a version moves onto another commit, or is stacked on top of another
+// version (`onto` is then `aN`): what merges cleanly, what was
 // resolved automatically, and which files will need a choice. Nothing
 // changes until Rebase is pressed, and Undo reverses it.
 
@@ -16,12 +17,15 @@ export function MovePreview({
   version,
   onto,
   target,
+  targetVersion,
   onDone,
   onCancel,
 }: {
   version: GraphAttempt
   onto: string
   target: TrunkCommit | undefined
+  /** Set when stacking onto a version. */
+  targetVersion?: GraphAttempt
   onDone: () => void
   onCancel: () => void
 }) {
@@ -30,7 +34,19 @@ export function MovePreview({
   const toast = useToast()
   const { refresh } = useLive()
   const [busy, setBusy] = useState(false)
-  const where = target ? `${target.summary} (${shortSha(onto)})` : shortSha(onto)
+  const where = targetVersion
+    ? versionName(targetVersion.attempt)
+    : target
+      ? `${target.summary} (${shortSha(onto)})`
+      : shortSha(onto)
+  const short = targetVersion ? where : (target?.summary ?? shortSha(onto))
+  const updating = !!targetVersion && version.stacked_on?.attempt === targetVersion.attempt.id
+  const verb = updating ? 'Update' : targetVersion ? 'Stack' : 'Rebase'
+  const done = !targetVersion
+    ? `Rebased ${versionName(a)} onto ${short}`
+    : updating
+      ? `Updated ${versionName(a)} from ${short}`
+      : `Stacked ${versionName(a)} on ${short}`
   const p = preview.data?.rebase
   const conflicts = p?.conflict_files.filter((f) => f.remaining > 0) ?? []
   const auto = p?.resolved ?? []
@@ -42,9 +58,7 @@ export function MovePreview({
     try {
       await api.rebase(a.id, { onto, keep_conflicts: conflicts.length > 0, no_fetch: true })
       toast.ok(
-        conflicts.length
-          ? `Rebased ${versionName(a)} onto ${target?.summary ?? shortSha(onto)}. ${plural(conflicts.length, 'file')} to resolve below.`
-          : `Rebased ${versionName(a)} onto ${target?.summary ?? shortSha(onto)}.`,
+        conflicts.length ? `${done}. ${plural(conflicts.length, 'file')} to resolve below.` : `${done}.`,
         { undo: true },
       )
       onDone()
@@ -60,7 +74,19 @@ export function MovePreview({
     <section className="move-card" aria-label="Rebase preview">
       <header>
         <b>
-          Rebase {versionName(a)} onto {where}?
+          {updating ? (
+            <>
+              Update {versionName(a)} from {where}&apos;s latest state?
+            </>
+          ) : targetVersion ? (
+            <>
+              Stack {versionName(a)} on top of {where}?
+            </>
+          ) : (
+            <>
+              Rebase {versionName(a)} onto {where}?
+            </>
+          )}
         </b>
         <span className="tone tone-acc">preview</span>
       </header>
@@ -68,20 +94,25 @@ export function MovePreview({
       {!p && !preview.error && <Skeleton rows={2} />}
       {p && (
         <ul>
-          {!p.rebased && p.changes.length === 0 && conflicts.length === 0 && <li>Already based on this commit; nothing to do.</li>}
-          {clean.length > 0 && <li>✓ {plural(clean.length, 'file')} from main merge in cleanly</li>}
+          {!p.rebased && p.changes.length === 0 && conflicts.length === 0 && <li>Already based on this {targetVersion ? 'version' : 'commit'}; nothing to do.</li>}
+          {clean.length > 0 && (
+            <li>
+              ✓ {plural(clean.length, 'file')} from {targetVersion ? short : 'main'} merge in cleanly
+            </li>
+          )}
+          {targetVersion && !updating && <li className="muted">{versionName(a)} then shows only its own changes, and Update from {short} follows it when {short} changes.</li>}
           {auto.length > 0 && <li>✓ {plural(auto.length, 'file')} changed on both sides, resolved automatically: {auto.map((f) => f.path).join(', ')}</li>}
           {conflicts.map((f) => (
             <li key={f.path}>
               ⚠ <span className="mono">{f.path}</span>: {plural(f.remaining, 'place')} changed on both sides. You pick what to keep right after.
             </li>
           ))}
-          <li className="muted">Nothing changes until you press Rebase, and Undo puts it back.</li>
+          <li className="muted">Nothing changes until you press {verb}, and Undo puts it back.</li>
         </ul>
       )}
       <footer>
         <button type="button" className="btn btn-primary" disabled={busy || !p} onClick={() => void go()}>
-          {conflicts.length ? `Rebase and resolve ${conflicts.length}` : 'Rebase'}
+          {conflicts.length ? `${verb} and resolve ${conflicts.length}` : verb}
         </button>
         <button type="button" className="btn btn-ghost" onClick={onCancel}>
           Cancel

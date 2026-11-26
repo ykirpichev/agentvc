@@ -32,6 +32,8 @@ export function layout(graph: Graph, tasks: TaskSummary[], opts: LayoutOptions =
   // Nest a fork under its parent while both sit on the same commit; a fork
   // rebased elsewhere hangs off its own base instead.
   const parentOf = (g: GraphAttempt): number | null => {
+    // A version stacked onto another sits under it.
+    if (g.stacked_on) return byId.has(g.stacked_on.attempt) ? g.stacked_on.attempt : null
     const p = g.attempt.parent_attempt
     const pg = p === null ? undefined : byId.get(p)
     return pg && pg.base_commit === g.base_commit ? p : null
@@ -76,6 +78,37 @@ export function layout(graph: Graph, tasks: TaskSummary[], opts: LayoutOptions =
     })
   })
   return rows
+}
+
+/** The versions `g` is stacked on, nearest first. */
+export function stackedChain(graph: Graph, g: GraphAttempt): GraphAttempt[] {
+  const out: GraphAttempt[] = []
+  let cur = g.stacked_on
+  while (cur && out.length < 64) {
+    const p = graph.attempts.find((x) => x.attempt.id === cur!.attempt)
+    if (!p) break
+    out.push(p)
+    cur = p.stacked_on
+  }
+  return out
+}
+
+/** `g` is stacked on a version that has moved on since. */
+export function stackStale(graph: Graph, g: GraphAttempt): GraphAttempt | undefined {
+  if (!g.stacked_on) return undefined
+  const p = graph.attempts.find((x) => x.attempt.id === g.stacked_on!.attempt)
+  return p && p.head_snapshot !== null && p.head_snapshot !== g.stacked_on.snapshot ? p : undefined
+}
+
+/** `src` can be stacked on top of version `target`. */
+export function canStackOnto(graph: Graph, src: GraphAttempt | undefined, target: GraphAttempt): boolean {
+  if (!src || src.attempt.id === 1 || target.attempt.id === 1 || src.attempt.id === target.attempt.id) return false
+  const movable = (s: string) => s === 'exploring' || s === 'passed' || s === 'failed' || s === 'promoted'
+  if (!movable(src.attempt.status) || !movable(target.attempt.status) || target.conflicts > 0) return false
+  // Already on target's latest state.
+  if (src.stacked_on?.attempt === target.attempt.id && src.stacked_on.snapshot === target.head_snapshot) return false
+  // Target sits on src (directly or further down): that would make a loop.
+  return !stackedChain(graph, target).some((x) => x.attempt.id === src.attempt.id)
 }
 
 /** `src` can be moved onto `target` (a trunk commit). */

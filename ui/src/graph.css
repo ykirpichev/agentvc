@@ -850,3 +850,12 @@
   top: 2px;
   background: var(--accent);
 }
+
+/* A stacked version's task name gives way to the version's own name. */
+.brow-ver .bname {
+  flex-shrink: 0;
+}
+.btask {
+  min-width: 0;
+  text-overflow: ellipsis;
+}

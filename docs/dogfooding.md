@@ -61,6 +61,11 @@ while it was open, exporting it as is would revert them. `agentvc rebase aX` fet
 the result into its view and records a `rebase` snapshot. `export` and `pr` then parent on
 the new commit, and `agentvc diff aX` lists only the attempt's own files.
 
+`--onto aN` stacks the attempt on version N instead: its base becomes N's latest snapshot
+(written as a commit on N's own base, trailer `Agentvc-Stacked-On`), so `diff aX` lists
+only what X adds on top of N. When N moves on, run the same command again; the review UI
+shows *Update from N*. Dragging a version onto another in the branch graph does this.
+
 On conflicts nothing changes: the command fails with code `conflict` and the paths
 (`error.paths` in `--json`). Either hand it back to the agent, or run
 `agentvc rebase aX --keep-conflicts`, which writes the files with conflict markers into
