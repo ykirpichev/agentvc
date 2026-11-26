@@ -158,7 +158,7 @@ async fn errors_have_stable_codes() {
         ("/api/tasks/99", StatusCode::NOT_FOUND, "not_found"),
         ("/api/attempts/a99", StatusCode::NOT_FOUND, "not_found"),
         ("/api/attempts?task=7", StatusCode::NOT_FOUND, "not_found"),
-        ("/api/diff?a=zz&b=a2", StatusCode::BAD_REQUEST, "bad_ref"),
+        ("/api/diff?a=z..z&b=a2", StatusCode::BAD_REQUEST, "bad_ref"),
         ("/api/diff?b=a1", StatusCode::NOT_FOUND, "not_found"),
         (
             "/api/file?ref=a1&path=nope.rs",

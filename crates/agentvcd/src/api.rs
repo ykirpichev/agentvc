@@ -106,10 +106,6 @@ impl IntoResponse for ApiError {
 
 pub(crate) type ApiResult<T> = Result<Json<T>, ApiError>;
 
-fn parse_ref(s: &str) -> Result<Ref, ApiError> {
-    s.parse::<Ref>().map_err(ApiError::from)
-}
-
 /// Accepts `t3` or `3`.
 fn parse_task_id(s: &str) -> Result<i64, ApiError> {
     s.strip_prefix('t')
@@ -392,7 +388,7 @@ fn resolve_side(s: &Space, r: &str) -> Result<Side, ApiError> {
             })
         });
     }
-    Ok(Side::Snap(s.resolve(parse_ref(r)?)?))
+    Ok(Side::Snap(s.resolve(s.parse_ref(r)?)?))
 }
 
 /// The default base for `b`, when the caller gives none.
@@ -428,9 +424,10 @@ fn base_of(s: &Space, b: Ref) -> agentvc_core::Result<Side> {
 }
 
 async fn diff(State(st): State<AppState>, Query(q): Query<DiffQuery>) -> ApiResult<DiffResponse> {
-    let b = parse_ref(&q.b)?;
     let out = st
         .with_space(move |s| {
+            // aN, sN or a tag name.
+            let b = s.parse_ref(&q.b)?;
             let sb = s.resolve(b)?;
             let sa = match &q.a {
                 Some(a) => match resolve_side(s, a) {

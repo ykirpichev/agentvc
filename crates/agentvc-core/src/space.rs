@@ -111,6 +111,14 @@ CREATE TABLE IF NOT EXISTS git_bases (
     tree TEXT NOT NULL,
     created_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS tags (
+    id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    snapshot_id INTEGER NOT NULL REFERENCES snapshots(id),
+    note TEXT,
+    actor TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+);
 CREATE INDEX IF NOT EXISTS attempts_task ON attempts(task_id);
 CREATE INDEX IF NOT EXISTS snapshots_attempt ON snapshots(attempt_id);
 "#;
@@ -203,6 +211,9 @@ pub struct Attempt {
     pub view_path: PathBuf,
     pub backend: String,
     pub created_at: i64,
+    /// Names (`agentvc tag`) on this attempt's snapshots.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub tags: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -217,6 +228,9 @@ pub struct Snapshot {
     /// trigger and metadata stay, its files are gone.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pruned_at: Option<i64>,
+    /// Names (`agentvc tag`) on this snapshot.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub tags: Vec<String>,
 }
 
 impl Snapshot {
@@ -339,6 +353,17 @@ pub struct Space {
     workdir: PathBuf,
     pub(crate) db: Connection,
     objects: ObjectStore,
+}
+
+fn split_tags(v: Option<String>) -> Vec<String> {
+    let mut t: Vec<String> = v
+        .unwrap_or_default()
+        .split(' ')
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect();
+    t.sort();
+    t
 }
 
 pub(crate) fn now() -> i64 {
@@ -509,7 +534,9 @@ impl Space {
 
     const ATTEMPT_COLS: &'static str =
         "id, task_id, parent_attempt, parent_snapshot, actor, model, \
-         prompt, status, reason, view_path, backend, created_at";
+         prompt, status, reason, view_path, backend, created_at, \
+         (SELECT group_concat(t.name, ' ') FROM tags t JOIN snapshots s ON s.id = t.snapshot_id \
+          WHERE s.attempt_id = attempts.id)";
 
     fn row_to_attempt(r: &rusqlite::Row<'_>) -> rusqlite::Result<Attempt> {
         let status: String = r.get(7)?;
@@ -527,6 +554,7 @@ impl Space {
             view_path: PathBuf::from(path),
             backend: r.get(10)?,
             created_at: r.get(11)?,
+            tags: split_tags(r.get(12)?),
         })
     }
 
@@ -906,11 +934,13 @@ impl Space {
             meta: meta.and_then(|m| serde_json::from_str(&m).ok()),
             created_at: r.get(5)?,
             pruned_at: r.get(6)?,
+            tags: split_tags(r.get(7)?),
         })
     }
 
     const SNAPSHOT_COLS: &'static str =
-        "id, attempt_id, tree, trigger, meta, created_at, pruned_at";
+        "id, attempt_id, tree, trigger, meta, created_at, pruned_at, \
+         (SELECT group_concat(name, ' ') FROM tags WHERE tags.snapshot_id = snapshots.id)";
 
     pub fn snapshot_by_id(&self, id: i64) -> Result<Snapshot> {
         self.db

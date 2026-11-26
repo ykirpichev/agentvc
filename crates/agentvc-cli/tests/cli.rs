@@ -1395,6 +1395,88 @@ fn git_works_in_views_and_commits_become_snapshots() {
 }
 
 #[test]
+fn fork_from_worktree_and_apply_round_trip() {
+    let tmp = tempdir();
+    let w = tmp.path();
+    git(w, &["init", "-q", "-b", "main"]);
+    fs::write(w.join("lib.rs"), "1\n").unwrap();
+    fs::write(w.join("old.rs"), "old\n").unwrap();
+    git(w, &["add", "-A"]);
+    git(w, &["commit", "-q", "-m", "base"]);
+    agentvc(w, &["init", "--no-prepare"]);
+
+    fs::write(w.join("lib.rs"), "2\n").unwrap();
+    fs::remove_file(w.join("old.rs")).unwrap();
+    fs::write(w.join("new.rs"), "new\n").unwrap();
+    let v = agentvc(
+        w,
+        &["fork", "--from-worktree", "--move", "--backend", "copy"],
+    );
+    assert_eq!(v["ok"], true, "{v}");
+    assert_eq!(v["worktree"]["moved"].as_array().unwrap().len(), 3, "{v}");
+    let id = v["fork"]["attempt"]["id"].as_i64().unwrap();
+    assert_eq!(git(w, &["status", "--porcelain"]), "");
+    let d = agentvc(w, &["diff", &format!("a{id}")]);
+    assert_eq!(d["changes"].as_array().unwrap().len(), 3, "{d}");
+
+    // A local edit to one of the files blocks apply.
+    fs::write(w.join("lib.rs"), "local\n").unwrap();
+    let v = agentvc(w, &["apply", &format!("a{id}")]);
+    assert_eq!(v["error"]["code"], "dirty_worktree", "{v}");
+    assert_eq!(v["error"]["paths"][0], "lib.rs");
+    fs::write(w.join("lib.rs"), "1\n").unwrap();
+
+    let v = agentvc(w, &["apply", &format!("a{id}")]);
+    assert_eq!(v["ok"], true, "{v}");
+    assert_eq!(fs::read_to_string(w.join("lib.rs")).unwrap(), "2\n");
+    assert_eq!(fs::read_to_string(w.join("new.rs")).unwrap(), "new\n");
+    assert!(!w.join("old.rs").exists());
+    assert_eq!(git(w, &["diff", "--cached", "--name-only"]), "");
+}
+
+#[test]
+fn tags_name_snapshots_and_work_as_refs() {
+    let tmp = tempdir();
+    let w = tmp.path();
+    fs::write(w.join("lib.rs"), "1\n").unwrap();
+    agentvc(w, &["init", "--no-prepare"]);
+    let v = agentvc(w, &["fork", "--backend", "copy"]);
+    let view = v["fork"]["attempt"]["view_path"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    fs::write(Path::new(&view).join("lib.rs"), "2\n").unwrap();
+
+    let v = agentvc(w, &["tag", "known-good", "a2", "--note", "before refactor"]);
+    assert_eq!(v["tag"]["name"], "known-good", "{v}");
+    let snap = v["tag"]["snapshot_id"].as_i64().unwrap();
+    let v = agentvc(w, &["tag", "known-good", "a1"]);
+    assert_eq!(v["error"]["code"], "exists");
+    let v = agentvc(w, &["tag", "s3", "a1"]);
+    assert_eq!(v["error"]["code"], "bad_tag_name");
+
+    fs::write(Path::new(&view).join("lib.rs"), "3\n").unwrap();
+    agentvc(w, &["snapshot", "a2"]);
+    let d = agentvc(w, &["diff", "known-good", "a2"]);
+    assert_eq!(d["changes"][0]["path"], "lib.rs", "{d}");
+    let f = agentvc(w, &["fork", "--from", "known-good", "--backend", "copy"]);
+    let fview = f["fork"]["attempt"]["view_path"].as_str().unwrap();
+    assert_eq!(
+        fs::read_to_string(Path::new(fview).join("lib.rs")).unwrap(),
+        "2\n"
+    );
+    assert_eq!(f["fork"]["parent_snapshot"]["id"], snap);
+
+    assert!(agentvc_text(w, &["log"]).contains("#known-good"));
+    assert!(agentvc_text(w, &["show", "known-good"]).contains("#known-good"));
+    let l = agentvc(w, &["tag", "--list"]);
+    assert_eq!(l["tags"][0]["note"], "before refactor");
+    agentvc(w, &["tag", "-d", "known-good"]);
+    let v = agentvc(w, &["diff", "known-good", "a2"]);
+    assert_eq!(v["error"]["code"], "not_found");
+}
+
+#[test]
 fn take_files_and_hunks_then_merge_conflicts_with_a_code() {
     let tmp = tempdir();
     let w = tmp.path();

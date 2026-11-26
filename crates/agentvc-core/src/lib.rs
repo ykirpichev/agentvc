@@ -1,6 +1,7 @@
 //! Core of agentvc: the store, the task/attempt/snapshot model and
 //! copy-on-write views. See `docs/design.md`.
 
+pub mod bridge;
 pub mod bundle;
 pub mod combine;
 pub mod config;
@@ -23,6 +24,7 @@ pub mod snapshot;
 pub mod space;
 pub mod status;
 pub mod sync;
+pub mod tags;
 pub mod view;
 pub mod viewgit;
 

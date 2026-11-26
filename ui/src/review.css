@@ -1281,6 +1281,17 @@
   }
 }
 
+/* agentvc tag names on tree nodes */
+.tag-chip {
+  font-size: 11px;
+  line-height: 16px;
+  padding: 0 6px;
+  border-radius: 8px;
+  background: var(--accent-soft);
+  color: var(--accent-text);
+  white-space: nowrap;
+}
+
 /* "Take into aN": copies this file's change into the focused column. */
 .take-file {
   font: inherit;
