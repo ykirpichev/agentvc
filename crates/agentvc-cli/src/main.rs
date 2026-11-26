@@ -10,6 +10,7 @@ use std::process::{ExitCode, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
 mod stack_cmd;
+mod workspace_cmd;
 
 use agentvc_core::snapshot::ChangeKind;
 use agentvc_core::view::BackendChoice;
@@ -197,6 +198,12 @@ enum Cmd {
     /// needed.
     #[command(subcommand)]
     Stack(stack_cmd::StackCmd),
+    /// Every workspace (worktree) of this repo with its stack, from
+    /// anywhere: list them, name them, and change another one's stack with
+    /// `agentvc stack ... --workspace W` (applied now if idle, else queued
+    /// until its agent stops).
+    #[command(subcommand)]
+    Workspace(workspace_cmd::WorkspaceCmd),
     /// Conflict tools: see how resolution strategies handle real conflicts.
     #[command(subcommand)]
     Conflicts(ConflictsCmd),
@@ -1224,6 +1231,10 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
         let (json, text) = stack_cmd::run(&cwd, c)?;
         return Ok(Out { json, text });
     }
+    if let Cmd::Workspace(c) = cli.cmd {
+        let (json, text) = workspace_cmd::run(&cwd, c)?;
+        return Ok(Out { json, text });
+    }
     let space = Space::discover(&cwd)?;
     let current = || -> anyhow::Result<i64> { Ok(space.attempt_for_path(&cwd)?.id) };
 
@@ -1343,7 +1354,8 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
         | Cmd::Mcp { .. }
         | Cmd::Import { .. }
         | Cmd::Restack { .. }
-        | Cmd::Stack(_) => unreachable!(),
+        | Cmd::Stack(_)
+        | Cmd::Workspace(_) => unreachable!(),
         Cmd::GitHook { event: _ } => {
             let r = space.record_git_commit(&cwd)?;
             Out {
@@ -3475,10 +3487,15 @@ fn run_hook(event: &str, cwd: &std::path::Path, as_json: bool) -> Out {
     let _ = std::io::stdin().read_to_string(&mut raw);
     let mut input: Value = serde_json::from_str(&raw).unwrap_or(json!({}));
     let mut event = event;
+    let mut by = "agent:claude-code";
     // Cursor's hooks send their own shape; reshape it for the shared handler.
     if let Some((e, reshaped)) = agentvc_core::cursor::hook_input(event, &input) {
         event = e;
         input = reshaped;
+        by = "agent:cursor";
+    }
+    if let Err(e) = agentvc_core::hooks::workspace_activity(event, &input, cwd, by) {
+        eprintln!("agentvc hook {event}: workspace: {e}");
     }
     let result = agentvc_core::hooks::handle(event, &input, cwd);
     let notice = match &result {

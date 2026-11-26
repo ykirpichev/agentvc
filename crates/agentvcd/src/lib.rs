@@ -32,6 +32,7 @@ mod live;
 mod rebase;
 mod review;
 mod take;
+mod workspaces;
 
 pub use api::ApiError;
 pub use events::Event;
@@ -76,6 +77,8 @@ struct Inner {
     events: broadcast::Sender<Event>,
     /// Wakes the event poller early, after the daemon itself wrote.
     poke: Notify,
+    /// Same for the workspace poller.
+    workspace_poke: Notify,
 }
 
 impl AppState {
@@ -93,9 +96,15 @@ impl AppState {
                 actor: config.actor.clone(),
                 events: tx,
                 poke: Notify::new(),
+                workspace_poke: Notify::new(),
             }),
         };
         events::spawn_poller(state.clone(), watcher, config.poll_interval);
+        workspaces::spawn_poller(
+            state.clone(),
+            state.workdir().to_path_buf(),
+            config.poll_interval * 2,
+        );
         if let Some(every) = config.pr_poll {
             spawn_pr_poller(state.clone(), every);
         }
@@ -120,6 +129,21 @@ impl AppState {
     /// tick, so a write from the UI shows up immediately.
     pub(crate) fn poke(&self) {
         self.inner.poke.notify_one();
+    }
+
+    /// Look at the workspaces now (after an edit from the API).
+    pub(crate) fn poke_workspaces(&self) {
+        self.inner.workspace_poke.notify_one();
+    }
+
+    pub(crate) async fn workspaces_poked(&self) {
+        self.inner.workspace_poke.notified().await;
+    }
+
+    /// Broadcast an event to every connected client.
+    pub(crate) fn send(&self, e: Event) {
+        // No subscribers is fine.
+        let _ = self.inner.events.send(e);
     }
 
     /// Wait until [`AppState::poke`] is called.

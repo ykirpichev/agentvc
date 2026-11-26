@@ -38,6 +38,32 @@ pub enum Event {
     SnapshotCreated {
         snapshot: Snapshot,
     },
+    /// A workspace's stack, checked-out branch, branch tips or activity
+    /// changed; refetch `/api/workspaces`.
+    StackChanged {
+        workspace: String,
+    },
+    /// A workspace (worktree) was added or removed.
+    WorkspacesChanged,
+    /// A stack edit is waiting for its workspace's agent to stop.
+    RequestQueued {
+        request_id: String,
+        workspace: String,
+        reason: Option<String>,
+    },
+    RequestApplied {
+        request_id: String,
+        workspace: String,
+    },
+    RequestFailed {
+        request_id: String,
+        workspace: String,
+        reason: Option<String>,
+    },
+    RequestCancelled {
+        request_id: String,
+        workspace: String,
+    },
     /// The client fell behind and missed events; it should refetch.
     Resync,
 }

@@ -36,7 +36,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{json, Value};
 
 use crate::error::{Error, IoContext, Result};
 use crate::export::HostRepo;
@@ -58,6 +58,23 @@ pub struct Tracked {
     /// The branch's pull request, once submitted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pr: Option<u64>,
+    /// The PR's state when this window last looked: `open`, `draft`,
+    /// `closed` or `merged`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr_state: Option<String>,
+}
+
+/// PR state as `pr_state` records it.
+fn pr_state_of(v: &Value) -> String {
+    if v["merged"].as_bool() == Some(true) || v["merged_at"].is_string() {
+        "merged".into()
+    } else if v["state"].as_str() == Some("closed") {
+        "closed".into()
+    } else if v["draft"].as_bool() == Some(true) {
+        "draft".into()
+    } else {
+        "open".into()
+    }
 }
 
 /// A rebase left in the worktree for the user to finish (`keep_conflicts`).
@@ -261,7 +278,7 @@ enum Replayed {
 
 /// The current worktree and its stack.
 pub struct Window {
-    repo: HostRepo,
+    pub(crate) repo: HostRepo,
     /// The worktree's own git directory.
     pub git_dir: PathBuf,
     /// The git directory shared by all worktrees.
@@ -270,15 +287,15 @@ pub struct Window {
     rules: Rules,
 }
 
-fn canon(p: &Path) -> PathBuf {
+pub(crate) fn canon(p: &Path) -> PathBuf {
     p.canonicalize().unwrap_or_else(|_| p.to_path_buf())
 }
 
-fn state_path(git_dir: &Path) -> PathBuf {
+pub(crate) fn state_path(git_dir: &Path) -> PathBuf {
     git_dir.join("agentvc").join("stack.json")
 }
 
-fn read_state(git_dir: &Path) -> Result<Option<State>> {
+pub(crate) fn read_state(git_dir: &Path) -> Result<Option<State>> {
     let path = state_path(git_dir);
     match fs::read_to_string(&path) {
         Ok(s) => {
@@ -482,7 +499,7 @@ impl Window {
         })
     }
 
-    fn branch_tip(&self, name: &str) -> Option<String> {
+    pub(crate) fn branch_tip(&self, name: &str) -> Option<String> {
         self.repo.rev(&format!("refs/heads/{name}"))
     }
 
@@ -610,7 +627,16 @@ impl Window {
 
     /// The other worktrees' git dirs and directories.
     fn other_git_dirs(&self) -> Vec<(PathBuf, PathBuf)> {
-        let mut out = Vec::new();
+        self.worktrees()
+            .into_iter()
+            .filter(|(g, _)| *g != self.git_dir)
+            .collect()
+    }
+
+    /// Every worktree of the repo, this one included: (git dir, directory),
+    /// the main worktree first. Worktrees whose directory is gone are left
+    /// out.
+    pub(crate) fn worktrees(&self) -> Vec<(PathBuf, PathBuf)> {
         let main_path = self
             .repo
             .git(&["worktree", "list", "--porcelain"], None)
@@ -636,12 +662,8 @@ impl Window {
                 dirs.push((canon(&d), path));
             }
         }
-        for (g, p) in dirs {
-            if g != self.git_dir {
-                out.push((g, p));
-            }
-        }
-        out
+        dirs.retain(|(g, p)| *g == self.git_dir || p.exists());
+        dirs
     }
 
     /// Other windows that have a stack, with their state.
@@ -692,7 +714,7 @@ impl Window {
         Ok(cur)
     }
 
-    fn rebase_in_progress(&self) -> bool {
+    pub(crate) fn rebase_in_progress(&self) -> bool {
         self.git_dir.join("rebase-merge").exists() || self.git_dir.join("rebase-apply").exists()
     }
 
@@ -1074,16 +1096,20 @@ impl Window {
 
     /// Branches whose PR GitHub reports merged, and whose local tip is what
     /// was pushed (so no local work is lost by dropping them).
-    fn merged_on_github(&self, api: &Api) -> HashSet<String> {
+    /// Branches whose PR GitHub reports merged (and whose local branch is
+    /// what was pushed); records every PR's state on the way.
+    fn merged_on_github(&mut self, api: &Api) -> HashSet<String> {
         let mut out = HashSet::new();
         let Ok(repo) = crate::github::repo_for(&self.repo.workdir, &self.state.remote, None) else {
             return out;
         };
-        for b in &self.state.branches {
+        for i in 0..self.state.branches.len() {
+            let b = self.state.branches[i].clone();
             let Some(n) = b.pr else { continue };
             let Ok(v) = api.call("GET", &format!("/repos/{repo}/pulls/{n}"), None) else {
                 continue;
             };
+            self.state.branches[i].pr_state = Some(pr_state_of(&v));
             if v["merged"].as_bool() != Some(true) {
                 continue;
             }
@@ -1122,7 +1148,10 @@ impl Window {
         }
         let base = self.require_base()?;
         let mut merged: Vec<String> = Vec::new();
-        let merged_prs = api.map(|a| self.merged_on_github(a)).unwrap_or_default();
+        let merged_prs = match api {
+            Some(a) => self.merged_on_github(a),
+            None => HashSet::new(),
+        };
         loop {
             let mut found = None;
             for b in &self.state.branches {
@@ -1247,6 +1276,7 @@ impl Window {
             parent,
             parent_rev,
             pr: None,
+            pr_state: None,
         };
         self.state.branches.push(t.clone());
         self.save()?;
@@ -1372,6 +1402,7 @@ impl Window {
                 parent: parent.clone(),
                 parent_rev,
                 pr: None,
+                pr_state: None,
             };
             added.push(t);
             if chain && parent != self.state.trunk && !self.tracks(&parent) {
@@ -1526,6 +1557,7 @@ impl Window {
         self.repo.git(&["branch", "-m", old, new], None)?;
         self.state.branches[i].name = new.to_string();
         self.state.branches[i].pr = None;
+        self.state.branches[i].pr_state = None;
         for c in self.state.branches.iter_mut() {
             if c.parent == old {
                 c.parent = new.to_string();
@@ -1954,6 +1986,7 @@ impl Window {
             };
             let number = v["number"].as_u64().unwrap_or(0);
             self.state.branches[i].pr = Some(number);
+            self.state.branches[i].pr_state = Some(pr_state_of(&v));
             bodies.push((number, v["body"].as_str().unwrap_or_default().to_string()));
             result.prs.push(SubmittedPr {
                 branch: n.clone(),

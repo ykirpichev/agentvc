@@ -42,6 +42,7 @@ pub(crate) fn routes() -> Router<AppState> {
         )
         .route("/attempts/{id}/take", post(take::take))
         .merge(review::routes())
+        .merge(crate::workspaces::routes())
         .merge(graph::routes())
         .fallback(|| async {
             ApiError::new(
@@ -95,6 +96,17 @@ impl From<Error> for ApiError {
             | Error::NothingToTake { .. }
             | Error::BadHunk { .. }
             | Error::BadQuery(_) => StatusCode::BAD_REQUEST,
+            Error::Stack { code, .. } => match *code {
+                "no_workspace" | "no_request" => StatusCode::NOT_FOUND,
+                "conflict"
+                | "stack_locked"
+                | "request_not_queued"
+                | "remote_workspace"
+                | "checked_out_elsewhere"
+                | "owned_by_other_window"
+                | "rebase_in_progress" => StatusCode::CONFLICT,
+                _ => StatusCode::BAD_REQUEST,
+            },
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         };
         let mut err = ApiError::new(status, e.code(), e.to_string());
