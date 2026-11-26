@@ -552,6 +552,10 @@ pub fn rebase(space: &Space, attempt_id: i64, opts: &RebaseOptions) -> Result<Re
          VALUES (?1, ?2, ?3, ?4, ?5)",
         params![attempt_id, snap.id, onto, onto_tree, now()],
     )?;
+    if view_ok {
+        // Move the view's git HEAD and index to the new base.
+        let _ = space.link_view_git(&space.attempt(attempt_id)?);
+    }
     if keep && attempt.status != Status::Exploring {
         space.db.execute(
             "UPDATE attempts SET status = 'exploring', reason = ?1 WHERE id = ?2",

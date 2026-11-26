@@ -122,6 +122,14 @@ impl HostRepo {
         cmd.arg("-C")
             .arg(&self.workdir)
             .args(args)
+            // Set when agentvc runs from a git hook (a view's post-commit);
+            // they would point this command at the view's git directory.
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .env_remove("GIT_COMMON_DIR")
+            .env_remove("GIT_OBJECT_DIRECTORY")
+            .env_remove("GIT_PREFIX")
             .envs(env.iter().copied())
             .stdin(if stdin.is_some() {
                 Stdio::piped()

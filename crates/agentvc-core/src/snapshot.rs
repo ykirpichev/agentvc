@@ -47,7 +47,11 @@ pub fn capture_indexed(store: &ObjectStore, dir: &Path, index_path: Option<&Path
             let root = dir.to_path_buf();
             move |e| {
                 let is_dir = e.file_type().is_some_and(|t| t.is_dir());
-                if is_dir && ALWAYS_SKIPPED.iter().any(|s| e.file_name() == *s) {
+                // `.git` is never content, also as the file that links a view
+                // (or a submodule) to its git directory.
+                if e.file_name() == ".git"
+                    || (is_dir && ALWAYS_SKIPPED.iter().any(|s| e.file_name() == *s))
+                {
                     return false;
                 }
                 let rel = e.path().strip_prefix(&root).unwrap_or(e.path());

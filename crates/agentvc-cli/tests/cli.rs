@@ -987,7 +987,11 @@ fn pr_from_a_thread_branch_keeps_prefix_trailers_and_checkout() {
     let v = agentvc(&w, &["config", "nope", "x"]);
     assert_eq!(v["error"]["code"], "bad_config_key", "{v}");
     let v = agentvc(&w, &["config"]);
-    assert_eq!(v["config"].as_array().unwrap().len(), 4, "{v}");
+    assert_eq!(
+        v["config"].as_array().unwrap().len(),
+        agentvc_core::config::KEYS.len(),
+        "{v}"
+    );
 
     agentvc(&w, &["task", "new", "make f return 2"]);
     let v = agentvc(&w, &["fork", "--task", "t1", "--from", "a1"]);
@@ -1252,4 +1256,90 @@ fn sync_falls_back_to_the_pr_comment_when_the_push_is_refused() {
     assert_eq!(v["attempt"]["reason"], "x");
     let v = agentvc(&other, &["diff", "s1", "a2"]);
     assert_eq!(v["changes"][0]["path"], "lib.rs", "{v}");
+}
+
+#[test]
+fn git_works_in_views_and_commits_become_snapshots() {
+    let tmp = tempdir();
+    let w = tmp.path().join("work");
+    let remote = tmp.path().join("remote.git");
+    fs::create_dir_all(&w).unwrap();
+    fs::create_dir_all(&remote).unwrap();
+    git(&remote, &["init", "-q", "--bare", "-b", "main"]);
+    git(&w, &["init", "-q", "-b", "main"]);
+    fs::write(w.join("lib.rs"), "1\n").unwrap();
+    fs::write(w.join("README.md"), "readme\n").unwrap();
+    git(&w, &["add", "-A"]);
+    git(&w, &["commit", "-q", "-m", "base"]);
+    git(&w, &["remote", "add", "origin", remote.to_str().unwrap()]);
+    git(&w, &["push", "-q", "origin", "main"]);
+    let base = git(&w, &["rev-parse", "HEAD"]);
+
+    agentvc(&w, &["init"]);
+    let v = agentvc(&w, &["fork", "--from", "a1"]);
+    assert_eq!(v["fork"]["git"]["head"], base, "{v}");
+    assert_eq!(v["fork"]["git"]["capture_commits"], true, "{v}");
+    let view = v["fork"]["attempt"]["view_path"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let view = Path::new(&view);
+
+    // git status and git diff show the attempt's changes, like agentvc diff.
+    fs::write(view.join("lib.rs"), "2\n").unwrap();
+    fs::write(view.join("new.rs"), "new\n").unwrap();
+    assert_eq!(git(view, &["status", "--porcelain"]), "M lib.rs\n?? new.rs");
+    agentvc(view, &["snapshot"]);
+    let d = agentvc(&w, &["diff", "a2"]);
+    let paths: Vec<&str> = d["changes"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{d}"))
+        .iter()
+        .map(|c| c["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(paths, ["lib.rs", "new.rs"]);
+    assert!(git(view, &["diff"]).contains("+2"));
+    assert_eq!(git(view, &["log", "--format=%s"]), "base");
+    assert_eq!(git(&w, &["worktree", "list"]).lines().count(), 1);
+
+    // A commit in the view runs the real hook and is recorded as a snapshot.
+    git(view, &["add", "-A"]);
+    git(view, &["commit", "-q", "-m", "two"]);
+    let commit = git(view, &["rev-parse", "HEAD"]);
+    let snaps = agentvc(&w, &["show", "a2"])["snapshots"].clone();
+    let last = snaps.as_array().unwrap().last().unwrap().clone();
+    assert_eq!(last["trigger"], "git-commit", "{snaps}");
+    assert_eq!(last["meta"]["git_commit"], commit);
+    assert_eq!(last["meta"]["message"], "two");
+    assert_eq!(
+        git(&w, &["rev-parse", "main"]),
+        base,
+        "host branch untouched"
+    );
+
+    // After a rebase, the view's HEAD is the new base.
+    let other = tmp.path().join("other");
+    git(
+        tmp.path(),
+        &[
+            "clone",
+            "-q",
+            remote.to_str().unwrap(),
+            other.to_str().unwrap(),
+        ],
+    );
+    fs::write(other.join("NEWS.md"), "news\n").unwrap();
+    git(&other, &["add", "-A"]);
+    git(&other, &["commit", "-q", "-m", "other PR"]);
+    git(&other, &["push", "-q", "origin", "main"]);
+    let main = git(&other, &["rev-parse", "HEAD"]);
+    let v = agentvc(&w, &["rebase", "a2"]);
+    assert_eq!(v["ok"], true, "{v}");
+    assert_eq!(git(view, &["rev-parse", "HEAD"]), main);
+    assert_eq!(git(view, &["status", "--porcelain"]), "M lib.rs\n?? new.rs");
+
+    // Abandoning removes the link and its gitdir.
+    agentvc(&w, &["abandon", "a2", "--reason", "test"]);
+    assert!(!w.join(".agentvc/git/a2").exists());
+    assert_eq!(git(&w, &["worktree", "list"]).lines().count(), 1);
 }
