@@ -287,7 +287,13 @@ impl Space {
         what: &str,
     ) -> Result<String> {
         copy_tree_objects(self, &Oid::from_hex(tree)?, &repo.objects_dir()?)?;
-        let m = crate::rebase::merge_trees(repo, from_commit, tree, onto)?;
+        let sides = crate::resolve::Sides {
+            ours: what.to_string(),
+            theirs: onto[..12.min(onto.len())].to_string(),
+            theirs_first: false,
+        };
+        let rules = crate::resolve::Rules::from_space(self)?;
+        let m = crate::rebase::merge_trees(repo, from_commit, tree, onto, &rules, &sides)?;
         if !m.conflicts.is_empty() {
             return Err(Error::StoryConflict {
                 change: what.to_string(),

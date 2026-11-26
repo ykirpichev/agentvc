@@ -121,6 +121,9 @@ enum Cmd {
     /// Create and list tasks.
     #[command(subcommand)]
     Task(TaskCmd),
+    /// Conflict tools: see how resolution strategies handle real conflicts.
+    #[command(subcommand)]
+    Conflicts(ConflictsCmd),
     /// Start a new attempt in its own view, forked from an attempt or snapshot.
     Fork {
         /// Task this attempt works on (tN or N).
@@ -473,6 +476,10 @@ enum Cmd {
         /// mark the attempt exploring; fix them, then `snapshot`.
         #[arg(long)]
         keep_conflicts: bool,
+        /// Report git's conflicts as they are, without the resolution
+        /// strategies (`agentvc config merge.strategy`).
+        #[arg(long)]
+        no_auto_resolve: bool,
     },
     /// Take files or hunks of another attempt's changes (what `agentvc diff
     /// aY` shows) into an attempt's view, three-way merged with its own
@@ -497,6 +504,10 @@ enum Cmd {
         /// attempt exploring; fix them, then `snapshot`.
         #[arg(long)]
         keep_conflicts: bool,
+        /// Report git's conflicts as they are, without the resolution
+        /// strategies (`agentvc config merge.strategy`).
+        #[arg(long)]
+        no_auto_resolve: bool,
     },
     /// Three-way merge all of another attempt's changes into an attempt
     /// (`take` with everything), recorded as a `merge` snapshot.
@@ -506,6 +517,10 @@ enum Cmd {
         into: Option<String>,
         #[arg(long)]
         keep_conflicts: bool,
+        /// Report git's conflicts as they are, without the resolution
+        /// strategies (`agentvc config merge.strategy`).
+        #[arg(long)]
+        no_auto_resolve: bool,
     },
     /// Export an attempt, push its branch and open (or update) a GitHub PR.
     Pr {
@@ -677,6 +692,22 @@ enum Cmd {
         /// Revert every file `integrate` wrote, keeping your own settings.
         #[arg(long)]
         remove: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum ConflictsCmd {
+    /// Re-run the merge commits of the host repository's history with the
+    /// conflict resolution strategies (`agentvc config merge.strategy`) and
+    /// report how many conflicts resolve and whether the result matches
+    /// what was committed.
+    Replay {
+        /// Merge commits to look at, newest first.
+        #[arg(long, default_value_t = 200)]
+        limit: usize,
+        /// Plain git, without resolution: the baseline.
+        #[arg(long)]
+        no_auto_resolve: bool,
     },
 }
 
@@ -1084,6 +1115,21 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
                 text: format!("t{}  {}", t.id, t.goal),
                 json: json!({ "task": t }),
             }
+        }
+        Cmd::Conflicts(ConflictsCmd::Replay {
+            limit,
+            no_auto_resolve,
+        }) => {
+            let rules = if no_auto_resolve {
+                agentvc_core::resolve::Rules::disabled()
+            } else {
+                agentvc_core::resolve::Rules::from_space(&space)?
+            };
+            replay_out(agentvc_core::resolve::replay(
+                space.workdir(),
+                &rules,
+                limit,
+            )?)
         }
         Cmd::Task(TaskCmd::List) => {
             let tasks = space.tasks()?;
@@ -2119,12 +2165,14 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
             remote,
             no_fetch,
             keep_conflicts,
+            no_auto_resolve,
         } => {
             let opts = agentvc_core::RebaseOptions {
                 onto,
                 remote: Some(remote),
                 no_fetch,
                 keep_conflicts,
+                no_auto_resolve,
                 actor: None,
             };
             let r = agentvc_core::rebase::rebase(&space, attempt_id(&attempt)?, &opts)?;
@@ -2148,6 +2196,7 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
                 if !r.view_updated {
                     t += "\n(the view is gone, so only history was updated)";
                 }
+                t += &resolved_text(&r.resolved);
                 if !r.conflicts.is_empty() {
                     t += &format!(
                         "\n{} files have conflict markers; fix them, then `agentvc snapshot a{}`:",
@@ -2171,6 +2220,7 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
             paths,
             hunks,
             keep_conflicts,
+            no_auto_resolve,
         } => {
             let into = match into {
                 Some(a) => attempt_id(&a)?,
@@ -2180,6 +2230,7 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
                 paths,
                 hunks,
                 keep_conflicts,
+                no_auto_resolve,
                 actor: None,
             };
             take_out(agentvc_core::combine::take(
@@ -2193,6 +2244,7 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
             source,
             into,
             keep_conflicts,
+            no_auto_resolve,
         } => {
             let into = match into {
                 Some(a) => attempt_id(&a)?,
@@ -2200,6 +2252,7 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
             };
             let opts = agentvc_core::combine::TakeOptions {
                 keep_conflicts,
+                no_auto_resolve,
                 ..Default::default()
             };
             take_out(agentvc_core::combine::take(
@@ -2442,6 +2495,7 @@ fn take_out(r: agentvc_core::combine::TakeResult) -> Out {
             .unwrap_or_default();
         t += &format!("\n  {}  {}{hunks}", change_mark(c.kind), c.path);
     }
+    t += &resolved_text(&r.resolved);
     if !r.conflicts.is_empty() {
         t += &format!(
             "\n{} files have conflict markers; fix them, then `agentvc snapshot a{}`:",
@@ -2455,6 +2509,73 @@ fn take_out(r: agentvc_core::combine::TakeResult) -> Out {
     Out {
         text: t,
         json: json!({ "take": r }),
+    }
+}
+
+/// Lines naming the files whose conflicts a strategy resolved.
+fn resolved_text(resolved: &[agentvc_core::resolve::Resolution]) -> String {
+    let mut t = String::new();
+    if resolved.is_empty() {
+        return t;
+    }
+    t += &format!(
+        "\nauto-resolved conflicts in {} file{}:",
+        resolved.len(),
+        if resolved.len() == 1 { "" } else { "s" }
+    );
+    for r in resolved {
+        t += &format!(
+            "\n  R  {}  ({}, {} hunk{})",
+            r.path,
+            r.strategy,
+            r.hunks,
+            if r.hunks == 1 { "" } else { "s" }
+        );
+    }
+    t
+}
+
+fn replay_out(r: agentvc_core::resolve::Replay) -> Out {
+    let pct = |a: usize, b: usize| (a * 100).checked_div(b).unwrap_or(0);
+    let mut t = format!(
+        "{} merge commits, {} with git conflicts in {} files ({} hunks)\n\
+         resolved: {} of {} merges, {} of {} files ({}%), {} of {} hunks ({}%)\n\
+         {} of the {} resolved files are identical to what was committed",
+        r.merges,
+        r.conflicted.len(),
+        r.files,
+        r.hunks,
+        r.merges_resolved,
+        r.conflicted.len(),
+        r.files_resolved,
+        r.files,
+        pct(r.files_resolved, r.files),
+        r.hunks_resolved,
+        r.hunks,
+        pct(r.hunks_resolved, r.hunks),
+        r.files_matching,
+        r.files_resolved,
+    );
+    for m in &r.conflicted {
+        t += &format!("\n\n{}  {}", &m.commit[..12], m.subject);
+        for f in &m.files {
+            let f_ = &f.resolution;
+            let state = match (f_.remaining, f.matches_commit) {
+                (0, Some(true)) => "resolved, same as committed".to_string(),
+                (0, _) => "resolved, differs from committed".to_string(),
+                (n, _) => format!("{n} hunk{} left", if n == 1 { "" } else { "s" }),
+            };
+            t += &format!(
+                "\n  {}  {}  ({}: {state})",
+                if f_.remaining == 0 { 'R' } else { 'C' },
+                f_.path,
+                f_.strategy
+            );
+        }
+    }
+    Out {
+        text: t,
+        json: json!({ "replay": r }),
     }
 }
 

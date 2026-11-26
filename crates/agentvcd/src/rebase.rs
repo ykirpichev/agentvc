@@ -22,6 +22,8 @@ pub(crate) struct RebaseBody {
     no_fetch: bool,
     #[serde(default)]
     keep_conflicts: bool,
+    #[serde(default)]
+    no_auto_resolve: bool,
 }
 
 #[derive(Serialize)]
@@ -44,6 +46,7 @@ pub(crate) async fn rebase(
         remote: body.remote,
         no_fetch: body.no_fetch,
         keep_conflicts: body.keep_conflicts,
+        no_auto_resolve: body.no_auto_resolve,
         actor: Some(st.actor().to_string()),
     };
     let out = st

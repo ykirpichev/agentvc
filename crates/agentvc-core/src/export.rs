@@ -1012,39 +1012,47 @@ mod tests {
     }
 
     #[test]
-    fn parents_on_import_head_not_later_commits() {
+    fn parents_on_the_commit_the_attempt_was_forked_from() {
         let (tmp, space, head) = repo();
         let w = tmp.path();
-        // The user commits on main after init; the attempt did not see it.
+        let task = space.create_task("t", None).unwrap();
+        let a = fork(&space, task.id, "agent");
+        // The user commits on main after a's fork; a did not see it.
         fs::write(w.join("later.txt"), "later\n").unwrap();
         git(w, &["add", "later.txt"]);
         git(w, &["commit", "-q", "-m", "later"]);
         let later = git(w, &["rev-parse", "HEAD"]);
 
-        let task = space.create_task("t", None).unwrap();
-        let a = fork(&space, task.id, "agent");
-        let r = export(
-            &space,
-            a.id,
-            &ExportOptions {
-                branch: "b1".into(),
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        assert_eq!(r.parent.as_deref(), Some(head.as_str()));
+        let export_to = |id: i64, branch: &str, base: Option<&str>| {
+            export(
+                &space,
+                id,
+                &ExportOptions {
+                    branch: branch.into(),
+                    base: base.map(String::from),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            export_to(a.id, "b1", None).parent.as_deref(),
+            Some(head.as_str())
+        );
+        assert_eq!(
+            export_to(a.id, "b2", Some("main")).parent.as_deref(),
+            Some(later.as_str())
+        );
 
-        let r = export(
-            &space,
-            a.id,
-            &ExportOptions {
-                branch: "b2".into(),
-                base: Some("main".into()),
-                ..Default::default()
-            },
-        )
-        .unwrap();
+        // b is forked from the checkout after that commit (#96): its base is
+        // the new HEAD, so the export carries only b's own change.
+        let b = fork(&space, task.id, "agent");
+        fs::write(b.view_path.join("b.txt"), "b\n").unwrap();
+        space.snapshot(b.id, "manual", None).unwrap();
+        let r = export_to(b.id, "b3", None);
         assert_eq!(r.parent.as_deref(), Some(later.as_str()));
+        let files = git(w, &["diff", "--name-only", &later, "b3"]);
+        assert_eq!(files, "b.txt");
     }
 
     #[test]

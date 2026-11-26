@@ -1062,6 +1062,9 @@ impl Space {
             // A fresh fork compares against the snapshot it was forked from.
             if let Ok(last) = self.head_snapshot(attempt_id) {
                 if last.tree == tree {
+                    if attempt_id == ROOT_ATTEMPT {
+                        self.note_root_base(&last);
+                    }
                     return Ok(SnapshotResult {
                         snapshot: last,
                         unchanged: true,
@@ -1081,6 +1084,9 @@ impl Space {
             ],
         )?;
         let snap = self.snapshot_by_id(self.db.last_insert_rowid())?;
+        if attempt_id == ROOT_ATTEMPT {
+            self.note_root_base(&snap);
+        }
         Ok(SnapshotResult {
             snapshot: snap,
             unchanged: false,

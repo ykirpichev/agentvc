@@ -38,6 +38,8 @@ pub enum Error {
     },
     #[error("git {cmd} failed: {stderr}")]
     Git { cmd: String, stderr: String },
+    #[error("bad merge rule: {0}")]
+    BadMergeRule(String),
     #[error("unknown config key {0:?}; known keys: {keys}", keys = crate::config::KEYS.iter().map(|k| k.name).collect::<Vec<_>>().join(", "))]
     BadConfigKey(String),
     #[error("cannot tell the GitHub repository from remote URL {0:?}; pass --repo owner/name")]
@@ -180,6 +182,7 @@ impl Error {
             Error::PushNotAllowed { .. } => "push_not_allowed",
             Error::Git { .. } => "git",
             Error::BadConfigKey(_) => "bad_config_key",
+            Error::BadMergeRule(_) => "bad_merge_rule",
             Error::BadRemote(_) => "bad_remote",
             Error::NoToken => "no_token",
             Error::GitHub { .. } => "github",

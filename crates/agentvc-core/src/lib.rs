@@ -23,6 +23,7 @@ pub mod overview;
 pub mod patch;
 pub mod query;
 pub mod rebase;
+pub mod resolve;
 pub mod run;
 pub mod snapshot;
 pub mod space;

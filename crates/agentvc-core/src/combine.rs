@@ -29,6 +29,7 @@ use crate::export::{copy_tree_objects, HostRepo};
 use crate::objects::{Mode, ObjectStore, Oid, TreeEntry};
 use crate::patch::{self, DEFAULT_CONTEXT};
 use crate::rebase::{import_tree, insert_snapshot, merge_trees, write_changes, CatFile};
+use crate::resolve::{Resolution, Rules, Sides};
 use crate::snapshot::{self, ChangeKind, FileChange};
 use crate::space::{Snapshot, Space, Status, ROOT_ATTEMPT, SPACE_DIR};
 
@@ -46,6 +47,8 @@ pub struct TakeOptions {
     /// `agentvc diff aY --patch`.
     pub hunks: Vec<String>,
     pub keep_conflicts: bool,
+    /// Report git's conflicts as they are, without resolution strategies.
+    pub no_auto_resolve: bool,
     /// Who takes, for the operation log. Defaults to the target's actor.
     pub actor: Option<String>,
 }
@@ -69,6 +72,8 @@ pub struct TakeResult {
     pub changes: Vec<FileChange>,
     /// Files left with conflict markers (only with `keep_conflicts`).
     pub conflicts: Vec<String>,
+    /// Files whose conflicts a resolution strategy resolved (see `resolve`).
+    pub resolved: Vec<Resolution>,
     pub status: Status,
 }
 
@@ -337,7 +342,25 @@ pub fn take(space: &Space, into: i64, source: i64, opts: &TakeOptions) -> Result
         None,
         &ident,
     )?;
-    let merge = merge_trees(&repo, &base_commit, &current.to_hex(), &theirs_commit)?;
+    let rules = if opts.no_auto_resolve {
+        Rules::disabled()
+    } else {
+        Rules::from_space(space)?
+    };
+    let sides = Sides {
+        ours: format!("a{into}"),
+        theirs: format!("a{source}"),
+        theirs_first: false,
+    };
+    let merge = merge_trees(
+        &repo,
+        &base_commit,
+        &current.to_hex(),
+        &theirs_commit,
+        &rules,
+        &sides,
+    )?;
+    let resolved = merge.resolved();
     let keep = !merge.conflicts.is_empty();
     if keep && !(opts.keep_conflicts && view_ok) {
         return Err(Error::TakeConflict {
@@ -363,6 +386,7 @@ pub fn take(space: &Space, into: i64, source: i64, opts: &TakeOptions) -> Result
         snapshot,
         changes: view_changes.clone(),
         conflicts: merge.conflicts.clone(),
+        resolved: resolved.clone(),
         status,
     };
     if view_changes.is_empty() {
@@ -384,6 +408,9 @@ pub fn take(space: &Space, into: i64, source: i64, opts: &TakeOptions) -> Result
     }
     if keep {
         meta["conflicts"] = json!(merge.conflicts);
+    }
+    if !resolved.is_empty() {
+        meta["auto_resolved"] = json!(resolved);
     }
     let snap = insert_snapshot(space, into, &merge.tree, mode, Some(meta))?;
     if keep && target.status != Status::Exploring {
