@@ -703,6 +703,28 @@ pub static TOOLS: &[Tool] = &[
         },
     },
     Tool {
+        name: "comments",
+        title: "PR review comments",
+        description: "The review on an attempt's pull request, to address it: change requests and open comment threads with file and line, plus PR state and failing checks. Finds the PR through the attempts this one was forked from, so call it right after forking from a PR'd attempt. refresh=true fetches from GitHub first. Returns {pr: {state, checks, reviews, decision, threads, unresolved}}.",
+        read_only: true,
+        destructive: false,
+        open_world: true,
+        params: || {
+            vec![
+                ("attempt", s("Attempt id, for example \"a3\". Defaults to the server's view."), false),
+                ("all", b("Also resolved and outdated threads."), false),
+                ("refresh", b("Fetch from GitHub first."), false),
+            ]
+        },
+        argv: |a| {
+            Ok(Argv::new(&["comments"])
+                .flag("all", a.bool("all")?)
+                .flag("refresh", a.bool("refresh")?)
+                .pos(a.str("attempt")?)
+                .done())
+        },
+    },
+    Tool {
         name: "land",
         title: "Land attempt on a local branch",
         description: "Put an attempt on a local git branch without GitHub (then `git push` works with any remote): rebase it onto the branch when the branch moved (a conflict fails with `conflict` and changes nothing), then fast-forward the branch to one clean commit, or write a merge commit with merge=true. Defaults to the checked-out branch, whose working tree moves along; local edits the move would overwrite fail with `checkout_dirty`. Returns {land: {branch, commit, previous, rebased, checkout_updated, hooks}}.",

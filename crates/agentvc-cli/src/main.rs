@@ -191,6 +191,22 @@ enum Cmd {
     },
     /// Pick an attempt as the winner; its open siblings are abandoned.
     Promote { attempt: String },
+    /// The review on an attempt's PR, for the agent that addresses it:
+    /// change requests and open comment threads with file and line, as
+    /// Markdown (`--json`: the stored feedback). Looks through the attempts
+    /// it was forked from, so a follow-up fork sees its parent's PR. Uses
+    /// what the last `agentvc pr --refresh` fetched; `--refresh` fetches
+    /// first.
+    Comments {
+        /// Attempt (aN). Defaults to the attempt of the current directory.
+        attempt: Option<String>,
+        /// Also resolved and outdated threads.
+        #[arg(long)]
+        all: bool,
+        /// Fetch from GitHub first.
+        #[arg(long)]
+        refresh: bool,
+    },
     /// The operation log: every change to the space, newest first, with the
     /// ids `agentvc undo` takes.
     #[command(subcommand)]
@@ -524,7 +540,15 @@ enum Cmd {
     },
     /// Export an attempt, push its branch and open (or update) a GitHub PR.
     Pr {
-        attempt: String,
+        /// Attempt (aN). With --refresh and no attempt: every open PR.
+        #[arg(required_unless_present = "refresh")]
+        attempt: Option<String>,
+        /// Export nothing: fetch the PR's state, checks, reviews and review
+        /// comments from GitHub into the attempt (`status aN` and
+        /// `agentvc comments aN` show them). Records the merge commit once
+        /// the PR merges.
+        #[arg(long)]
+        refresh: bool,
         /// Branch the PR merges into. Defaults to the repo's default branch.
         #[arg(long)]
         base: Option<String>,
@@ -858,6 +882,46 @@ fn verify_flag(verify: bool, no_verify: bool) -> Option<bool> {
         (_, true) => Some(false),
         _ => None,
     }
+}
+
+/// `agentvc pr --refresh [aN]`.
+fn refresh_out(space: &Space, attempt: Option<&str>) -> anyhow::Result<Out> {
+    use agentvc_core::feedback;
+    let (done, err) = match attempt {
+        Some(a) => (vec![feedback::refresh(space, attempt_id(a)?)?], None),
+        None => feedback::refresh_open(space),
+    };
+    if done.is_empty() {
+        if let Some(e) = err {
+            return Err(e.into());
+        }
+    }
+    let mut text = String::new();
+    for r in &done {
+        text += &format!("{}  {}\n", r.feedback.url, r.feedback.summary());
+        if r.newly_merged {
+            text += &format!(
+                "  merged: recorded on {}\n",
+                r.attempts
+                    .iter()
+                    .map(|i| format!("a{i}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+    }
+    if done.is_empty() {
+        text = "no open PRs to refresh".into();
+    }
+    let mut j = json!({ "refreshed": done });
+    if let Some(e) = &err {
+        text += &format!("\nwarning: {e}");
+        j["warning"] = json!({ "code": e.code(), "message": e.to_string() });
+    }
+    Ok(Out {
+        text: text.trim_end().to_string(),
+        json: j,
+    })
 }
 
 fn attempt_id(s: &str) -> anyhow::Result<i64> {
@@ -1279,6 +1343,27 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
                 notes += "\nThe view is mounted in a user namespace: only agentvc commands \
                           (agentvc run) see its contents.";
             }
+            // A follow-up fork of a PR'd attempt: point the agent at the
+            // review it is there to address.
+            let review =
+                space.pr_feedback(r.attempt.id).ok().flatten().filter(|f| {
+                    f.is_open() && (f.unresolved > 0 || f.decision == "changes_requested")
+                });
+            if let Some(f) = &review {
+                notes += &format!(
+                    "\nPR #{} has review feedback ({}): run `agentvc comments a{}`",
+                    f.number,
+                    f.summary(),
+                    r.attempt.id
+                );
+            }
+            let mut fork_json = json!(r);
+            if let Some(f) = &review {
+                fork_json["review"] = json!({
+                    "pr": f.url, "unresolved": f.unresolved, "decision": f.decision,
+                    "checks": f.checks.state,
+                });
+            }
             Out {
                 text: format!(
                     "a{} forked from {} (s{}) via {}{}\n{}{}",
@@ -1290,7 +1375,7 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
                     r.attempt.view_path.display(),
                     notes
                 ),
-                json: json!({ "fork": r }),
+                json: json!({ "fork": fork_json }),
             }
         }
         Cmd::Snapshot {
@@ -1413,6 +1498,32 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
             };
             add_sync(&mut out, agentvc_core::github::auto_save(&space));
             out
+        }
+        Cmd::Comments {
+            attempt,
+            all,
+            refresh,
+        } => {
+            let id = match attempt {
+                Some(a) => attempt_id(&a)?,
+                None => current()?,
+            };
+            if refresh {
+                agentvc_core::feedback::refresh(&space, id)?;
+            }
+            let f = match space.pr_feedback(id)? {
+                Some(f) => f,
+                None if agentvc_core::feedback::pr_url_for(&space, id)?.is_some() => {
+                    agentvc_core::feedback::refresh(&space, id)?.feedback
+                }
+                None => return Err(agentvc_core::Error::NoPr(id).into()),
+            };
+            Out {
+                text: agentvc_core::feedback::comments_markdown(&f, all)
+                    .trim_end()
+                    .to_string(),
+                json: json!({ "pr": f }),
+            }
         }
         Cmd::Status { attempt } => {
             let id = match attempt {
@@ -2269,7 +2380,13 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
             unset,
         } => config_cmd(&space, key, value, add, unset)?,
         Cmd::Pr {
+            refresh: true,
             attempt,
+            ..
+        } => refresh_out(&space, attempt.as_deref())?,
+        Cmd::Pr {
+            attempt,
+            refresh: _,
             base,
             branch,
             draft,
@@ -2311,6 +2428,7 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
                 squash,
                 stack,
             };
+            let attempt = attempt.expect("clap requires it without --refresh");
             let r = agentvc_core::github::open_pr(&space, attempt_id(&attempt)?, &opts)?;
             // The PR shows only the winner; the attempts behind it go to the
             // remote too, so they outlive this machine (#56).
@@ -2662,6 +2780,13 @@ fn attempt_status_out(st: agentvc_core::status::AttemptStatus) -> Out {
     if let Some(u) = &st.pr_url {
         t += &format!("pr       {u}\n");
     }
+    if let Some(f) = &st.pr {
+        t += &format!(
+            "review   {} (refreshed {})\n",
+            f.summary(),
+            ago(f.refreshed_at)
+        );
+    }
     if let Some(l) = &st.landed {
         t += &format!(
             "landed   on {} at {}\n",
@@ -2716,6 +2841,18 @@ fn space_status_out(st: agentvc_core::status::SpaceStatus) -> Out {
         t += &format!(
             "\nneeds review: {} (passed, not promoted; `agentvc diff --stat` them, then `agentvc promote`)\n",
             list.join(", ")
+        );
+    }
+    for p in &st.open_prs {
+        let who: Vec<_> = p.attempts.iter().map(|i| format!("a{i}")).collect();
+        t += &format!(
+            "pr: {}  {}  {}\n",
+            p.url,
+            who.join(", "),
+            p.feedback
+                .as_ref()
+                .map(|f| f.summary())
+                .unwrap_or_else(|| "not refreshed yet (`agentvc pr --refresh`)".into())
         );
     }
     for r in &st.runs {

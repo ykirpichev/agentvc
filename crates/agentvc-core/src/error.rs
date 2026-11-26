@@ -115,6 +115,10 @@ pub enum Error {
     DetachedHead,
     #[error("cannot run git hooks in the view of a{id}: {reason}")]
     NoViewGit { id: i64, reason: String },
+    #[error("GitHub's API rate limit is used up{}", reset_at.map(|t| format!("; it resets at unix time {t}")).unwrap_or_default())]
+    RateLimited { reset_at: Option<i64> },
+    #[error("attempt a{0} has no pull request; open one with `agentvc pr a{0}`")]
+    NoPr(i64),
     #[error("nothing to undo")]
     NothingToUndo,
     #[error("operation {op} ({kind}) cannot be undone")]
@@ -202,6 +206,8 @@ impl Error {
             Error::HookFailed { .. } => "hook_failed",
             Error::DetachedHead => "detached_head",
             Error::NoViewGit { .. } => "no_view_git",
+            Error::RateLimited { .. } => "rate_limited",
+            Error::NoPr(_) => "no_pr",
             Error::NothingToUndo => "nothing_to_undo",
             Error::NotUndoable { .. } => "not_undoable",
             Error::AlreadyUndone { .. } => "already_undone",
@@ -258,6 +264,7 @@ impl Error {
                 "source": format!("a{source_attempt}"),
                 "paths": paths,
             })),
+            Error::RateLimited { reset_at } => Some(serde_json::json!({ "reset_at": reset_at })),
             Error::AmbiguousSpace { ids } => Some(serde_json::json!({ "spaces": ids })),
             Error::SyncConflict { refname, tip, .. } => {
                 Some(serde_json::json!({ "ref": refname, "tip": tip }))

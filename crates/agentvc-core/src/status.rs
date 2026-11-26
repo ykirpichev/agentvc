@@ -38,6 +38,9 @@ pub struct AttemptStatus {
     pub pr_url: Option<String>,
     /// The local branch `agentvc land` put it on, and the commit.
     pub landed: Option<crate::land::Landing>,
+    /// What GitHub said about its PR (or its parent's) at the last
+    /// `agentvc pr --refresh`: state, checks, reviews, comment threads.
+    pub pr: Option<crate::feedback::PrFeedback>,
     /// `None` outside a git repo, or without a remote-tracking branch.
     pub upstream: Option<Upstream>,
 }
@@ -71,6 +74,18 @@ pub struct SpaceStatus {
     pub runs: Vec<Run>,
     /// Number of tasks with a promoted attempt.
     pub done_tasks: usize,
+    /// PRs not known to be merged or closed (merged ones drop out after
+    /// `agentvc pr --refresh`).
+    pub open_prs: Vec<OpenPr>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct OpenPr {
+    pub url: String,
+    /// Attempts exported to it, newest first.
+    pub attempts: Vec<i64>,
+    /// From the last refresh; `None` before the first one.
+    pub feedback: Option<crate::feedback::PrFeedback>,
 }
 
 /// The remote-tracking branch to compare with: `<remote>/HEAD`'s target,
@@ -139,6 +154,7 @@ impl Space {
         Ok(AttemptStatus {
             pr_url: self.pr_url(id)?,
             landed: self.landing(id)?,
+            pr: self.pr_feedback(id)?,
             upstream: upstream(self, &head)?,
             attempt,
             task,
@@ -180,6 +196,15 @@ impl Space {
             needs_review,
             runs: self.runs(true)?,
             done_tasks,
+            open_prs: self
+                .open_prs()?
+                .into_iter()
+                .map(|(url, attempts, feedback)| OpenPr {
+                    url,
+                    attempts,
+                    feedback,
+                })
+                .collect(),
         })
     }
 }

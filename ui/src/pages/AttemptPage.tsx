@@ -1,6 +1,6 @@
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router'
 import { api, ref } from '../api/client'
-import type { AttemptDetail, Ref } from '../api/types'
+import type { AttemptDetail, PrFeedback, Ref } from '../api/types'
 import { ActionButtons, useAttemptActions } from '../components/ReviewActions'
 import { useResource } from '../api/useResource'
 import { AttemptMeta } from '../components/AttemptMeta'
@@ -164,6 +164,7 @@ function AttemptView({ detail }: { detail: AttemptDetail }) {
                   <a href={detail.pr_url} target="_blank" rel="noreferrer">
                     {detail.pr_url.replace(/^https:\/\/github\.com\//, '')}
                   </a>
+                  {detail.pr && <span className="muted"> · {prSummary(detail.pr)}</span>}
                 </dd>
               </div>
             )}
@@ -179,6 +180,8 @@ function AttemptView({ detail }: { detail: AttemptDetail }) {
           </>
         }
       />
+
+      {detail.pr && <ReviewThreads pr={detail.pr} />}
 
       {diff.error && <ErrorNote error={diff.error} />}
       {diff.data && changes.length === 0 && (
@@ -251,4 +254,45 @@ function AttemptView({ detail }: { detail: AttemptDetail }) {
 /** `git:<sha>` shortened for headers; snapshot refs as they are. */
 function refLabel(r: Ref): string {
   return r.startsWith('git:') ? r.slice(4, 11) : r
+}
+
+function prSummary(pr: PrFeedback): string {
+  const parts: string[] = [pr.state]
+  if (pr.checks.state === 'fail') parts.push(`checks fail: ${pr.checks.failing.join(', ')}`)
+  else if (pr.checks.state === 'pending') parts.push('checks running')
+  else if (pr.checks.state === 'pass') parts.push('checks pass')
+  if (pr.decision === 'changes_requested') parts.push('changes requested')
+  if (pr.decision === 'approved') parts.push('approved')
+  if (pr.unresolved > 0) parts.push(`${pr.unresolved} unresolved`)
+  return parts.join(', ')
+}
+
+/** Change requests and open review threads from the attempt's PR. */
+function ReviewThreads({ pr }: { pr: PrFeedback }) {
+  const requests = pr.reviews.filter((r) => r.state === 'changes_requested' && r.body.trim())
+  const threads = pr.threads.filter((t) => t.resolved !== true && !t.outdated)
+  if (requests.length === 0 && threads.length === 0) return null
+  return (
+    <section className="meta review-threads">
+      <span className="label">Review on PR #{pr.number}</span>
+      {requests.map((r, i) => (
+        <blockquote key={`r${i}`} className="prompt">
+          <strong>{r.author}</strong> requested changes: {r.body}
+        </blockquote>
+      ))}
+      {threads.map((t, i) => (
+        <blockquote key={`t${i}`} className="prompt">
+          <code>
+            {t.path}
+            {t.line != null ? `:${t.line}` : ''}
+          </code>
+          {t.comments.map((c, j) => (
+            <div key={j}>
+              <strong>{c.author}</strong>: {c.body}
+            </div>
+          ))}
+        </blockquote>
+      ))}
+    </section>
+  )
 }

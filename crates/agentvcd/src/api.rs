@@ -281,6 +281,9 @@ struct AttemptDetail {
     pr_url: Option<String>,
     /// The local branch `agentvc land` put it on.
     landed: Option<agentvc_core::land::Landing>,
+    /// GitHub's checks, reviews and comment threads on its PR, as of the
+    /// last refresh.
+    pr: Option<agentvc_core::feedback::PrFeedback>,
 }
 
 async fn get_attempt(
@@ -317,6 +320,7 @@ async fn get_attempt(
                 base_commit,
                 pr_url: s.pr_url(id)?,
                 landed: s.landing(id)?,
+                pr: s.pr_feedback(id)?,
             })
         })
         .await?;

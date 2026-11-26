@@ -378,7 +378,7 @@ fn split_tags(v: Option<String>) -> Vec<String> {
     t
 }
 
-pub(crate) fn now() -> i64 {
+pub fn now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)

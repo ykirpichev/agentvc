@@ -354,6 +354,9 @@ fn export_writes_branch_without_touching_worktree() {
 /// Requests the fake GitHub API received: `(method, path, json body)`.
 type RequestLog = std::sync::Arc<std::sync::Mutex<Vec<(String, String, Value)>>>;
 
+/// Whether the fake GitHub reports PR #7 as merged.
+static PR_MERGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 fn fake_github() -> (String, RequestLog) {
     use std::io::{BufRead, BufReader, Read, Write};
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -410,11 +413,38 @@ fn fake_github() -> (String, RequestLog) {
                     })
                 });
             drop(log);
+            let merged = PR_MERGED.load(std::sync::atomic::Ordering::SeqCst);
             let pr = serde_json::json!({
                 "number": 7, "html_url": "https://github.com/acme/widget/pull/7",
-                "body": last_body,
+                "body": last_body, "state": if merged { "closed" } else { "open" },
+                "merged": merged, "draft": false,
+                "merged_at": if merged { Value::from("2026-11-26T00:00:00Z") } else { Value::Null },
+                "merge_commit_sha": "abc123merge", "head": { "sha": "headsha1" },
             });
             let reply = match (method.as_str(), path.as_str()) {
+                ("GET", p) if p.starts_with("/repos/acme/widget/commits/headsha1/check-runs") => {
+                    serde_json::json!({ "check_runs": [
+                        { "name": "rust", "status": "completed", "conclusion": "failure" },
+                        { "name": "ui", "status": "completed", "conclusion": "success" },
+                    ]})
+                }
+                ("GET", "/repos/acme/widget/commits/headsha1/status") => {
+                    serde_json::json!({ "statuses": [] })
+                }
+                ("GET", p) if p.starts_with("/repos/acme/widget/pulls/7/reviews") => {
+                    serde_json::json!([{ "user": { "login": "ana" }, "state": "CHANGES_REQUESTED",
+                        "body": "Handle the empty case", "submitted_at": "2026-11-26T00:00:00Z" }])
+                }
+                ("POST", "/graphql") => {
+                    serde_json::json!({ "data": { "repository": { "pullRequest": {
+                    "reviewThreads": { "nodes": [
+                        { "isResolved": false, "isOutdated": false, "path": "lib.rs", "line": 1,
+                          "comments": { "nodes": [{ "author": { "login": "ana" },
+                            "body": "Off by one here", "url": "https://github.com/acme/widget/pull/7#r1" }] } },
+                        { "isResolved": true, "isOutdated": false, "path": "lib.rs", "line": 1,
+                          "comments": { "nodes": [] } },
+                    ] } } } } })
+                }
                 ("GET", "/repos/acme/widget") => serde_json::json!({ "default_branch": "main" }),
                 ("GET", p) if p.starts_with("/repos/acme/widget/pulls?") => {
                     if created {
@@ -1726,4 +1756,102 @@ fn log_filters_and_blame() {
     let text = agentvc_text(w, &["blame", "x.py", "a2", "--no-working"]);
     assert!(text.contains("agent:claude"), "{text}");
     assert!(!text.contains("three"), "{text}");
+}
+
+#[test]
+fn pr_refresh_brings_checks_reviews_comments_and_the_merge_back() {
+    let tmp = tempdir();
+    let w = tmp.path().join("work");
+    let remote = tmp.path().join("remotes/acme/widget.git");
+    fs::create_dir_all(&w).unwrap();
+    fs::create_dir_all(&remote).unwrap();
+    git(&remote, &["init", "-q", "--bare"]);
+    git(&w, &["init", "-q", "-b", "main"]);
+    fs::write(w.join("lib.rs"), "1\n").unwrap();
+    git(&w, &["add", "-A"]);
+    git(&w, &["commit", "-q", "-m", "base"]);
+    git(&w, &["remote", "add", "origin", remote.to_str().unwrap()]);
+    agentvc(&w, &["init", "--no-prepare"]);
+    agentvc(&w, &["task", "new", "make it 2"]);
+    let v = agentvc(&w, &["fork", "--task", "t1", "--actor", "agent:one"]);
+    let view = v["fork"]["attempt"]["view_path"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    fs::write(Path::new(&view).join("lib.rs"), "2\n").unwrap();
+    agentvc(&w, &["promote", "a2"]);
+
+    let (api, _log) = fake_github();
+    let run = |args: &[&str]| -> Value {
+        let out = Command::cargo_bin("agentvc")
+            .unwrap()
+            .arg("--json")
+            .arg("-C")
+            .arg(&w)
+            .args(args)
+            .env("GITHUB_TOKEN", "test-token")
+            .env("AGENTVC_GITHUB_API", &api)
+            .env_remove("HTTP_PROXY")
+            .env_remove("HTTPS_PROXY")
+            .env_remove("ALL_PROXY")
+            .env_remove("http_proxy")
+            .env_remove("https_proxy")
+            .env_remove("all_proxy")
+            .output()
+            .unwrap();
+        serde_json::from_slice(&out.stdout)
+            .unwrap_or_else(|e| panic!("{args:?}: {e}: {}", String::from_utf8_lossy(&out.stderr)))
+    };
+    let v = run(&["pr", "a2", "--repo", "acme/widget", "--no-sync"]);
+    assert_eq!(v["ok"], true, "{v}");
+
+    // Before any refresh the PR is listed as open, not refreshed yet.
+    let st = run(&["status"]);
+    assert_eq!(
+        st["status"]["open_prs"][0]["attempts"],
+        serde_json::json!([2])
+    );
+    assert!(st["status"]["open_prs"][0]["feedback"].is_null());
+
+    let v = run(&["pr", "--refresh", "a2"]);
+    assert_eq!(v["ok"], true, "{v}");
+    let f = &v["refreshed"][0]["feedback"];
+    assert_eq!(f["state"], "open");
+    assert_eq!(f["checks"]["state"], "fail");
+    assert_eq!(f["checks"]["failing"], serde_json::json!(["rust"]));
+    assert_eq!(f["decision"], "changes_requested");
+    assert_eq!(f["unresolved"], 1);
+
+    let st = run(&["status", "a2"]);
+    assert_eq!(st["status"]["pr"]["unresolved"], 1);
+    assert_eq!(st["status"]["pr"]["threads"][0]["path"], "lib.rs");
+
+    // The next agent, in a fork of a2, gets the review.
+    let v = run(&["fork", "--from", "a2", "--actor", "agent:two"]);
+    assert_eq!(v["fork"]["review"]["unresolved"], 1, "{v}");
+    assert_eq!(v["fork"]["review"]["decision"], "changes_requested");
+    let out = Command::cargo_bin("agentvc")
+        .unwrap()
+        .arg("-C")
+        .arg(&w)
+        .args(["comments", "a3"])
+        .output()
+        .unwrap();
+    let md = String::from_utf8_lossy(&out.stdout);
+    assert!(md.contains("## Changes requested by ana"), "{md}");
+    assert!(
+        md.contains("## lib.rs:1\n\n**ana**: Off by one here"),
+        "{md}"
+    );
+
+    // Merged: the merge commit is recorded once and the PR leaves status.
+    PR_MERGED.store(true, std::sync::atomic::Ordering::SeqCst);
+    let v = run(&["pr", "--refresh"]);
+    assert_eq!(v["refreshed"][0]["newly_merged"], true, "{v}");
+    assert_eq!(v["refreshed"][0]["feedback"]["merge_commit"], "abc123merge");
+    let st = run(&["status"]);
+    assert_eq!(st["status"]["open_prs"], serde_json::json!([]));
+    let v = run(&["pr", "--refresh"]);
+    assert_eq!(v["refreshed"], serde_json::json!([]));
+    PR_MERGED.store(false, std::sync::atomic::Ordering::SeqCst);
 }

@@ -10,6 +10,7 @@ pub mod cursor;
 pub mod doctor;
 pub mod error;
 pub mod export;
+pub mod feedback;
 pub mod gc;
 pub mod github;
 pub mod hooks;
