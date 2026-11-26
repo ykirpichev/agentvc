@@ -2,6 +2,7 @@
 //! copy-on-write views. See `docs/design.md`.
 
 pub mod bundle;
+pub mod combine;
 pub mod config;
 pub mod cursor;
 pub mod doctor;

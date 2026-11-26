@@ -1280,3 +1280,20 @@
     display: none;
   }
 }
+
+/* "Take into aN": copies this file's change into the focused column. */
+.take-file {
+  font: inherit;
+  font-size: 11px;
+  color: var(--accent-text);
+  background: var(--accent-soft);
+  border: 1px solid transparent;
+  border-radius: 6px;
+  padding: 1px 8px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.take-file:hover {
+  border-color: var(--accent);
+}

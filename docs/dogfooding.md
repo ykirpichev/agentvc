@@ -65,6 +65,26 @@ the view and marks the attempt `exploring`. Fix them in `$(agentvc path aX)`, th
 `agentvc snapshot aX` and `agentvc pr aX`. A promoted attempt can be rebased too; siblings
 are never touched.
 
+### Combining attempts: take the best parts of each (#71)
+
+When a3 has the better tests and a2 the better code, don't copy files by hand:
+
+```sh
+agentvc diff a3 --patch                                   # what a3 changed, hunks in order
+agentvc take a3 --into a2 --paths 'tests/**' README.md    # whole files, dirs or globs
+agentvc take a3 --into a2 --hunks src/lib.rs:2,3          # single hunks, numbered from 1
+agentvc merge a3 --into a2                                # everything a3 changed
+```
+
+`--into` defaults to the attempt of the current view. The chosen changes (relative to
+a3's own base, as `diff a3` shows them) are three-way merged with a2's current view, so
+edits to different parts of one file combine. Conflicts behave like `rebase`: code
+`conflict` with `error.paths` and nothing changed, or `--keep-conflicts` for markers. a2
+gets a `take` (or `merge`) snapshot with `source`, `source_snapshot`, `paths` and `hunks`
+in its metadata; a3 is not touched and can still be abandoned later. The PR body then
+lists a3 under **Contributors**. In the review UI, Compare shows "Take into aN" on each
+changed file of the other columns (aN is the focused column); the MCP tool is `take`.
+
 Human edits follow the same loop: `agentvc fork --task tN --actor human`, then work in
 `$(agentvc path aN)`.
 

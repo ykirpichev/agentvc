@@ -67,6 +67,21 @@ pub enum Error {
     #[error("the root attempt a1 is the host checkout; update it with git, not agentvc rebase")]
     RootAttempt,
     #[error(
+        "taking from a{source_attempt} into a{attempt} conflicts in {}: {}; nothing was changed \
+         (pass --keep-conflicts to write conflict markers into the view)",
+        if paths.len() == 1 { "1 file".to_string() } else { format!("{} files", paths.len()) },
+        paths.join(", ")
+    )]
+    TakeConflict {
+        attempt: i64,
+        source_attempt: i64,
+        paths: Vec<String>,
+    },
+    #[error("nothing to take from a{source_attempt}: {reason}")]
+    NothingToTake { source_attempt: i64, reason: String },
+    #[error("invalid --hunks {spec:?}: {reason}")]
+    BadHunk { spec: String, reason: String },
+    #[error(
         "{refname} on {remote} moved to {tip} since this space last synced (another machine \
          continued it); clone it with `agentvc init --from-remote` elsewhere, or pass --force \
          to overwrite"
@@ -129,7 +144,9 @@ impl Error {
             Error::GitHub { .. } => "github",
             Error::BackendUnavailable { .. } => "backend_unavailable",
             Error::ViewUnmounted { .. } => "view_unmounted",
-            Error::Conflict { .. } => "conflict",
+            Error::Conflict { .. } | Error::TakeConflict { .. } => "conflict",
+            Error::NothingToTake { .. } => "nothing_to_take",
+            Error::BadHunk { .. } => "bad_hunk",
             Error::RootAttempt => "root_attempt",
             Error::SyncConflict { .. } => "sync_conflict",
             Error::AmbiguousSpace { .. } => "ambiguous_space",
@@ -155,6 +172,15 @@ impl Error {
             } => Some(serde_json::json!({
                 "attempt": format!("a{attempt}"),
                 "onto": onto,
+                "paths": paths,
+            })),
+            Error::TakeConflict {
+                attempt,
+                source_attempt,
+                paths,
+            } => Some(serde_json::json!({
+                "attempt": format!("a{attempt}"),
+                "source": format!("a{source_attempt}"),
                 "paths": paths,
             })),
             Error::AmbiguousSpace { ids } => Some(serde_json::json!({ "spaces": ids })),

@@ -45,6 +45,8 @@ export interface AttemptActions {
   /** Rebase onto the remote's default branch; conflicts open a dialog. */
   rebase: () => void
   canRebase: boolean
+  /** Take whole files of `source`'s changes into the target (`agentvc take`). */
+  take: (source: Attempt, paths: string[]) => void
   busy: boolean
 }
 
@@ -197,7 +199,19 @@ export function useAttemptActions(
       {toast && <ToastNote key={toast.id} toast={toast} onClose={() => setToast(null)} />}
     </>
   )
-  return { node, canAct, promote, abandon, mark, rebase, canRebase: rebasable, busy }
+  const take = (source: Attempt, paths: string[]) => {
+    if (!target || !canAct) return
+    const into = target
+    const what = paths.length === 1 ? paths[0] : `${paths.length} files`
+    void run(
+      () => api.take(into.id, { source: `a${source.id}`, paths }),
+      <>
+        Took {what} from a{source.id} into a{into.id}
+      </>,
+    )
+  }
+
+  return { node, canAct, promote, abandon, mark, rebase, canRebase: rebasable, take, busy }
 }
 
 /** Primary and secondary action buttons for one attempt. */
