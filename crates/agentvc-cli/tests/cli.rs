@@ -1393,3 +1393,74 @@ fn git_works_in_views_and_commits_become_snapshots() {
     assert!(!w.join(".agentvc/git/a2").exists());
     assert_eq!(git(&w, &["worktree", "list"]).lines().count(), 1);
 }
+
+#[test]
+fn take_files_and_hunks_then_merge_conflicts_with_a_code() {
+    let tmp = tempdir();
+    let w = tmp.path();
+    git(w, &["init", "-q", "-b", "main"]);
+    let lines: String = (1..=20).map(|i| format!("{i}\n")).collect();
+    fs::write(w.join("lib.rs"), &lines).unwrap();
+    fs::write(w.join("README.md"), "readme\n").unwrap();
+    git(w, &["add", "-A"]);
+    git(w, &["commit", "-q", "-m", "base"]);
+    agentvc(w, &["init"]);
+    agentvc(w, &["task", "new", "t"]);
+    let fork = || {
+        let v = agentvc(w, &["fork", "--task", "t1", "--from", "a1"]);
+        v["fork"]["attempt"]["view_path"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    let (va, vb) = (fork(), fork());
+    let (va, vb) = (Path::new(&va), Path::new(&vb));
+    fs::create_dir_all(vb.join("tests")).unwrap();
+    fs::write(vb.join("tests/t.rs"), "test\n").unwrap();
+    fs::write(
+        vb.join("lib.rs"),
+        lines.replace("2\n", "two\n").replace("18\n", "eighteen\n"),
+    )
+    .unwrap();
+    fs::write(vb.join("README.md"), "b\n").unwrap();
+    agentvc(w, &["snapshot", "a3"]);
+
+    // The hunk numbering is the one diff --patch shows.
+    let patch = agentvc_text(w, &["diff", "a3", "--patch"]);
+    assert_eq!(patch.matches("@@ -").count(), 4, "{patch}");
+
+    let v = agentvc(
+        w,
+        &[
+            "take", "a3", "--into", "a2", "--paths", "tests/**", "--hunks", "lib.rs:1",
+        ],
+    );
+    assert_eq!(v["ok"], true, "{v}");
+    assert_eq!(v["take"]["snapshot"]["meta"]["source"], "a3");
+    assert_eq!(fs::read_to_string(va.join("tests/t.rs")).unwrap(), "test\n");
+    let lib = fs::read_to_string(va.join("lib.rs")).unwrap();
+    assert!(lib.contains("two\n") && lib.contains("\n18\n"), "{lib}");
+    assert_eq!(
+        fs::read_to_string(va.join("README.md")).unwrap(),
+        "readme\n"
+    );
+
+    // Inside a2's view, --into defaults to it.
+    fs::write(va.join("README.md"), "a\n").unwrap();
+    let v = agentvc(va, &["merge", "a3"]);
+    assert_eq!(v["ok"], false, "{v}");
+    assert_eq!(v["error"]["code"], "conflict");
+    assert_eq!(v["error"]["paths"], serde_json::json!(["README.md"]));
+    assert_eq!(fs::read_to_string(va.join("README.md")).unwrap(), "a\n");
+
+    let v = agentvc(w, &["merge", "a3", "--into", "a2", "--keep-conflicts"]);
+    assert_eq!(v["ok"], true, "{v}");
+    assert_eq!(v["take"]["conflicts"], serde_json::json!(["README.md"]));
+    assert!(fs::read_to_string(va.join("README.md"))
+        .unwrap()
+        .contains("<<<<<<<"));
+    assert_eq!(
+        agentvc(w, &["show", "a3"])["attempt"]["status"],
+        "exploring"
+    );
+}

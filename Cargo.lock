@@ -26,6 +26,7 @@ name = "agentvc-core"
 version = "0.0.1"
 dependencies = [
  "flate2",
+ "globset",
  "hex",
  "ignore",
  "libc",

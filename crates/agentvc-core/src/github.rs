@@ -319,6 +319,41 @@ pub fn pr_body(space: &Space, winner: &Attempt, export: &ExportResult) -> Result
         body += "\n";
     }
 
+    // Work taken from other attempts (`agentvc take` / `merge`) credits them.
+    let on_path_ids: Vec<i64> = path.iter().map(|(a, _)| a.id).chain([winner.id]).collect();
+    let taken = crate::combine::contributions(space, &on_path_ids)?;
+    if !taken.is_empty() {
+        body += "## Contributors\n\n";
+        body += "Work taken from other attempts into the winning path.\n\n";
+        body += "| Attempt | Taken into | How | Files |\n| --- | --- | --- | --- |\n";
+        for c in &taken {
+            let source = space.attempt(c.source).ok();
+            let mut files: Vec<String> = c.paths.iter().map(|p| format!("`{p}`")).collect();
+            if let Some(h) = c.hunks.as_ref().and_then(|h| h.as_object()) {
+                for f in files.iter_mut() {
+                    let p = f.trim_matches('`');
+                    if let Some(n) = h.get(p).and_then(|n| n.as_array()) {
+                        let n: Vec<String> = n.iter().map(|v| v.to_string()).collect();
+                        *f = format!("{f} (hunks {})", n.join(", "));
+                    }
+                }
+            }
+            body += &format!(
+                "| a{}{} | a{} (s{}) | {} from {} | {} |\n",
+                c.source,
+                source
+                    .map(|a| format!(" by {}", who(&a)))
+                    .unwrap_or_default(),
+                c.into,
+                c.snapshot,
+                c.mode,
+                c.source_snapshot,
+                cell(&files.join(", ")),
+            );
+        }
+        body += "\n";
+    }
+
     let on_path = |id: i64| id == winner.id || path.iter().any(|(a, _)| a.id == id);
     let (rejected, open): (Vec<Attempt>, Vec<Attempt>) = match &task {
         Some(t) => space

@@ -261,6 +261,33 @@ export interface RebaseResponse {
   attempt: Attempt
 }
 
+export interface TakeOptions {
+  /** The attempt to take from, as aN. */
+  source: string
+  /** Changed files, directories or globs to take whole. */
+  paths?: string[]
+  /** Single hunks as FILE:N, numbered from 1. */
+  hunks?: string[]
+  keep_conflicts?: boolean
+}
+
+export interface TakeResult {
+  into: number
+  source: number
+  source_snapshot: number
+  mode: 'take' | 'merge'
+  taken: { path: string; kind: 'added' | 'modified' | 'removed' }[]
+  snapshot: Snapshot | null
+  changes: { path: string; kind: 'added' | 'modified' | 'removed' }[]
+  conflicts: string[]
+  status: Status
+}
+
+export interface TakeResponse {
+  take: TakeResult
+  attempt: Attempt
+}
+
 export interface RebaseOptions {
   onto?: string
   keep_conflicts?: boolean

@@ -1,7 +1,7 @@
 //! `agentvcd`: the local agentvc daemon.
 //!
 //! Serves a JSON API over one [`Space`] (reads, plus the review actions
-//! promote, abandon, mark and rebase), a WebSocket stream of live
+//! promote, abandon, mark, rebase and take), a WebSocket stream of live
 //! events and the review UI. It only ever binds to the loopback interface and
 //! rejects requests whose `Host` or `Origin` is not local, so other websites
 //! open in the same browser cannot read the space (DNS rebinding, cross-site
@@ -28,6 +28,7 @@ mod events;
 mod live;
 mod rebase;
 mod review;
+mod take;
 
 pub use api::ApiError;
 pub use events::Event;

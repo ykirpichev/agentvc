@@ -272,6 +272,39 @@ enum Cmd {
         #[arg(long)]
         keep_conflicts: bool,
     },
+    /// Take files or hunks of another attempt's changes (what `agentvc diff
+    /// aY` shows) into an attempt's view, three-way merged with its own
+    /// work, and record a `take` snapshot crediting the source. The source
+    /// is not changed.
+    Take {
+        /// The attempt to take from (aY).
+        source: String,
+        /// The attempt that receives the changes. Defaults to the attempt of
+        /// the current directory.
+        #[arg(long)]
+        into: Option<String>,
+        /// Changed files to take whole: paths, directories or globs such as
+        /// `tests/**`. Repeatable.
+        #[arg(long = "paths", value_name = "PATH|GLOB", num_args = 1..)]
+        paths: Vec<String>,
+        /// Single hunks, as FILE:N or FILE:N,M, numbered from 1 as in
+        /// `agentvc diff aY --patch`. Repeatable.
+        #[arg(long = "hunks", value_name = "FILE:N", num_args = 1..)]
+        hunks: Vec<String>,
+        /// On conflicts, write conflict markers into the view and mark the
+        /// attempt exploring; fix them, then `snapshot`.
+        #[arg(long)]
+        keep_conflicts: bool,
+    },
+    /// Three-way merge all of another attempt's changes into an attempt
+    /// (`take` with everything), recorded as a `merge` snapshot.
+    Merge {
+        source: String,
+        #[arg(long)]
+        into: Option<String>,
+        #[arg(long)]
+        keep_conflicts: bool,
+    },
     /// Export an attempt, push its branch and open (or update) a GitHub PR.
     Pr {
         attempt: String,
@@ -1391,6 +1424,50 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
                 json: json!({ "rebase": r }),
             }
         }
+        Cmd::Take {
+            source,
+            into,
+            paths,
+            hunks,
+            keep_conflicts,
+        } => {
+            let into = match into {
+                Some(a) => attempt_id(&a)?,
+                None => current()?,
+            };
+            let opts = agentvc_core::combine::TakeOptions {
+                paths,
+                hunks,
+                keep_conflicts,
+                actor: None,
+            };
+            take_out(agentvc_core::combine::take(
+                &space,
+                into,
+                attempt_id(&source)?,
+                &opts,
+            )?)
+        }
+        Cmd::Merge {
+            source,
+            into,
+            keep_conflicts,
+        } => {
+            let into = match into {
+                Some(a) => attempt_id(&a)?,
+                None => current()?,
+            };
+            let opts = agentvc_core::combine::TakeOptions {
+                keep_conflicts,
+                ..Default::default()
+            };
+            take_out(agentvc_core::combine::take(
+                &space,
+                into,
+                attempt_id(&source)?,
+                &opts,
+            )?)
+        }
         Cmd::Config {
             key,
             value,
@@ -1576,6 +1653,60 @@ fn ago(t: i64) -> String {
         s if s < 3600 => format!("{} min ago", s / 60),
         s if s < 86400 => format!("{} h ago", s / 3600),
         s => format!("{} days ago", s / 86400),
+    }
+}
+
+fn take_out(r: agentvc_core::combine::TakeResult) -> Out {
+    let mut t = match &r.snapshot {
+        None => format!(
+            "a{} already has {} from a{}; nothing changed",
+            r.into,
+            if r.mode == "merge" {
+                "everything"
+            } else {
+                "that"
+            },
+            r.source
+        ),
+        Some(s) => format!(
+            "{} a{} (s{}) into a{}: {} files taken, {} changed in the view, snapshot s{}",
+            if r.mode == "merge" {
+                "merged"
+            } else {
+                "took from"
+            },
+            r.source,
+            r.source_snapshot,
+            r.into,
+            r.taken.len(),
+            r.changes.len(),
+            s.id
+        ),
+    };
+    for c in &r.taken {
+        let hunks = r
+            .hunks
+            .get(&c.path)
+            .map(|n| {
+                let n: Vec<String> = n.iter().map(usize::to_string).collect();
+                format!("  (hunks {})", n.join(","))
+            })
+            .unwrap_or_default();
+        t += &format!("\n  {}  {}{hunks}", change_mark(c.kind), c.path);
+    }
+    if !r.conflicts.is_empty() {
+        t += &format!(
+            "\n{} files have conflict markers; fix them, then `agentvc snapshot a{}`:",
+            r.conflicts.len(),
+            r.into
+        );
+        for p in &r.conflicts {
+            t += &format!("\n  C  {p}");
+        }
+    }
+    Out {
+        text: t,
+        json: json!({ "take": r }),
     }
 }
 

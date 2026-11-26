@@ -180,6 +180,9 @@ function CompareView({ data }: { data: CompareResponse }) {
                   open={!collapsed.has(f.path)}
                   onToggle={() => toggleCollapsed(f.path)}
                   style={gridStyle}
+                  focus={focus}
+                  canTake={actions.canAct}
+                  onTake={(i) => actions.take(cols[i]!.attempt, [f.path])}
                 />
                 {!collapsed.has(f.path) && <FileGrid file={f} data={data} style={gridStyle} />}
               </section>
@@ -260,12 +263,19 @@ function FileHeader({
   open,
   onToggle,
   style,
+  focus,
+  canTake,
+  onTake,
 }: {
   file: CompareFile
   cols: CompareColumn[]
   open: boolean
   onToggle: () => void
   style: React.CSSProperties
+  /** The focused column, which "take" copies into. */
+  focus: number
+  canTake: boolean
+  onTake: (column: number) => void
 }) {
   return (
     <header className="cmp-file-head">
@@ -294,6 +304,15 @@ function FileHeader({
               </>
             )}
             <span className="muted cell-col">a{cols[i]!.attempt.id}</span>
+            {canTake && i !== focus && c.kind !== 'unchanged' && (
+              <button
+                className="take-file"
+                onClick={() => onTake(i)}
+                title={`Take this file's change from a${cols[i]!.attempt.id} into a${cols[focus]!.attempt.id} (agentvc take)`}
+              >
+                Take into a{cols[focus]!.attempt.id}
+              </button>
+            )}
           </span>
         ))}
       </div>

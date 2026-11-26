@@ -15,6 +15,8 @@ import type {
   Ref,
   Snapshot,
   SpaceInfo,
+  TakeOptions,
+  TakeResponse,
   TaskDetail,
   TaskSummary,
 } from './types'
@@ -86,6 +88,8 @@ export const api = {
   abandon: (id: number, reason: string) => post<ActionResponse>(`/attempts/${id}/abandon`, { reason }),
   /** Rebase onto `onto`, by default the remote's default branch (fetched). */
   rebase: (id: number, opts: RebaseOptions = {}) => post<RebaseResponse>(`/attempts/${id}/rebase`, opts),
+  /** Take files (or hunks) of `opts.source`'s changes into attempt `id`. */
+  take: (id: number, opts: TakeOptions) => post<TakeResponse>(`/attempts/${id}/take`, opts),
   mark: (id: number, status: 'passed' | 'failed' | 'exploring') =>
     post<ActionResponse>(`/attempts/${id}/mark`, { status }),
 }

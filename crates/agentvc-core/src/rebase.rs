@@ -232,12 +232,12 @@ fn resolve_onto(repo: &HostRepo, opts: &RebaseOptions) -> Result<(String, String
 }
 
 /// `git merge-tree` result: the merged tree and the conflicted paths.
-struct Merge {
-    tree: String,
-    conflicts: Vec<String>,
+pub(crate) struct Merge {
+    pub(crate) tree: String,
+    pub(crate) conflicts: Vec<String>,
 }
 
-fn merge_trees(repo: &HostRepo, base: &str, ours: &str, theirs: &str) -> Result<Merge> {
+pub(crate) fn merge_trees(repo: &HostRepo, base: &str, ours: &str, theirs: &str) -> Result<Merge> {
     // merge-tree in git < 2.45 only merges commits, so wrap the attempt's tree
     // in a dangling commit on the old base. No ref points at it.
     let ident = [
@@ -293,14 +293,14 @@ fn merge_trees(repo: &HostRepo, base: &str, ours: &str, theirs: &str) -> Result<
 }
 
 /// A long-running `git cat-file --batch`, for reading many objects.
-struct CatFile {
+pub(crate) struct CatFile {
     child: Child,
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
 }
 
 impl CatFile {
-    fn start(repo: &HostRepo) -> Result<CatFile> {
+    pub(crate) fn start(repo: &HostRepo) -> Result<CatFile> {
         let mut child = Command::new("git")
             .arg("-C")
             .arg(&repo.workdir)
@@ -351,7 +351,7 @@ impl Drop for CatFile {
 /// Copy tree `oid` from the host repo into the space's store. Subtrees that
 /// are already stored are skipped: a stored tree always has all its children,
 /// because children are written first.
-fn import_tree(store: &ObjectStore, git: &mut CatFile, oid: &Oid) -> Result<()> {
+pub(crate) fn import_tree(store: &ObjectStore, git: &mut CatFile, oid: &Oid) -> Result<()> {
     if store.contains(oid) {
         return Ok(());
     }
@@ -376,7 +376,12 @@ fn import_tree(store: &ObjectStore, git: &mut CatFile, oid: &Oid) -> Result<()> 
 
 /// Bring a view from tree `from` to tree `to`, touching only changed paths,
 /// so ignored build output in the view stays warm.
-fn apply_to_view(store: &ObjectStore, view: &Path, to: &Oid, changes: &[FileChange]) -> Result<()> {
+pub(crate) fn apply_to_view(
+    store: &ObjectStore,
+    view: &Path,
+    to: &Oid,
+    changes: &[FileChange],
+) -> Result<()> {
     let target: BTreeMap<String, (Mode, Oid)> = snapshot::flatten(store, to)?;
     // Removals first, so a file can become a directory and back.
     for c in changes.iter().filter(|c| c.kind == ChangeKind::Removed) {
@@ -437,7 +442,7 @@ fn apply_to_view(store: &ObjectStore, view: &Path, to: &Oid, changes: &[FileChan
     Ok(())
 }
 
-fn insert_snapshot(
+pub(crate) fn insert_snapshot(
     space: &Space,
     attempt_id: i64,
     tree: &str,

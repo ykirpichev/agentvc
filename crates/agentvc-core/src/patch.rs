@@ -121,6 +121,46 @@ pub fn text_hunks(old: &str, new: &str, context: usize) -> (Vec<Hunk>, usize, us
     (hunks, added, removed)
 }
 
+/// `old` with only the chosen hunks of the change to `new` applied. Hunks
+/// are numbered from 1 in the order [`text_hunks`] (and so `diff --patch`)
+/// lists them with the same `context`. Unknown numbers are an error.
+pub fn apply_hunks(
+    old: &str,
+    new: &str,
+    context: usize,
+    chosen: &[usize],
+) -> std::result::Result<String, String> {
+    let diff = TextDiff::configure()
+        .algorithm(similar::Algorithm::Patience)
+        .diff_lines(old, new);
+    let (olds, news) = (diff.old_slices(), diff.new_slices());
+    let groups = diff.grouped_ops(context);
+    if let Some(bad) = chosen.iter().find(|&&n| n == 0 || n > groups.len()) {
+        return Err(format!(
+            "hunk {bad} does not exist; the file has {} hunks",
+            groups.len()
+        ));
+    }
+    let mut out = String::with_capacity(old.len().max(new.len()));
+    let mut at = 0; // next old line to copy
+    for (i, group) in groups.iter().enumerate() {
+        let (Some(first), Some(last)) = (group.first(), group.last()) else {
+            continue;
+        };
+        let (o, oe) = (first.old_range().start, last.old_range().end);
+        let (n, ne) = (first.new_range().start, last.new_range().end);
+        out.extend(olds[at..o].iter().copied());
+        if chosen.contains(&(i + 1)) {
+            out.extend(news[n..ne].iter().copied());
+        } else {
+            out.extend(olds[o..oe].iter().copied());
+        }
+        at = oe;
+    }
+    out.extend(olds[at..].iter().copied());
+    Ok(out)
+}
+
 /// Per-file patches between trees `a` and `b`, sorted by path.
 pub fn diff_trees(store: &ObjectStore, a: &Oid, b: &Oid, context: usize) -> Result<Vec<FilePatch>> {
     let changes = snapshot::diff(store, a, b)?;
@@ -251,6 +291,26 @@ pub fn render_stat(patches: &[FilePatch]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn apply_hunks_takes_only_the_chosen_ones() {
+        let old: String = (1..=20).map(|i| format!("{i}\n")).collect();
+        let new = old.replace("2\n", "two\n").replace("18\n", "eighteen\n");
+        let (hunks, _, _) = text_hunks(&old, &new, DEFAULT_CONTEXT);
+        assert_eq!(hunks.len(), 2);
+        let first = apply_hunks(&old, &new, DEFAULT_CONTEXT, &[1]).unwrap();
+        assert!(first.contains("two\n") && first.contains("18\n"));
+        let second = apply_hunks(&old, &new, DEFAULT_CONTEXT, &[2]).unwrap();
+        assert!(second.contains("2\n3") && second.contains("eighteen\n"));
+        assert_eq!(
+            apply_hunks(&old, &new, DEFAULT_CONTEXT, &[1, 2]).unwrap(),
+            new
+        );
+        assert_eq!(apply_hunks(&old, &new, DEFAULT_CONTEXT, &[]).unwrap(), old);
+        assert!(apply_hunks(&old, &new, DEFAULT_CONTEXT, &[3]).is_err());
+        // A missing final newline survives.
+        assert_eq!(apply_hunks("a\nb", "a\nc", 3, &[1]).unwrap(), "a\nc");
+    }
     use crate::objects::TreeEntry;
 
     fn tree(store: &ObjectStore, files: &[(&str, Mode, &[u8])]) -> Oid {

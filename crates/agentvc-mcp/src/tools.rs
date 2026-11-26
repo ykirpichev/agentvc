@@ -527,6 +527,39 @@ pub static TOOLS: &[Tool] = &[
         },
     },
     Tool {
+        name: "take",
+        title: "Take from another attempt",
+        description: "Combine attempts: take files, globs or single hunks of another attempt's changes (what `diff` with one attempt shows) into an attempt's view, three-way merged with its own work, and record a `take` snapshot whose metadata names the source. With no paths and no hunks, takes everything (a merge). The source is not changed, and the PR body credits it. On conflicts nothing changes and the error has code `conflict` with `paths`; with keep_conflicts=true the files get conflict markers and the attempt becomes exploring. Returns {take}.",
+        read_only: false,
+        destructive: false,
+        open_world: false,
+        params: || {
+            vec![
+                ("source", s("Attempt to take from, as aN."), true),
+                ("into", s("Attempt that receives the changes, as aN."), true),
+                ("paths", json!({ "type": "array", "items": { "type": "string" }, "description": "Changed files to take whole: paths, directories or globs such as \"tests/**\"." }), false),
+                ("hunks", json!({ "type": "array", "items": { "type": "string" }, "description": "Single hunks as \"FILE:N\" or \"FILE:N,M\", numbered from 1 as in the source's diff with patch=true." }), false),
+                ("keep_conflicts", b("On conflicts, write conflict markers into the view instead of failing."), false),
+            ]
+        },
+        argv: |a| {
+            let mut argv = Argv::new(&["take"]);
+            for p in a.strings("paths")? {
+                argv.opt("paths", Some(p));
+            }
+            for h in a.strings("hunks")? {
+                argv.opt("hunks", Some(h));
+            }
+            let source = a.req("source")?;
+            let into = a.req("into")?;
+            Ok(argv
+                .opt("into", Some(into))
+                .flag("keep-conflicts", a.bool("keep_conflicts")?)
+                .pos(Some(source))
+                .done())
+        },
+    },
+    Tool {
         name: "pr",
         title: "Open pull request",
         description: "Export an attempt as a commit, push its branch and open (or update) a GitHub pull request that lists the rejected attempts. Returns {pr}.",
