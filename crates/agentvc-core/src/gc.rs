@@ -310,7 +310,11 @@ fn live_objects(space: &Space, pruning: &HashSet<i64>) -> Result<HashSet<Oid>> {
             roots.push(Oid::from_hex(&tree)?);
         }
     }
-    let mut stmt = space.db.prepare("SELECT tree FROM git_bases")?;
+    let mut stmt = space.db.prepare(
+        "SELECT tree FROM git_bases
+         UNION SELECT tree FROM story_changes
+         UNION SELECT base_tree FROM story_changes",
+    )?;
     let bases: Vec<String> = stmt
         .query_map([], |r| r.get(0))?
         .collect::<std::result::Result<_, _>>()?;

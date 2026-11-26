@@ -205,6 +205,41 @@ enum Cmd {
         #[arg(long, default_value = "human")]
         actor: String,
     },
+    /// Tell an attempt's work as a stack of commits (story mode). `--at
+    /// s4:"Add parser" --last "Wire up CLI"` splits it at snapshot
+    /// boundaries; each change gets a stable id (cXXXXXXXX) that survives
+    /// rebase, which restacks the story. Later work is pending until
+    /// `--absorb` folds each file into the last change that touched it, or
+    /// `--append TITLE` adds a change. `export` and `pr` then write one
+    /// commit per change (`--squash` for one). With no options, shows it.
+    Story {
+        /// The attempt. Defaults to the attempt of the current directory.
+        attempt: Option<String>,
+        /// A change that ends at a snapshot, as "sN:title". Repeatable, in
+        /// order; needs --last.
+        #[arg(long = "at", value_name = "SNAPSHOT:TITLE", requires = "last")]
+        at: Vec<String>,
+        /// Make (or replace) the story: the title of the last change, which
+        /// ends at the attempt's head.
+        #[arg(long, value_name = "TITLE")]
+        last: Option<String>,
+        /// Fold pending work into the changes that last touched each file.
+        #[arg(long)]
+        absorb: bool,
+        /// Put pending work in a new change on top.
+        #[arg(long, value_name = "TITLE")]
+        append: Option<String>,
+        /// Rename a change.
+        #[arg(long, num_args = 2, value_names = ["CHANGE", "TITLE"])]
+        retitle: Vec<String>,
+        /// Run a command (sh -c) at every change, in a scratch view; exits 1
+        /// if any change fails.
+        #[arg(long, value_name = "COMMAND")]
+        check: Option<String>,
+        /// Forget the story; export goes back to one commit.
+        #[arg(long)]
+        clear: bool,
+    },
     /// Compare two refs (aN or sN). With one attempt, compares it with the
     /// snapshot it was forked from (or the commit it was rebased onto). With
     /// no refs, inside a view, compares the view's working state with that
@@ -293,6 +328,13 @@ enum Cmd {
         /// Extra commit trailer, as "Key: value". Repeatable.
         #[arg(long = "trailer", value_name = "KEY: VALUE")]
         trailers: Vec<String>,
+        /// One commit even if the attempt has a story.
+        #[arg(long)]
+        squash: bool,
+        /// With a story, also point <branch>-1, <branch>-2, ... at the
+        /// changes below the top.
+        #[arg(long, conflicts_with = "squash")]
+        stack: bool,
     },
     /// Rebase an attempt onto a newer commit of the host repo, so `export`
     /// and `pr` carry only its own changes. Three-way merges the attempt's
@@ -382,6 +424,12 @@ enum Cmd {
         /// Repeatable; added to those in `agentvc config pr.trailer`.
         #[arg(long = "trailer", value_name = "KEY: VALUE")]
         trailers: Vec<String>,
+        /// One commit even if the attempt has a story.
+        #[arg(long)]
+        squash: bool,
+        /// With a story, also push a branch per change below the top.
+        #[arg(long, conflicts_with = "squash")]
+        stack: bool,
         /// Do not sync the space to the remote afterwards.
         #[arg(long)]
         no_sync: bool,
@@ -1189,6 +1237,124 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
                 }
             }
         }
+        Cmd::Story {
+            attempt,
+            at,
+            last,
+            absorb,
+            append,
+            retitle,
+            check,
+            clear,
+        } => {
+            let id = match attempt {
+                Some(a) => attempt_id(&a)?,
+                None => current()?,
+            };
+            let modes = [
+                last.is_some(),
+                absorb,
+                append.is_some(),
+                !retitle.is_empty(),
+                check.is_some(),
+                clear,
+            ];
+            if modes.iter().filter(|m| **m).count() > 1 {
+                anyhow::bail!(
+                    "pass one of --last (with --at), --absorb, --append, --retitle, --check, --clear"
+                );
+            }
+            if let Some(last) = last {
+                let mut bounds = Vec::new();
+                for b in &at {
+                    let (snap, title) = b.split_once(':').ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "--at {b:?}: expected SNAPSHOT:TITLE, like s4:\"Add parser\""
+                        )
+                    })?;
+                    bounds.push(agentvc_core::story::Boundary {
+                        snapshot: space.parse_ref(snap.trim())?,
+                        title: title.to_string(),
+                    });
+                }
+                let st = space.story_split(id, &bounds, &last)?;
+                Out {
+                    text: render_story(&st),
+                    json: json!({ "story": st }),
+                }
+            } else if absorb {
+                let (st, into) = space.story_absorb(id)?;
+                let mut text = String::new();
+                for (c, paths) in &into {
+                    text += &format!("{c} <- {}\n", paths.join(", "));
+                }
+                if into.is_empty() {
+                    text += "nothing pending\n";
+                }
+                Out {
+                    text: text + &render_story(&st),
+                    json: json!({ "story": st, "absorbed": into }),
+                }
+            } else if let Some(title) = append {
+                let st = space.story_append(id, &title)?;
+                Out {
+                    text: render_story(&st),
+                    json: json!({ "story": st }),
+                }
+            } else if let [change, title] = retitle.as_slice() {
+                let st = space.story_retitle(id, change, title)?;
+                Out {
+                    text: render_story(&st),
+                    json: json!({ "story": st }),
+                }
+            } else if let Some(cmd) = check {
+                let results = agentvc_core::story::check(&space, id, &cmd)?;
+                let mut text = String::new();
+                for r in &results {
+                    text += &format!(
+                        "{} {}  {}\n",
+                        if r.passed { "ok    " } else { "FAILED" },
+                        r.change_id,
+                        r.title
+                    );
+                    if !r.passed && !r.tail.is_empty() {
+                        for l in r.tail.lines() {
+                            text += &format!("    {l}\n");
+                        }
+                    }
+                }
+                if results.iter().any(|r| !r.passed) {
+                    EXIT_FAILURE.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+                Out {
+                    text,
+                    json: json!({ "attempt": id, "checks": results }),
+                }
+            } else if clear {
+                let cleared = space.story_clear(id)?;
+                Out {
+                    text: if cleared {
+                        format!("a{id} has no story now; export writes one commit")
+                    } else {
+                        format!("a{id} had no story")
+                    },
+                    json: json!({ "attempt": id, "cleared": cleared }),
+                }
+            } else {
+                match space.story_now(id)? {
+                    Some(st) => Out {
+                        text: render_story(&st),
+                        json: json!({ "story": st }),
+                    },
+                    None => Out {
+                        text: format!(
+                            "a{id} has no story; make one with `agentvc story a{id} --at sN:TITLE --last TITLE`"
+                        ),
+                        json: json!({ "story": null }),
+                    },
+                }
+            }
+        }
         Cmd::Show { attempt } => {
             let id = match space.parse_ref(&attempt)? {
                 Ref::Attempt(id) => id,
@@ -1529,6 +1695,8 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
             base,
             force,
             trailers,
+            squash,
+            stack,
         } => {
             let opts = ExportOptions {
                 branch,
@@ -1536,6 +1704,8 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
                 message,
                 force,
                 trailers,
+                squash,
+                stack,
             };
             let r = agentvc_core::export::export(&space, attempt_id(&attempt)?, &opts)?;
             Out {
@@ -1549,7 +1719,7 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
                         .as_ref()
                         .map(|p| format!(", parent {}", &p[..12]))
                         .unwrap_or_else(|| ", root commit".into())
-                ),
+                ) + &story_commits_text(&r.story),
                 json: json!({ "export": r }),
             }
         }
@@ -1666,6 +1836,8 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
             force,
             body_prefix,
             trailers,
+            squash,
+            stack,
             no_sync,
         } => {
             let body_prefix = match body_prefix {
@@ -1690,6 +1862,8 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
                 force,
                 body_prefix,
                 trailers,
+                squash,
+                stack,
             };
             let r = agentvc_core::github::open_pr(&space, attempt_id(&attempt)?, &opts)?;
             // The PR shows only the winner; the attempts behind it go to the
@@ -2564,6 +2738,54 @@ fn gc_cmd(space: &Space, opts: &agentvc_core::gc::GcOptions) -> anyhow::Result<O
         text,
         json: json!({ "gc": r }),
     })
+}
+
+fn render_story(st: &agentvc_core::story::Story) -> String {
+    let mut text = format!(
+        "a{} story on {}{}\n",
+        st.attempt,
+        &st.base_commit[..12.min(st.base_commit.len())],
+        if st.restacked { " (restacked)" } else { "" }
+    );
+    for c in &st.changes {
+        text += &format!(
+            "{:>3} {}  {}  ({} file{})\n",
+            c.position,
+            c.change_id,
+            if c.title.is_empty() {
+                "(untitled)"
+            } else {
+                &c.title
+            },
+            c.files.len(),
+            if c.files.len() == 1 { "" } else { "s" }
+        );
+    }
+    if !st.pending.is_empty() {
+        let paths: Vec<&str> = st.pending.iter().map(|f| f.path.as_str()).collect();
+        text += &format!(
+            "pending: {} (use --absorb or --append TITLE)\n",
+            paths.join(", ")
+        );
+    }
+    text.trim_end().to_string()
+}
+
+fn story_commits_text(commits: &[agentvc_core::export::StoryCommit]) -> String {
+    let mut text = String::new();
+    for c in commits {
+        text += &format!(
+            "\n  {} {}  {}{}",
+            &c.commit[..12.min(c.commit.len())],
+            c.change_id,
+            c.title,
+            c.branch
+                .as_ref()
+                .map(|b| format!("  [{b}]"))
+                .unwrap_or_default()
+        );
+    }
+    text
 }
 
 #[cfg(test)]

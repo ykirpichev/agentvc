@@ -119,6 +119,18 @@ CREATE TABLE IF NOT EXISTS tags (
     actor TEXT NOT NULL,
     created_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS story_changes (
+    attempt_id INTEGER NOT NULL REFERENCES attempts(id),
+    position INTEGER NOT NULL,
+    change_id TEXT NOT NULL,
+    title TEXT NOT NULL,
+    tree TEXT NOT NULL,
+    base_commit TEXT NOT NULL,
+    base_tree TEXT NOT NULL,
+    source_snapshot INTEGER,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (attempt_id, position)
+);
 CREATE INDEX IF NOT EXISTS attempts_task ON attempts(task_id);
 CREATE INDEX IF NOT EXISTS snapshots_attempt ON snapshots(attempt_id);
 "#;
@@ -699,6 +711,8 @@ impl Space {
             "attempt.fork",
             serde_json::json!({ "attempt": id, "from": from.to_string(), "backend": backend }),
         )?;
+        // Follow-up work (`fork --from aN` for review fixes) carries the story.
+        self.inherit_story(parent_attempt.id, parent_snapshot.id, id)?;
         let attempt = self.attempt(id)?;
         // Best-effort: a view without git is still a view.
         let git = self.link_view_git(&attempt).ok().flatten();

@@ -42,6 +42,10 @@ pub struct PrOptions {
     /// Extra `Key: value` trailers for the exported commit, added to those
     /// in `agentvc config pr.trailer`.
     pub trailers: Vec<String>,
+    /// One commit even when the attempt has a story.
+    pub squash: bool,
+    /// Push a branch per story change too (see [`ExportOptions::stack`]).
+    pub stack: bool,
 }
 
 /// Start and end of the part of a PR body that `agentvc pr` writes. Text
@@ -274,6 +278,23 @@ pub fn pr_body(space: &Space, winner: &Attempt, export: &ExportResult) -> Result
         );
     }
     body += "\n";
+
+    if !export.story.is_empty() {
+        body += "## Story\n\n";
+        body +=
+            "Review commit by commit; change ids survive rebases (`Agentvc-Change` trailer).\n\n";
+        body += "| # | Change | Commit | Title |\n| --- | --- | --- | --- |\n";
+        for (i, c) in export.story.iter().enumerate() {
+            body += &format!(
+                "| {} | `{}` | `{}` | {} |\n",
+                i + 1,
+                c.change_id,
+                &c.commit[..12.min(c.commit.len())],
+                cell(&c.title)
+            );
+        }
+        body += "\n";
+    }
 
     // The attempts the winner was forked from, oldest first, each paired with
     // the snapshot it handed on to the next step.
@@ -736,6 +757,8 @@ pub fn open_pr(space: &Space, attempt_id: i64, opts: &PrOptions) -> Result<PrRes
             message: opts.title.clone(),
             force: opts.force || ours,
             trailers,
+            squash: opts.squash,
+            stack: opts.stack,
         },
     )?;
 
@@ -747,6 +770,18 @@ pub fn open_pr(space: &Space, attempt_id: i64, opts: &PrOptions) -> Result<PrRes
     };
     host.git(&["push", "--quiet", &remote, push_spec], None)
         .map_err(|e| push_error(e, &remote, &branch))?;
+    for b in exp.story.iter().filter_map(|c| c.branch.as_ref()) {
+        host.git(
+            &[
+                "push",
+                "--quiet",
+                &remote,
+                &format!("+refs/heads/{b}:refs/heads/{b}"),
+            ],
+            None,
+        )
+        .map_err(|e| push_error(e, &remote, b))?;
+    }
 
     let title = opts.title.clone().unwrap_or_else(|| {
         attempt
@@ -995,6 +1030,7 @@ mod tests {
             replaced: None,
             checkout_updated: false,
             objects_copied: 0,
+            story: Vec::new(),
         };
         let body = pr_body(&space, &winner, &exp).unwrap();
 

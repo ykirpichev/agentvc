@@ -233,8 +233,8 @@ fn resolve_onto(repo: &HostRepo, opts: &RebaseOptions) -> Result<(String, String
 
 /// `git merge-tree` result: the merged tree and the conflicted paths.
 pub(crate) struct Merge {
-    pub(crate) tree: String,
-    pub(crate) conflicts: Vec<String>,
+    pub tree: String,
+    pub conflicts: Vec<String>,
 }
 
 pub(crate) fn merge_trees(repo: &HostRepo, base: &str, ours: &str, theirs: &str) -> Result<Merge> {
@@ -376,7 +376,7 @@ pub(crate) fn import_tree(store: &ObjectStore, git: &mut CatFile, oid: &Oid) -> 
 
 /// Bring a view from tree `from` to tree `to`, touching only changed paths,
 /// so ignored build output in the view stays warm.
-pub(crate) fn apply_to_view(
+pub(crate) fn write_changes(
     store: &ObjectStore,
     view: &Path,
     to: &Oid,
@@ -540,7 +540,7 @@ pub fn rebase(space: &Space, attempt_id: i64, opts: &RebaseOptions) -> Result<Re
 
     let changes = snapshot::diff(space.objects(), &Oid::from_hex(&current)?, &merged)?;
     if view_ok {
-        apply_to_view(space.objects(), &attempt.view_path, &merged, &changes)?;
+        write_changes(space.objects(), &attempt.view_path, &merged, &changes)?;
     }
 
     // Record what the view held before, then the rebased state.

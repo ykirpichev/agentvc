@@ -23,6 +23,7 @@ pub mod run;
 pub mod snapshot;
 pub mod space;
 pub mod status;
+pub mod story;
 pub mod sync;
 pub mod tags;
 pub mod view;

@@ -40,6 +40,22 @@ pub struct ExportOptions {
     pub force: bool,
     /// Extra `Key: value` trailers for the commit message, after agentvc's.
     pub trailers: Vec<String>,
+    /// Export one commit even when the attempt has a story (#21).
+    pub squash: bool,
+    /// With a story, also point a branch `<branch>-<k>` at each change but
+    /// the last, for stacked review.
+    pub stack: bool,
+}
+
+/// One commit of an exported story.
+#[derive(Clone, Debug, Serialize)]
+pub struct StoryCommit {
+    pub change_id: String,
+    pub title: String,
+    pub commit: String,
+    /// The stacked branch pointing at this commit, with `stack`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -57,6 +73,10 @@ pub struct ExportResult {
     /// and working tree were moved to the new commit too.
     pub checkout_updated: bool,
     pub objects_copied: usize,
+    /// The story's commits, oldest first, when the attempt was exported as a
+    /// story; the last one is `commit`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub story: Vec<StoryCommit>,
 }
 
 /// One recorded export of an attempt.
@@ -299,7 +319,49 @@ pub fn commit_message(
     Ok(msg)
 }
 
-/// Export attempt `attempt_id` as one commit on `opts.branch` in the host repo.
+/// The message of one story commit: the change's title, then where it
+/// comes from and agentvc's trailers, with the change id.
+fn story_message(
+    space: &Space,
+    attempt: &Attempt,
+    change: &crate::story::Change,
+    of: usize,
+    trailers: &[String],
+) -> Result<String> {
+    let task = attempt.task_id.map(|t| space.task(t)).transpose()?;
+    let title = change.title.trim();
+    let mut msg = if title.is_empty() {
+        format!("Change {} of attempt a{}", change.position, attempt.id)
+    } else {
+        title.to_string()
+    };
+    msg += "\n\n";
+    msg += &format!("Change {}/{of} of attempt a{}", change.position, attempt.id);
+    if let Some(t) = &task {
+        msg += &format!(" (task t{}: {})", t.id, t.goal.trim());
+    }
+    msg += "\n\n";
+    msg += &format!("{}: {}\n", crate::story::CHANGE_TRAILER, change.change_id);
+    msg += &format!("{ATTEMPT_TRAILER}: a{}\n", attempt.id);
+    if let Some(s) = change.source_snapshot {
+        msg += &format!("Agentvc-Snapshot: s{s}\n");
+    }
+    if let Some(t) = &task {
+        msg += &format!("Agentvc-Task: t{}\n", t.id);
+    }
+    msg += &format!("Agentvc-Actor: {}\n", attempt.actor);
+    for t in trailers {
+        let t = t.trim();
+        if !t.is_empty() {
+            msg += t;
+            msg.push('\n');
+        }
+    }
+    Ok(msg)
+}
+
+/// Export attempt `attempt_id` as one commit on `opts.branch` in the host repo,
+/// or, when it has a story (#21), as one commit per change.
 ///
 /// An open attempt is snapshotted first, so the commit matches its view.
 pub fn export(space: &Space, attempt_id: i64, opts: &ExportOptions) -> Result<ExportResult> {
@@ -335,28 +397,16 @@ pub fn export(space: &Space, attempt_id: i64, opts: &ExportOptions) -> Result<Ex
     };
     // By default, parent on the commit this state is based on: the one it was
     // last rebased onto, else the host HEAD recorded at init.
-    let parent = match base {
-        Some(b) => Some(b),
+    let parent = match &base {
+        Some(b) => Some(b.clone()),
         None => space
             .git_base_commit(&snapshot)?
             .and_then(|h| repo.rev(&h))
             .or_else(|| repo.rev("HEAD")),
     };
     let tree = snapshot.tree_oid()?;
-    let objects_copied = copy_tree_objects(space, &tree, &repo.objects_dir()?)?;
+    let mut objects_copied = copy_tree_objects(space, &tree, &repo.objects_dir()?)?;
 
-    let message = commit_message(
-        space,
-        &attempt,
-        &snapshot,
-        opts.message.as_deref(),
-        &opts.trailers,
-    )?;
-    let mut args = vec!["commit-tree", snapshot.tree.as_str()];
-    if let Some(p) = &parent {
-        args.extend(["-p", p.as_str()]);
-    }
-    args.extend(["-F", "-"]);
     // Commit as the user when git knows who that is; otherwise as agentvc,
     // so export never fails on a fresh machine.
     let mut env = Vec::new();
@@ -368,7 +418,62 @@ pub fn export(space: &Space, attempt_id: i64, opts: &ExportOptions) -> Result<Ex
             ("GIT_COMMITTER_EMAIL", "agentvc@localhost"),
         ]);
     }
-    let commit = repo.git_env(&args, Some(&message), &env)?;
+    let commit_tree = |tree: &str, parent: Option<&String>, message: &str| {
+        let mut args = vec!["commit-tree", tree];
+        if let Some(p) = parent {
+            args.extend(["-p", p.as_str()]);
+        }
+        args.extend(["-F", "-"]);
+        repo.git_env(&args, Some(message), &env)
+    };
+
+    let story = if opts.squash {
+        None
+    } else {
+        space.story_for_export(attempt_id)?
+    };
+    let mut story_commits = Vec::new();
+    let (parent, commit) = match &story {
+        None => {
+            let message = commit_message(
+                space,
+                &attempt,
+                &snapshot,
+                opts.message.as_deref(),
+                &opts.trailers,
+            )?;
+            let commit = commit_tree(&snapshot.tree, parent.as_ref(), &message)?;
+            (parent, commit)
+        }
+        Some(story) => {
+            if let Some(b) = &base {
+                if *b != story.base_commit {
+                    return Err(Error::StoryBoundary(format!(
+                        "the story of a{attempt_id} is based on {}; rebase it onto {b} \
+                         first, or export with --squash",
+                        &story.base_commit[..12.min(story.base_commit.len())]
+                    )));
+                }
+            }
+            let parent = Some(story.base_commit.clone());
+            let mut prev = parent.clone();
+            let n = story.changes.len();
+            for c in &story.changes {
+                objects_copied +=
+                    copy_tree_objects(space, &Oid::from_hex(&c.tree)?, &repo.objects_dir()?)?;
+                let message = story_message(space, &attempt, c, n, &opts.trailers)?;
+                let commit = commit_tree(&c.tree, prev.as_ref(), &message)?;
+                prev = Some(commit.clone());
+                story_commits.push(StoryCommit {
+                    change_id: c.change_id.clone(),
+                    title: c.title.clone(),
+                    commit,
+                    branch: None,
+                });
+            }
+            (parent, prev.expect("a story has changes"))
+        }
+    };
 
     // An existing branch moves without --force only when the new commit
     // builds on it, as `git push` would allow.
@@ -408,6 +513,26 @@ pub fn export(space: &Space, attempt_id: i64, opts: &ExportOptions) -> Result<Ex
         return Err(e);
     }
 
+    // Stacked branches: one per change below the top, which is `branch`.
+    if opts.stack {
+        let n = story_commits.len();
+        for (k, c) in story_commits
+            .iter_mut()
+            .enumerate()
+            .take(n.saturating_sub(1))
+        {
+            let name = format!("{}-{}", opts.branch, k + 1);
+            let r = format!("refs/heads/{name}");
+            if let Some(old) = repo.rev(&r) {
+                if !opts.force && !repo.is_ancestor(&old, &c.commit) {
+                    return Err(Error::BranchExists(name));
+                }
+            }
+            repo.git(&["update-ref", "-m", &reflog, &r, &c.commit], None)?;
+            c.branch = Some(name);
+        }
+    }
+
     space.db.execute(
         "INSERT INTO exports (attempt_id, snapshot_id, branch, commit_id, parent, created_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -420,6 +545,7 @@ pub fn export(space: &Space, attempt_id: i64, opts: &ExportOptions) -> Result<Ex
         serde_json::json!({
             "attempt": attempt_id, "snapshot": snapshot.id, "branch": opts.branch,
             "commit": commit, "parent": parent, "replaced": existing,
+            "story": story_commits.iter().map(|c| &c.change_id).collect::<Vec<_>>(),
         }),
     )?;
     Ok(ExportResult {
@@ -433,6 +559,7 @@ pub fn export(space: &Space, attempt_id: i64, opts: &ExportOptions) -> Result<Ex
         replaced: existing,
         checkout_updated: checked_out,
         objects_copied,
+        story: story_commits,
     })
 }
 

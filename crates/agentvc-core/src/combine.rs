@@ -28,7 +28,7 @@ use crate::error::{Error, Result};
 use crate::export::{copy_tree_objects, HostRepo};
 use crate::objects::{Mode, ObjectStore, Oid, TreeEntry};
 use crate::patch::{self, DEFAULT_CONTEXT};
-use crate::rebase::{apply_to_view, import_tree, insert_snapshot, merge_trees, CatFile};
+use crate::rebase::{import_tree, insert_snapshot, merge_trees, write_changes, CatFile};
 use crate::snapshot::{self, ChangeKind, FileChange};
 use crate::space::{Snapshot, Space, Status, ROOT_ATTEMPT, SPACE_DIR};
 
@@ -369,7 +369,7 @@ pub fn take(space: &Space, into: i64, source: i64, opts: &TakeOptions) -> Result
         return Ok(result(None, target.status));
     }
     if view_ok {
-        apply_to_view(store, &target.view_path, &merged, &view_changes)?;
+        write_changes(store, &target.view_path, &merged, &view_changes)?;
     }
     if current.to_hex() != target_head.tree {
         insert_snapshot(space, into, &current.to_hex(), &format!("pre-{mode}"), None)?;
@@ -602,6 +602,7 @@ mod tests {
             replaced: None,
             checkout_updated: false,
             objects_copied: 0,
+            story: Vec::new(),
         };
         let body = crate::github::pr_body(&space, &winner, &exp).unwrap();
         let section = body.split_once("## Contributors").expect("section").1;
