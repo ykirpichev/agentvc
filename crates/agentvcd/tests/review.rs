@@ -263,11 +263,13 @@ async fn actions_change_status() {
     assert_eq!(v["attempt"]["status"], "promoted");
     assert_eq!(v["closed_siblings"], json!([3]));
 
-    // The fixture's CLI-style changes are plain `human`; the three UI
-    // actions above carry the reviewer's name.
+    // The fixture's CLI-style changes are the person in the checkout (from
+    // git config); the three UI actions above carry the reviewer's name.
     let actors = status_actors(tmp.path());
     assert_eq!(&actors[actors.len() - 3..], ["human:ana"; 3]);
-    assert!(actors[..actors.len() - 3].iter().all(|a| a == "human"));
+    assert!(actors[..actors.len() - 3]
+        .iter()
+        .all(|a| a.starts_with("human") && a != "human:ana"));
 
     // Closed attempts cannot change again.
     let (s, v) = send(&app, "POST", "/api/attempts/a2/promote", None).await;

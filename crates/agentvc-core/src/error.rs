@@ -86,14 +86,23 @@ pub enum Error {
     #[error("invalid --hunks {spec:?}: {reason}")]
     BadHunk { spec: String, reason: String },
     #[error(
-        "{refname} on {remote} moved to {tip} since this space last synced (another machine \
-         continued it); clone it with `agentvc init --from-remote` elsewhere, or pass --force \
-         to overwrite"
+        "{refname} on {remote} moved to {tip} while this space was syncing (another machine \
+         synced at the same time); run `agentvc sync` again to merge it"
     )]
     SyncConflict {
         refname: String,
         remote: String,
         tip: String,
+    },
+    #[error(
+        "this machine and the remote ({tip}) both changed {}: {}; pass --prefer ours or \
+         --prefer theirs to settle it (everything else merges either way)",
+        if conflicts.len() == 1 { "one value".to_string() } else { format!("{} values", conflicts.len()) },
+        conflicts.iter().map(|c| c.to_string()).collect::<Vec<_>>().join("; ")
+    )]
+    SyncDiverged {
+        tip: String,
+        conflicts: Vec<crate::syncmerge::FieldConflict>,
     },
     #[error("several spaces match on the remote: {}; pass --space <id>", ids.join(", "))]
     AmbiguousSpace { ids: Vec<String> },
@@ -193,6 +202,7 @@ impl Error {
             Error::BackendUnavailable { .. } => "backend_unavailable",
             Error::ViewUnmounted { .. } => "view_unmounted",
             Error::Conflict { .. } | Error::TakeConflict { .. } => "conflict",
+            Error::SyncDiverged { .. } => "sync_conflict",
             Error::NothingToTake { .. } => "nothing_to_take",
             Error::BadHunk { .. } => "bad_hunk",
             Error::BadQuery(_) => "bad_query",
@@ -264,6 +274,9 @@ impl Error {
                 "source": format!("a{source_attempt}"),
                 "paths": paths,
             })),
+            Error::SyncDiverged { tip, conflicts } => {
+                Some(serde_json::json!({ "tip": tip, "conflicts": conflicts }))
+            }
             Error::RateLimited { reset_at } => Some(serde_json::json!({ "reset_at": reset_at })),
             Error::AmbiguousSpace { ids } => Some(serde_json::json!({ "spaces": ids })),
             Error::SyncConflict { refname, tip, .. } => {

@@ -107,8 +107,13 @@ enum Cmd {
         /// Stop syncing automatically (and don't sync now).
         #[arg(long)]
         no_auto: bool,
-        /// Overwrite the remote even if another machine synced this space
-        /// since this one did.
+        /// When another machine synced this space since this one did, its
+        /// additions are merged in. Values both changed (an attempt's status)
+        /// stop the sync with `sync_conflict` unless this picks a side.
+        #[arg(long, value_name = "ours|theirs")]
+        prefer: Option<String>,
+        /// Overwrite the remote instead of merging what another machine
+        /// synced since this one did (their additions are dropped).
         #[arg(long)]
         force: bool,
         /// PR (number) to keep the space in. Defaults to the space's latest PR.
@@ -142,7 +147,8 @@ enum Cmd {
         /// with `agentvc apply aN`.
         #[arg(long = "move", requires = "from_worktree")]
         move_changes: bool,
-        /// Who works in this attempt, for example agent:claude-code or human.
+        /// Who works in this attempt, for example agent:claude-code. `human`
+        /// means you: human:<name> from `agentvc config user.name` or git.
         #[arg(long, default_value = "human")]
         actor: String,
         #[arg(long)]
@@ -1078,6 +1084,7 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
             list,
             auto,
             no_auto,
+            prefer,
             force,
             pr,
             repo,
@@ -1130,10 +1137,33 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
                 &agentvc_core::SyncOptions {
                     remote: Some(remote),
                     force,
+                    prefer: prefer
+                        .as_deref()
+                        .map(|p| {
+                            agentvc_core::syncmerge::Prefer::parse(p).ok_or_else(|| {
+                                agentvc_core::Error::BadQuery(format!(
+                                    "--prefer {p:?}: expected ours or theirs"
+                                ))
+                            })
+                        })
+                        .transpose()?,
                 },
                 pr,
                 false,
             );
+            // Both machines changed the same attempt: nothing was merged and
+            // the person has to pick a side, so this is the command's error.
+            if let Some(e) = r
+                .git_error
+                .as_ref()
+                .filter(|e| e["code"] == "sync_conflict" && e.get("conflicts").is_some())
+            {
+                return Err(agentvc_core::Error::SyncDiverged {
+                    tip: e["tip"].as_str().unwrap_or_default().to_string(),
+                    conflicts: serde_json::from_value(e["conflicts"].clone()).unwrap_or_default(),
+                }
+                .into());
+            }
             if !r.saved() {
                 let why = |e: &Option<Value>| {
                     e.as_ref()
@@ -1217,6 +1247,7 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
             backend,
             ..
         } => {
+            let actor = agentvc_core::config::resolve_actor(&space, Some(&actor));
             let req = ForkRequest {
                 task_id: task.map(|t| parse_id(&t, 't', "task")).transpose()?,
                 from: None,
@@ -1301,6 +1332,7 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
             backend,
             ..
         } => {
+            let actor = agentvc_core::config::resolve_actor(&space, Some(&actor));
             let from = match from {
                 Some(f) => space.parse_ref(&f)?,
                 None => Ref::Attempt(current()?),
@@ -1480,6 +1512,7 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
                         })
                 })
                 .transpose()?;
+            let actor = agentvc_core::config::resolve_actor(&space, Some(&actor));
             let r = space.undo(&actor, op)?;
             let mut text = format!(
                 "undid op {} ({}) as op {}",
@@ -1683,6 +1716,7 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
             delete,
             actor,
         } => {
+            let actor = agentvc_core::config::resolve_actor(&space, Some(&actor));
             if list {
                 let tags = space.tags()?;
                 let mut text = String::new();
@@ -2438,6 +2472,7 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
                     &agentvc_core::SyncOptions {
                         remote: Some(remote),
                         force: false,
+                        prefer: None,
                     },
                     Some((r.repo.clone(), r.number)),
                     false,
@@ -2886,6 +2921,24 @@ fn add_sync(out: &mut Out, sync: Option<agentvc_core::github::SaveResult>) {
             g.refname,
             &g.commit[..12]
         );
+        if let Some(m) = &g.merged {
+            out.text += &format!(
+                "\nmerged from another machine: {} tasks, {} attempts, {} snapshots{}{}",
+                m.tasks,
+                m.attempts,
+                m.snapshots,
+                if m.updated > 0 {
+                    format!(", {} changed values", m.updated)
+                } else {
+                    String::new()
+                },
+                if m.resolved.is_empty() {
+                    String::new()
+                } else {
+                    format!(", {} conflicts settled with --prefer", m.resolved.len())
+                }
+            );
+        }
     }
     if let Some(c) = &r.pr {
         out.text += &format!(
@@ -2910,6 +2963,8 @@ fn add_sync(out: &mut Out, sync: Option<agentvc_core::github::SaveResult>) {
         if let Some(m) = msg(&r.git_error).or_else(|| msg(&r.pr_error)) {
             out.text += &format!("\nwarning: could not save the space: {m}; run `agentvc sync`");
         }
+    } else if let Some(m) = r.git_error.as_ref().and_then(|e| e["message"].as_str()) {
+        out.text += &format!("\nwarning: could not sync the space to the remote: {m}");
     } else if let Some(m) = r.pr_error.as_ref().and_then(|e| e["message"].as_str()) {
         out.text += &format!("\nwarning: could not update the PR's space comment: {m}");
     }

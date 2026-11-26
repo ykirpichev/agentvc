@@ -183,22 +183,7 @@ pub fn router(state: AppState) -> Router {
         .with_state(state)
 }
 
-/// `human:<name>` for a reviewer's name, or plain `human` without one.
-/// Whitespace collapses to `-` so the actor stays one token.
-pub fn human_actor(name: Option<&str>) -> String {
-    let name = name
-        .map(|n| {
-            n.split_whitespace()
-                .collect::<Vec<_>>()
-                .join("-")
-                .to_lowercase()
-        })
-        .filter(|n| !n.is_empty());
-    match name {
-        Some(n) => format!("human:{n}"),
-        None => "human".into(),
-    }
-}
+pub use agentvc_core::config::human_actor;
 
 /// True for `localhost`, `127.0.0.1`, `[::1]`, with or without a port.
 fn is_local_host(host: &str) -> bool {

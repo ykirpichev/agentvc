@@ -180,6 +180,7 @@ fn tree_patch(space: &Space, repo: &HostRepo, from: &Oid, to: &Oid) -> Result<St
 /// Encode the space for a comment on PR `pr`.
 pub fn encode(space: &Space, pr: u64) -> Result<Bundle> {
     let id = sync::space_id(space)?;
+    sync::ensure_uids(space)?;
     let mut doc = sync::dump(space, &id)?;
     let repo = HostRepo::open(space.workdir())?;
     let mut git = CatFile::start(space.workdir())?;
@@ -531,7 +532,7 @@ fn restore_into(
 
     let views = sync::open_views(&space)?;
     space.record(
-        "human",
+        &space.human(),
         "space.clone",
         json!({ "source": source, "rebuilt": rebuilt, "incomplete": incomplete }),
     )?;

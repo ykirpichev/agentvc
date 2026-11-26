@@ -167,6 +167,10 @@ fn is_status_kind(kind: &str) -> bool {
 }
 
 fn undoable(kind: &str, payload: &Value) -> bool {
+    // Merged from another machine (#77): its ids are that machine's.
+    if payload.get("merged_from").is_some() {
+        return false;
+    }
     match kind {
         "task.create" | "attempt.fork" => true,
         "undo" => payload.get("changes").is_some_and(Value::is_array),

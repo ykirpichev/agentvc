@@ -288,8 +288,12 @@ Cloud threads run in throwaway containers, and Claude Code there ignores
   spaces on the remote it takes the one synced from the checked-out branch, or
   `--space <id>` from `agentvc sync --list`. The setup script tries this first
   (`--this-branch`), so a thread that lost its container picks up where it stopped.
-  If two machines continue the same space, the later sync fails with `sync_conflict`
-  instead of hiding the other's attempts; `--force` overwrites.
+  If two machines continue the same space, the later sync merges the other's tasks,
+  attempts, snapshots and status changes in (#77; short ids may differ per machine, rows
+  match by a hidden uid). Only an attempt whose status both changed stops it with
+  `sync_conflict` naming the attempt and both values; `--prefer ours|theirs` settles it.
+  Set `agentvc config user.name <name>` once per machine so what you do is recorded as
+  `human:<name>` (it defaults to `git config user.name` and never syncs).
   **Claude Code cloud sessions** may push only their own branch, so the push is refused
   (HTTP 403). There the space goes into the PR instead (#64): `agentvc pr`, and every
   `sync` after it, keeps one collapsed comment on the PR with the whole space and, for

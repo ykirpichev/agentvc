@@ -42,20 +42,19 @@ struct Cli {
     user: Option<String>,
 }
 
-/// The reviewer's name: `--user`, else git's `user.name`, else `$USER`.
-fn reviewer_name(dir: &std::path::Path, flag: Option<String>) -> Option<String> {
-    flag.or_else(|| {
-        let out = std::process::Command::new("git")
-            .arg("-C")
-            .arg(dir)
-            .args(["config", "user.name"])
-            .stderr(std::process::Stdio::null())
-            .output()
-            .ok()?;
-        let name = String::from_utf8(out.stdout).ok()?.trim().to_string();
-        (out.status.success() && !name.is_empty()).then_some(name)
-    })
-    .or_else(|| std::env::var("USER").ok())
+/// Who UI actions are recorded as: `--user`, else the space's identity
+/// (`agentvc config user.name`, then `git config user.name`), else `$USER`.
+fn reviewer(dir: &std::path::Path, flag: Option<String>) -> String {
+    if let Some(name) = flag {
+        return agentvcd::human_actor(Some(&name));
+    }
+    let actor = agentvc_core::Space::discover(dir)
+        .map(|s| s.human())
+        .unwrap_or_else(|_| "human".into());
+    if actor == "human" {
+        return agentvcd::human_actor(std::env::var("USER").ok().as_deref());
+    }
+    actor
 }
 
 fn fail(json: bool, code: &str, message: String) -> ExitCode {
@@ -75,8 +74,8 @@ async fn main() -> ExitCode {
     let cli = Cli::parse();
     let mut config = Config::new(&cli.dir);
     config.poll_interval = Duration::from_millis(cli.poll_ms.max(50));
+    config.actor = reviewer(&cli.dir, cli.user);
     config.pr_poll = (cli.pr_poll_secs > 0).then(|| Duration::from_secs(cli.pr_poll_secs.max(30)));
-    config.actor = agentvcd::human_actor(reviewer_name(&cli.dir, cli.user).as_deref());
 
     let state = match AppState::start(&config) {
         Ok(s) => s,
