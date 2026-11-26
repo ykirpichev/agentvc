@@ -93,7 +93,7 @@ fn b64_encode(data: &[u8]) -> String {
     out
 }
 
-fn b64_decode(text: &str) -> Option<Vec<u8>> {
+pub(crate) fn b64_decode(text: &str) -> Option<Vec<u8>> {
     let mut out = Vec::with_capacity(text.len() / 4 * 3);
     let mut acc = 0u32;
     let mut bits = 0;
@@ -118,7 +118,12 @@ fn b64_decode(text: &str) -> Option<Vec<u8>> {
 }
 
 /// The tree of a commit in the host repo, copied into the space's store.
-fn base_tree(space: &Space, repo: &HostRepo, git: &mut CatFile, commit: &str) -> Option<Oid> {
+pub(crate) fn base_tree(
+    space: &Space,
+    repo: &HostRepo,
+    git: &mut CatFile,
+    commit: &str,
+) -> Option<Oid> {
     let tree = repo
         .git(
             &["rev-parse", "--verify", "-q", &format!("{commit}^{{tree}}")],
@@ -411,30 +416,18 @@ fn apply_patch(
     result
 }
 
-fn restore_into(
-    workdir: &Path,
+/// Rebuild each attempt's latest tree from the `patches` of a space comment
+/// (keyed by attempt id), into `space`'s store. Returns the attempts rebuilt
+/// exactly and those that could not be.
+pub(crate) fn rebuild_trees(
+    space: &Space,
     repo: &HostRepo,
-    payload: &Value,
-    source: &str,
-) -> Result<(Space, BundleRestore)> {
-    let doc = &payload["space"];
-    let space = sync::empty_space(workdir)?;
-    sync::insert_rows(&space, doc)?;
-    let space_id = doc["space_id"].as_str().unwrap_or_default().to_string();
-    if !space_id.is_empty() {
-        space.set_meta(sync::SPACE_ID_KEY, &space_id)?;
-    }
-    let mut git = CatFile::start(workdir)?;
-
+    git: &mut CatFile,
+    patches_json: &Value,
+) -> (Vec<i64>, Vec<i64>) {
     let (mut rebuilt, mut incomplete) = (Vec::new(), Vec::new());
-    // The commit the space started from: usually the root's first snapshot,
-    // and what `diff s1 aN` compares against.
-    if let Some(head) = space.meta(crate::export::IMPORT_BASE_KEY)? {
-        let _ = base_tree(&space, repo, &mut git, &head);
-    }
-
     // Parents before children: a child's files are relative to its parent.
-    let mut patches: Vec<(i64, &Value)> = payload["patches"]
+    let mut patches: Vec<(i64, &Value)> = patches_json
         .as_object()
         .map(|m| {
             m.iter()
@@ -451,7 +444,7 @@ fn restore_into(
                 if repo.rev(c).is_none() {
                     let _ = repo.git(&["fetch", "--quiet", "--no-tags", "origin", c], None);
                 }
-                match base_tree(&space, repo, &mut git, c) {
+                match base_tree(space, repo, git, c) {
                     Some(t) if Some(t.to_hex().as_str()) == p["tree"].as_str() => {
                         trees.insert(aid, t);
                         rebuilt.push(aid);
@@ -468,14 +461,14 @@ fn restore_into(
                     if repo.rev(base).is_none() {
                         let _ = repo.git(&["fetch", "--quiet", "--no-tags", "origin", base], None);
                     }
-                    base_tree(&space, repo, &mut git, base)
+                    base_tree(space, repo, git, base)
                 }
             };
             let Some(from) = from else {
                 incomplete.push(aid);
                 continue;
             };
-            let tree = match apply_patch(&space, repo, &mut git, &from, p["patch"].as_str()) {
+            let tree = match apply_patch(space, repo, git, &from, p["patch"].as_str()) {
                 Ok(t) => t,
                 Err(_) => {
                     incomplete.push(aid);
@@ -490,6 +483,32 @@ fn restore_into(
             }
         }
     }
+
+    (rebuilt, incomplete)
+}
+
+fn restore_into(
+    workdir: &Path,
+    repo: &HostRepo,
+    payload: &Value,
+    source: &str,
+) -> Result<(Space, BundleRestore)> {
+    let doc = &payload["space"];
+    let space = sync::empty_space(workdir)?;
+    sync::insert_rows(&space, doc)?;
+    let space_id = doc["space_id"].as_str().unwrap_or_default().to_string();
+    if !space_id.is_empty() {
+        space.set_meta(sync::SPACE_ID_KEY, &space_id)?;
+    }
+    let mut git = CatFile::start(workdir)?;
+
+    // The commit the space started from: usually the root's first snapshot,
+    // and what `diff s1 aN` compares against.
+    if let Some(head) = space.meta(crate::export::IMPORT_BASE_KEY)? {
+        let _ = base_tree(&space, repo, &mut git, &head);
+    }
+
+    let (rebuilt, mut incomplete) = rebuild_trees(&space, repo, &mut git, &payload["patches"]);
 
     // Attempts whose patch was left out keep only their history.
     for a in space.attempts(None)? {

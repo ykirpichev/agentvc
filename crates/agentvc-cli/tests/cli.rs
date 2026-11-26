@@ -1256,6 +1256,38 @@ fn sync_falls_back_to_the_pr_comment_when_the_push_is_refused() {
     assert_eq!(v["attempt"]["reason"], "x");
     let v = agentvc(&other, &["diff", "s1", "a2"]);
     assert_eq!(v["changes"][0]["path"], "lib.rs", "{v}");
+
+    // Every PR's space merged into a third clone's own space.
+    let third = tmp.path().join("third");
+    git(
+        tmp.path(),
+        &[
+            "clone",
+            "-q",
+            remote.to_str().unwrap(),
+            third.to_str().unwrap(),
+        ],
+    );
+    let v = agentvc_gh(
+        &third,
+        &api,
+        &[],
+        &["import", "--all-prs", "--repo", "acme/widget"],
+    );
+    assert_eq!(v["ok"], true, "{v}");
+    assert_eq!(v["created"], true, "{v}");
+    assert_eq!(v["imports"][0]["import"]["outcome"], "imported", "{v}");
+    let v = agentvc_gh(
+        &third,
+        &api,
+        &[],
+        &["import", "--all-prs", "--repo", "acme/widget"],
+    );
+    assert_eq!(v["imports"][0]["import"]["outcome"], "unchanged", "{v}");
+    let v = agentvc(&third, &["overview"]);
+    let task = &v["overview"]["tasks"][0];
+    assert_eq!(task["source"], "acme/widget#7", "{v}");
+    assert_eq!(task["attempts"][0]["reason"], "x", "{v}");
 }
 
 #[test]

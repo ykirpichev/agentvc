@@ -13,6 +13,7 @@ pub mod export;
 pub mod gc;
 pub mod github;
 pub mod hooks;
+pub mod import;
 pub mod index;
 pub mod objects;
 #[cfg(target_os = "linux")]

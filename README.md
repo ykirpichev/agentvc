@@ -141,7 +141,9 @@ lost and deletes orphans.
 `agentvc overview --out overview.json` writes the whole space (tasks, attempt
 trees, statuses, reasons, runs, PRs) as one JSON document; the daemon serves the
 same at `/api/overview`. The Claude project's **agentvc Experiments** artifact
-renders it. See [docs/overview.md](docs/overview.md).
+renders it. `agentvc import --all-prs` first merges every PR's saved space into
+the local one, so all PRs' attempt trees show together. See
+[docs/overview.md](docs/overview.md).
 
 ## Side panel in Claude
 
