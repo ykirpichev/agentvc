@@ -435,6 +435,223 @@ impl Api {
     }
 }
 
+/// `owner/name` on GitHub: `repo` when given, else parsed from `remote`'s URL.
+pub fn repo_for(workdir: &std::path::Path, remote: &str, repo: Option<&str>) -> Result<String> {
+    if let Some(r) = repo {
+        return Ok(r.to_string());
+    }
+    let url = HostRepo::open(workdir)?.git(&["remote", "get-url", remote], None)?;
+    parse_remote(&url).ok_or(Error::BadRemote(url))
+}
+
+/// `(owner/name, number)` from a PR URL like `https://github.com/o/r/pull/7`.
+pub fn parse_pr_url(url: &str) -> Option<(String, u64)> {
+    let rest = url.split("/pull/").collect::<Vec<_>>();
+    let [head, tail] = rest.as_slice() else {
+        return None;
+    };
+    let n = tail.split(['/', '#', '?']).next()?.parse().ok()?;
+    let mut parts = head.rsplit('/');
+    let name = parts.next()?;
+    let owner = parts.next()?;
+    Some((format!("{owner}/{name}"), n))
+}
+
+/// The space comment on a PR after [`save_space_comment`].
+#[derive(Clone, Debug, Serialize)]
+pub struct SpaceComment {
+    pub repo: String,
+    pub pr: u64,
+    pub url: String,
+    /// True when an earlier space comment was edited in place.
+    pub updated: bool,
+    pub bundle: crate::bundle::Bundle,
+}
+
+fn find_space_comment(api: &Api, repo: &str, pr: u64) -> Result<Option<Value>> {
+    let mut page = 1;
+    loop {
+        let list = api.call(
+            "GET",
+            &format!("/repos/{repo}/issues/{pr}/comments?per_page=100&page={page}"),
+            None,
+        )?;
+        let Some(items) = list.as_array().filter(|a| !a.is_empty()) else {
+            return Ok(None);
+        };
+        if let Some(c) = items.iter().find(|c| {
+            c["body"]
+                .as_str()
+                .is_some_and(|b| b.starts_with(crate::bundle::MARKER))
+        }) {
+            return Ok(Some(c.clone()));
+        }
+        if items.len() < 100 {
+            return Ok(None);
+        }
+        page += 1;
+    }
+}
+
+/// Write the whole space (see [`crate::bundle`]) into one comment on PR
+/// `pr`, editing the previous one in place.
+pub fn save_space_comment(space: &Space, repo: &str, pr: u64) -> Result<SpaceComment> {
+    let bundle = crate::bundle::encode(space, pr)?;
+    let api = Api::new(token()?);
+    let (v, updated) = match find_space_comment(&api, repo, pr)? {
+        Some(c) => {
+            let id = c["id"].as_u64().unwrap_or(0);
+            let v = api.call(
+                "PATCH",
+                &format!("/repos/{repo}/issues/comments/{id}"),
+                Some(json!({ "body": bundle.body })),
+            )?;
+            (v, true)
+        }
+        None => (
+            api.call(
+                "POST",
+                &format!("/repos/{repo}/issues/{pr}/comments"),
+                Some(json!({ "body": bundle.body })),
+            )?,
+            false,
+        ),
+    };
+    Ok(SpaceComment {
+        repo: repo.to_string(),
+        pr,
+        url: v["html_url"].as_str().unwrap_or_default().to_string(),
+        updated,
+        bundle,
+    })
+}
+
+/// Read the space comment of PR `pr`, or of the PR whose head is the branch
+/// checked out in `workdir` (newest first, open or closed).
+pub fn load_space_comment(
+    workdir: &std::path::Path,
+    repo: &str,
+    pr: Option<u64>,
+) -> Result<(u64, Value)> {
+    let api = Api::new(token()?);
+    let pr = match pr {
+        Some(n) => n,
+        None => {
+            let branch = HostRepo::open(workdir)?
+                .git(&["symbolic-ref", "--short", "-q", "HEAD"], None)
+                .map_err(|_| Error::NotFound {
+                    kind: "branch",
+                    id: "HEAD (detached; pass a PR number)".into(),
+                })?;
+            let owner = repo.split('/').next().unwrap_or("");
+            let list = api.call(
+                "GET",
+                &format!("/repos/{repo}/pulls?state=all&head={owner}:{branch}"),
+                None,
+            )?;
+            list.as_array()
+                .and_then(|a| a.first())
+                .and_then(|p| p["number"].as_u64())
+                .ok_or(Error::NotFound {
+                    kind: "pull request for branch",
+                    id: branch,
+                })?
+        }
+    };
+    let c = find_space_comment(&api, repo, pr)?.ok_or(Error::NotFound {
+        kind: "agentvc space comment on PR",
+        id: format!("#{pr}"),
+    })?;
+    Ok((
+        pr,
+        crate::bundle::decode(c["body"].as_str().unwrap_or_default())?,
+    ))
+}
+
+/// Where [`save_space`] put the space.
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct SaveResult {
+    /// The push to `refs/agentvc/spaces/<id>`.
+    pub git: Option<crate::sync::SyncResult>,
+    pub git_error: Option<Value>,
+    /// The comment on the space's latest PR.
+    pub pr: Option<SpaceComment>,
+    pub pr_error: Option<Value>,
+}
+
+impl SaveResult {
+    /// Whether the space reached the remote one way or the other.
+    pub fn saved(&self) -> bool {
+        self.git.is_some() || self.pr.is_some()
+    }
+}
+
+fn err_json(e: &Error) -> Value {
+    json!({ "code": e.code(), "message": e.to_string() })
+}
+
+/// Space metadata key set when the remote refused a space push, so automatic
+/// saves stop trying (cloud sessions may push only their own branch).
+pub const PUSH_REFUSED_KEY: &str = "sync_push_refused";
+
+/// Save the space everywhere it can go: push it to the remote (unless
+/// `skip_git`) and write it into the comment of `pr`, or of the space's latest
+/// PR. Either one is enough; failures are reported, not returned.
+pub fn save_space(
+    space: &Space,
+    opts: &crate::sync::SyncOptions,
+    pr: Option<(String, u64)>,
+    skip_git: bool,
+) -> SaveResult {
+    let mut r = SaveResult::default();
+    if !skip_git {
+        match crate::sync::sync(space, opts) {
+            Ok(s) => {
+                let _ = space.delete_meta(PUSH_REFUSED_KEY);
+                r.git = Some(s);
+            }
+            Err(e) => {
+                let remote = opts.remote.as_deref().unwrap_or("origin");
+                let e = push_error(e, remote, "refs/agentvc/spaces/*");
+                if matches!(e, Error::PushNotAllowed { .. }) {
+                    let _ = space.set_meta(PUSH_REFUSED_KEY, "1");
+                }
+                r.git_error = Some(err_json(&e));
+            }
+        }
+    }
+    let pr = pr.or_else(|| {
+        space
+            .latest_pr_url()
+            .ok()
+            .flatten()
+            .and_then(|u| parse_pr_url(&u))
+    });
+    if let Some((repo, n)) = pr {
+        match save_space_comment(space, &repo, n) {
+            Ok(c) => r.pr = Some(c),
+            Err(e) => r.pr_error = Some(err_json(&e)),
+        }
+    }
+    r
+}
+
+/// [`save_space`] after commands that change history, when `agentvc sync
+/// --auto` is on. Skips the push once the remote has refused one.
+pub fn auto_save(space: &Space) -> Option<SaveResult> {
+    let remote = space.meta(crate::sync::AUTO_SYNC_KEY).ok().flatten()?;
+    let refused = space.meta(PUSH_REFUSED_KEY).ok().flatten().is_some();
+    Some(save_space(
+        space,
+        &crate::sync::SyncOptions {
+            remote: Some(remote),
+            force: false,
+        },
+        None,
+        refused,
+    ))
+}
+
 /// Export `attempt_id`, push its branch and open a PR, or update the PR that
 /// is already open for that branch. Records the PR URL on the export.
 pub fn open_pr(space: &Space, attempt_id: i64, opts: &PrOptions) -> Result<PrResult> {
@@ -607,6 +824,11 @@ mod tests {
             );
         }
         assert_eq!(parse_remote("agentvc"), None);
+        assert_eq!(
+            parse_pr_url("https://github.com/acme/widget/pull/7"),
+            Some(("acme/widget".into(), 7))
+        );
+        assert_eq!(parse_pr_url("https://github.com/acme/widget"), None);
     }
 
     #[test]

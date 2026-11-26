@@ -44,6 +44,7 @@ agentvc export a2 --branch parser-2x          # a2 as a commit on a branch; work
 agentvc pr a2 --draft                         # push agentvc/a2 and open a PR listing rejected attempts
 agentvc sync                                  # push the whole space (losers too) to origin
 agentvc init --from-remote                    # elsewhere: rebuild that space, same ids
+agentvc init --from-pr 12                     # or rebuild it from the comment `agentvc pr` keeps on PR #12
 ```
 
 `agentvc pr` reads a token from `GITHUB_TOKEN`, `GH_TOKEN` or `gh auth token`.

@@ -109,6 +109,15 @@ impl HostRepo {
         stdin: Option<&str>,
         env: &[(&str, &str)],
     ) -> Result<String> {
+        Ok(self.run(args, stdin, env)?.trim().to_string())
+    }
+
+    /// Run git in the repo and return stdout as it is, for patches.
+    pub fn git_raw(&self, args: &[&str]) -> Result<String> {
+        self.run(args, None, &[])
+    }
+
+    fn run(&self, args: &[&str], stdin: Option<&str>, env: &[(&str, &str)]) -> Result<String> {
         let mut cmd = Command::new("git");
         cmd.arg("-C")
             .arg(&self.workdir)
@@ -137,7 +146,7 @@ impl HostRepo {
                 stderr: String::from_utf8_lossy(&out.stderr).trim().to_string(),
             });
         }
-        Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
     }
 
     /// Resolve a revision to a commit id, or `None` if it does not exist.
@@ -457,6 +466,18 @@ impl Space {
     }
 
     /// The pull request opened for an attempt, if any.
+    /// The most recently recorded PR of any attempt in the space.
+    pub fn latest_pr_url(&self) -> Result<Option<String>> {
+        Ok(self
+            .db
+            .query_row(
+                "SELECT pr_url FROM exports WHERE pr_url IS NOT NULL ORDER BY id DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
     pub fn pr_url(&self, attempt_id: i64) -> Result<Option<String>> {
         Ok(self
             .db

@@ -388,15 +388,27 @@ fn fake_github() -> (String, RequestLog) {
             reader.read_exact(&mut body).unwrap();
             let body: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
             let mut log = seen.lock().unwrap();
-            let created = log.iter().any(|(m, _, _)| m == "POST");
+            let pulls = |p: &String| p.contains("/pulls");
+            let created = log.iter().any(|(m, p, _)| m == "POST" && pulls(p));
             log.push((method.clone(), path.clone(), body));
             // The open PR carries the body it was last sent, like GitHub.
             let last_body = log
                 .iter()
                 .rev()
-                .find(|(m, _, _)| m == "POST" || m == "PATCH")
+                .find(|(m, p, _)| (m == "POST" || m == "PATCH") && pulls(p))
                 .map(|(_, _, b)| b["body"].clone())
                 .unwrap_or(Value::Null);
+            // The one issue comment agentvc keeps (the space), if any.
+            let comment = log
+                .iter()
+                .rev()
+                .find(|(m, p, _)| (m == "POST" || m == "PATCH") && p.contains("comments"))
+                .map(|(_, _, b)| {
+                    serde_json::json!({
+                        "id": 99, "body": b["body"],
+                        "html_url": "https://github.com/acme/widget/pull/7#issuecomment-99",
+                    })
+                });
             drop(log);
             let pr = serde_json::json!({
                 "number": 7, "html_url": "https://github.com/acme/widget/pull/7",
@@ -411,6 +423,10 @@ fn fake_github() -> (String, RequestLog) {
                         serde_json::json!([])
                     }
                 }
+                ("GET", p) if p.starts_with("/repos/acme/widget/issues/7/comments") => {
+                    serde_json::json!(comment.iter().collect::<Vec<_>>())
+                }
+                (_, p) if p.contains("comments") => comment.unwrap_or(Value::Null),
                 _ => pr,
             };
             let reply = reply.to_string();
@@ -524,12 +540,15 @@ fn pr_pushes_branch_and_opens_pr_with_rejected_attempts() {
     assert_eq!(git(&remote, &["rev-parse", "agentvc/a2"]), commit);
 
     // The whole space went to the remote too, losers included (#56).
-    let sync_ref = v["sync"]["ref"].as_str().unwrap().to_string();
+    let sync_ref = v["sync"]["git"]["ref"].as_str().unwrap().to_string();
     assert!(sync_ref.starts_with("refs/agentvc/spaces/"), "{v}");
     assert_eq!(
         git(&remote, &["rev-parse", &sync_ref]),
-        v["sync"]["commit"].as_str().unwrap()
+        v["sync"]["git"]["commit"].as_str().unwrap()
     );
+    // ...and into a comment on the PR, for machines that can't push it (#64).
+    assert_eq!(v["sync"]["pr"]["pr"], 7, "{v}");
+    assert_eq!(v["sync"]["pr"]["updated"], false);
     // Another machine rebuilds the same attempt tree from it.
     git(&w, &["push", "-q", "origin", "main"]);
     let other = tmp.path().join("other");
@@ -559,9 +578,57 @@ fn pr_pushes_branch_and_opens_pr_with_rejected_attempts() {
     assert_eq!(v["attempt"]["reason"], "lost to a2");
     assert_eq!(v["snapshots"].as_array().unwrap().len(), 1);
 
+    // A third machine rebuilds it from the PR comment alone.
+    let third = tmp.path().join("third");
+    git(
+        tmp.path(),
+        &[
+            "clone",
+            "-q",
+            remote.to_str().unwrap(),
+            third.to_str().unwrap(),
+        ],
+    );
+    let in_third = |args: &[&str]| -> Value {
+        let out = Command::cargo_bin("agentvc")
+            .unwrap()
+            .arg("--json")
+            .arg("-C")
+            .arg(&third)
+            .args(args)
+            .env("GITHUB_TOKEN", "test-token")
+            .env("AGENTVC_GITHUB_API", &api)
+            .env_remove("HTTP_PROXY")
+            .env_remove("HTTPS_PROXY")
+            .env_remove("http_proxy")
+            .env_remove("https_proxy")
+            .output()
+            .unwrap();
+        serde_json::from_slice(&out.stdout).unwrap()
+    };
+    let v = in_third(&[
+        "init",
+        "--from-pr",
+        "7",
+        "--repo",
+        "acme/widget",
+        "--no-prepare",
+    ]);
+    assert_eq!(v["ok"], true, "{v}");
+    assert_eq!(v["restore"]["rebuilt"], serde_json::json!([2, 3]), "{v}");
+    assert_eq!(
+        strip(agentvc(&third, &["log"])),
+        strip(agentvc(&w, &["log"]))
+    );
+    let v = agentvc(&third, &["diff", "s1", "a3"]);
+    assert_eq!(v["changes"][0]["path"], "lib.rs", "{v}");
+
     {
         let log = log.lock().unwrap();
-        let (_, _, body) = log.iter().find(|(m, _, _)| m == "POST").unwrap();
+        let (_, _, body) = log
+            .iter()
+            .find(|(m, p, _)| m == "POST" && p.contains("/pulls"))
+            .unwrap();
         assert_eq!(body["head"], "agentvc/a2");
         assert_eq!(body["base"], "main");
         assert_eq!(body["draft"], true);
@@ -972,7 +1039,10 @@ fn pr_from_a_thread_branch_keeps_prefix_trailers_and_checkout() {
     );
     {
         let log = log.lock().unwrap();
-        let (_, _, body) = log.iter().find(|(m, _, _)| m == "POST").unwrap();
+        let (_, _, body) = log
+            .iter()
+            .find(|(m, p, _)| m == "POST" && p.contains("/pulls"))
+            .unwrap();
         assert_eq!(body["head"], "claude/thread");
         let text = body["body"].as_str().unwrap();
         assert!(
@@ -1007,7 +1077,10 @@ fn pr_from_a_thread_branch_keeps_prefix_trailers_and_checkout() {
     );
     {
         let log = log.lock().unwrap();
-        let (_, _, body) = log.iter().rfind(|(m, _, _)| m == "PATCH").unwrap();
+        let (_, _, body) = log
+            .iter()
+            .rfind(|(m, p, _)| m == "PATCH" && p.contains("/pulls"))
+            .unwrap();
         let text = body["body"].as_str().unwrap();
         assert!(
             text.starts_with("_Requested by **Yury**_\n\n<!-- agentvc:begin"),
@@ -1103,4 +1176,80 @@ fn status_shows_attempt_in_a_view_and_space_outside() {
 
     // An explicit attempt works anywhere.
     assert_eq!(agentvc(w, &["status", "a2"])["status"]["attempt"]["id"], 2);
+}
+
+#[test]
+fn sync_falls_back_to_the_pr_comment_when_the_push_is_refused() {
+    let tmp = tempdir();
+    let w = tmp.path().join("work");
+    let remote = tmp.path().join("remotes/acme/widget.git");
+    fs::create_dir_all(&w).unwrap();
+    fs::create_dir_all(&remote).unwrap();
+    git(&remote, &["init", "-q", "--bare"]);
+    git(&w, &["init", "-q", "-b", "main"]);
+    fs::write(w.join("lib.rs"), "1\n").unwrap();
+    git(&w, &["add", "-A"]);
+    git(&w, &["commit", "-q", "-m", "base"]);
+    git(&w, &["remote", "add", "origin", remote.to_str().unwrap()]);
+    git(&w, &["push", "-q", "origin", "main"]);
+    agentvc(&w, &["init", "--no-prepare"]);
+    agentvc(&w, &["task", "new", "t"]);
+    let v = agentvc(&w, &["fork", "--task", "t1", "--actor", "agent:one"]);
+    let view = v["fork"]["attempt"]["view_path"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    fs::write(Path::new(&view).join("lib.rs"), "2\n").unwrap();
+    agentvc(&w, &["snapshot", "a2"]);
+
+    // Refuse every push except branches, like a cloud session's git proxy.
+    let hook = remote.join("hooks/pre-receive");
+    fs::write(
+        &hook,
+        "#!/bin/sh\nwhile read old new ref; do case \"$ref\" in refs/heads/*) ;; \
+         *) echo 'The requested URL returned error: 403' >&2; exit 1;; esac; done\n",
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let (api, _log) = fake_github();
+    // No PR yet: nothing could be saved.
+    let v = agentvc_gh(&w, &api, &[], &["sync", "--auto"]);
+    assert_eq!(v["error"]["code"], "not_saved", "{v}");
+    let v = agentvc_gh(&w, &api, &[], &["pr", "a2", "--branch", "thread"]);
+    assert_eq!(v["ok"], true, "{v}");
+    assert_eq!(v["sync"]["git_error"]["code"], "push_not_allowed", "{v}");
+    assert_eq!(v["sync"]["pr"]["pr"], 7, "{v}");
+    // Later automatic saves skip the refused push and edit the comment.
+    let v = agentvc_gh(&w, &api, &[], &["abandon", "a2", "--reason", "x"]);
+    assert!(v["sync"]["git_error"].is_null(), "{v}");
+    assert_eq!(v["sync"]["pr"]["updated"], true, "{v}");
+
+    let other = tmp.path().join("other");
+    git(
+        tmp.path(),
+        &[
+            "clone",
+            "-q",
+            remote.to_str().unwrap(),
+            other.to_str().unwrap(),
+        ],
+    );
+    let v = agentvc_gh(
+        &other,
+        &api,
+        &[],
+        &[
+            "init",
+            "--from-pr",
+            "https://github.com/acme/widget/pull/7",
+            "--no-prepare",
+        ],
+    );
+    assert_eq!(v["ok"], true, "{v}");
+    let v = agentvc(&other, &["show", "a2"]);
+    assert_eq!(v["attempt"]["reason"], "x");
+    let v = agentvc(&other, &["diff", "s1", "a2"]);
+    assert_eq!(v["changes"][0]["path"], "lib.rs", "{v}");
 }

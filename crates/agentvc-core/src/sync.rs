@@ -56,7 +56,7 @@ pub const REF_PREFIX: &str = "refs/agentvc/spaces/";
 const DUMP_FORMAT: u32 = 1;
 /// Tables that make up a space's history, in an order that keeps foreign
 /// keys happy. Layers and overlays are machine-local and stay behind.
-const TABLES: &[&str] = &[
+pub(crate) const TABLES: &[&str] = &[
     "tasks",
     "attempts",
     "snapshots",
@@ -67,7 +67,7 @@ const TABLES: &[&str] = &[
 ];
 /// Metadata keys that describe this machine's sync state, not the space.
 const LOCAL_META: &[&str] = &[SYNC_COMMIT_KEY, AUTO_SYNC_KEY];
-const LOG_TAIL: u64 = 256 * 1024;
+pub(crate) const LOG_TAIL: u64 = 256 * 1024;
 
 #[derive(Clone, Debug, Default)]
 pub struct SyncOptions {
@@ -194,7 +194,7 @@ fn columns(db: &Connection, table: &str) -> Result<HashSet<String>> {
 
 /// The space's history as one JSON document. Deterministic for the same
 /// state, so an unchanged space syncs to the same tree.
-fn dump(space: &Space, id: &str) -> Result<Value> {
+pub(crate) fn dump(space: &Space, id: &str) -> Result<Value> {
     let mut tables = Map::new();
     for t in TABLES {
         tables.insert(t.to_string(), Value::Array(dump_table(&space.db, t)?));
@@ -225,7 +225,7 @@ fn dump_table_meta(db: &Connection) -> Result<Vec<(String, String)>> {
     Ok(rows.collect::<std::result::Result<_, _>>()?)
 }
 
-fn tail(path: &Path, max: u64) -> Option<Vec<u8>> {
+pub(crate) fn tail(path: &Path, max: u64) -> Option<Vec<u8>> {
     let mut f = fs::File::open(path).ok()?;
     let len = f.metadata().ok()?.len();
     if len > max {
@@ -400,19 +400,6 @@ pub fn sync(space: &Space, opts: &SyncOptions) -> Result<SyncResult> {
     })
 }
 
-/// Sync to the remote set with `agentvc sync --auto`, if any. Errors are
-/// returned for the caller to report as a warning.
-pub fn auto_sync(space: &Space) -> Option<Result<SyncResult>> {
-    let remote = space.meta(AUTO_SYNC_KEY).ok().flatten()?;
-    Some(sync(
-        space,
-        &SyncOptions {
-            remote: Some(remote),
-            force: false,
-        },
-    ))
-}
-
 /// Local refs that mirror a remote's synced spaces.
 fn mirror_prefix(remote: &str) -> String {
     format!("refs/agentvc/remotes/{remote}/")
@@ -478,14 +465,14 @@ pub fn remote_spaces(workdir: &Path, remote: Option<&str>) -> Result<Vec<RemoteS
 }
 
 /// `git cat-file --batch`, for copying many objects out of the host repo.
-struct CatFile {
+pub(crate) struct CatFile {
     child: Child,
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
 }
 
 impl CatFile {
-    fn start(workdir: &Path) -> Result<CatFile> {
+    pub(crate) fn start(workdir: &Path) -> Result<CatFile> {
         let mut child = Command::new("git")
             .arg("-C")
             .arg(workdir)
@@ -504,7 +491,7 @@ impl CatFile {
         })
     }
 
-    fn read(&mut self, oid: &Oid) -> Result<(String, Vec<u8>)> {
+    pub(crate) fn read(&mut self, oid: &Oid) -> Result<(String, Vec<u8>)> {
         writeln!(self.stdin, "{oid}").at("git cat-file")?;
         self.stdin.flush().at("git cat-file")?;
         let mut header = String::new();
@@ -536,7 +523,7 @@ impl Drop for CatFile {
 /// Copy tree `oid` and everything under it from the host repo into the
 /// space's object store. Children are written before their tree, so a tree
 /// that is present is always complete.
-fn import_tree(space: &Space, git: &mut CatFile, oid: &Oid) -> Result<usize> {
+pub(crate) fn import_tree(space: &Space, git: &mut CatFile, oid: &Oid) -> Result<usize> {
     let store = space.objects();
     if store.contains(oid) {
         return Ok(0);
@@ -668,11 +655,7 @@ fn restore(
 ) -> Result<(Space, CloneResult)> {
     let workdir = workdir.to_path_buf();
     let dir = workdir.join(SPACE_DIR);
-    for sub in ["objects", "views"] {
-        fs::create_dir_all(dir.join(sub)).at(dir.join(sub))?;
-    }
-    fs::write(dir.join(".gitignore"), "*\n").at(dir.join(".gitignore"))?;
-    let space = Space::open_at(workdir.clone())?;
+    let space = empty_space(&workdir)?;
 
     // Objects first: a space whose rows point at missing trees is worse than
     // no space.
@@ -688,6 +671,64 @@ fn restore(
         }
     }
 
+    let runs_dir = dir.join("runs");
+    insert_rows(&space, doc)?;
+    space.set_meta(SPACE_ID_KEY, &picked.space_id)?;
+    space.set_meta(SYNC_COMMIT_KEY, &picked.commit)?;
+    repo.git(&["update-ref", &picked.refname, &picked.commit], None)?;
+
+    // Run logs.
+    if let Ok(listing) = repo.git(&["ls-tree", &format!("{}:logs", picked.commit)], None) {
+        fs::create_dir_all(&runs_dir).at(&runs_dir)?;
+        for line in listing.lines() {
+            let Some((info, name)) = line.split_once('\t') else {
+                continue;
+            };
+            let Some(oid) = info.split_whitespace().nth(2) else {
+                continue;
+            };
+            let (_, body) = git.read(&Oid::from_hex(oid)?)?;
+            fs::write(runs_dir.join(name), body).at(runs_dir.join(name))?;
+        }
+    }
+
+    let views = open_views(&space)?;
+
+    let count = |t: &str| doc["tables"][t].as_array().map_or(0, Vec::len);
+    space.record(
+        "human",
+        "space.clone",
+        json!({ "remote": remote, "ref": picked.refname, "commit": picked.commit }),
+    )?;
+    let result = CloneResult {
+        space_id: picked.space_id.clone(),
+        remote,
+        commit: picked.commit.clone(),
+        tasks: count("tasks"),
+        attempts: count("attempts"),
+        snapshots: count("snapshots"),
+        views,
+        objects_imported,
+    };
+    Ok((space, result))
+}
+
+/// A new, empty space in `workdir`, for rebuilding one from elsewhere.
+pub(crate) fn empty_space(workdir: &Path) -> Result<Space> {
+    let dir = workdir.join(SPACE_DIR);
+    for sub in ["objects", "views"] {
+        fs::create_dir_all(dir.join(sub)).at(dir.join(sub))?;
+    }
+    fs::write(dir.join(".gitignore"), "*\n").at(dir.join(".gitignore"))?;
+    Space::open_at(workdir.to_path_buf())
+}
+
+/// Insert the rows and metadata of a dumped space (see [`dump`]), rewriting
+/// paths from the other machine to this one.
+pub(crate) fn insert_rows(space: &Space, doc: &Value) -> Result<()> {
+    let workdir = space.workdir().to_path_buf();
+    let dir = workdir.join(SPACE_DIR);
+    let rows = |t: &str| doc["tables"][t].as_array().cloned().unwrap_or_default();
     let views_dir = dir.join("views");
     let runs_dir = dir.join("runs");
     space.db.pragma_update(None, "foreign_keys", "OFF")?;
@@ -745,53 +786,27 @@ fn restore(
     }
     tx.commit()?;
     space.db.pragma_update(None, "foreign_keys", "ON")?;
-    space.set_meta(SPACE_ID_KEY, &picked.space_id)?;
-    space.set_meta(SYNC_COMMIT_KEY, &picked.commit)?;
-    repo.git(&["update-ref", &picked.refname, &picked.commit], None)?;
+    Ok(())
+}
 
-    // Run logs.
-    if let Ok(listing) = repo.git(&["ls-tree", &format!("{}:logs", picked.commit)], None) {
-        fs::create_dir_all(&runs_dir).at(&runs_dir)?;
-        for line in listing.lines() {
-            let Some((info, name)) = line.split_once('\t') else {
-                continue;
-            };
-            let Some(oid) = info.split_whitespace().nth(2) else {
-                continue;
-            };
-            let (_, body) = git.read(&Oid::from_hex(oid)?)?;
-            fs::write(runs_dir.join(name), body).at(runs_dir.join(name))?;
-        }
-    }
-
+/// Write views for open attempts whose latest tree is in the store, so
+/// work can continue in them. Returns their ids.
+pub(crate) fn open_views(space: &Space) -> Result<Vec<i64>> {
     // Open attempts get a view to keep working in.
     let mut views = Vec::new();
     for a in space.attempts(None)? {
         if a.id == ROOT_ATTEMPT || !a.status.is_open() || a.view_path.exists() {
             continue;
         }
-        let head = space.head_snapshot(a.id)?;
-        crate::snapshot::materialize(space.objects(), &Oid::from_hex(&head.tree)?, &a.view_path)?;
+        let head = Oid::from_hex(&space.head_snapshot(a.id)?.tree)?;
+        if !space.objects().contains(&head) {
+            continue;
+        }
+        crate::snapshot::materialize(space.objects(), &head, &a.view_path)?;
         views.push(a.id);
     }
 
-    let count = |t: &str| doc["tables"][t].as_array().map_or(0, Vec::len);
-    space.record(
-        "human",
-        "space.clone",
-        json!({ "remote": remote, "ref": picked.refname, "commit": picked.commit }),
-    )?;
-    let result = CloneResult {
-        space_id: picked.space_id.clone(),
-        remote,
-        commit: picked.commit.clone(),
-        tasks: count("tasks"),
-        attempts: count("attempts"),
-        snapshots: count("snapshots"),
-        views,
-        objects_imported,
-    };
-    Ok((space, result))
+    Ok(views)
 }
 
 #[cfg(test)]

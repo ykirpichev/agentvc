@@ -56,10 +56,26 @@ enum Cmd {
         /// here; fail with not_found otherwise.
         #[arg(long, requires = "from_remote")]
         this_branch: bool,
+        /// Rebuild the space that `agentvc pr` (or `sync`) saved in a comment
+        /// on this PR; without a number, the PR of the branch checked out
+        /// here. For machines that can't push refs/agentvc/* (cloud sessions).
+        #[arg(
+            long,
+            value_name = "PR",
+            num_args = 0..=1,
+            default_missing_value = "branch",
+            conflicts_with = "from_remote"
+        )]
+        from_pr: Option<String>,
+        /// With --from-pr: GitHub repository as owner/name. Defaults to origin's.
+        #[arg(long, requires = "from_pr")]
+        repo: Option<String>,
     },
-    /// Push this space's history (tasks, attempts, snapshots, reasons, runs)
-    /// to a git remote as refs/agentvc/spaces/<id>, so it outlives this
-    /// machine. Restore it elsewhere with `agentvc init --from-remote`.
+    /// Save this space's history (tasks, attempts, snapshots, reasons, runs)
+    /// so it outlives this machine: push it to a git remote as
+    /// refs/agentvc/spaces/<id> (restore with `agentvc init --from-remote`),
+    /// and write it into a comment on the space's latest PR (restore with
+    /// `agentvc init --from-pr`). Either one is enough.
     Sync {
         #[arg(long, default_value = "origin")]
         remote: String,
@@ -77,6 +93,12 @@ enum Cmd {
         /// since this one did.
         #[arg(long)]
         force: bool,
+        /// PR (number) to keep the space in. Defaults to the space's latest PR.
+        #[arg(long)]
+        pr: Option<u64>,
+        /// With --pr: GitHub repository as owner/name. Defaults to the remote's.
+        #[arg(long, requires = "pr")]
+        repo: Option<String>,
     },
     /// Create and list tasks.
     #[command(subcommand)]
@@ -498,9 +520,69 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
     };
     if let Cmd::Init {
         no_prepare,
+        from_pr: Some(pr),
+        repo,
+        ..
+    } = &cli.cmd
+    {
+        let number = match pr.as_str() {
+            "branch" => None,
+            n => Some(
+                n.trim_start_matches('#')
+                    .parse::<u64>()
+                    .ok()
+                    .or_else(|| agentvc_core::github::parse_pr_url(n).map(|(_, n)| n))
+                    .ok_or_else(|| anyhow::anyhow!("--from-pr expects a PR number or URL"))?,
+            ),
+        };
+        let repo = match agentvc_core::github::parse_pr_url(pr) {
+            Some((r, _)) if repo.is_none() => r,
+            _ => agentvc_core::github::repo_for(&cwd, "origin", repo.as_deref())?,
+        };
+        let (n, payload) = agentvc_core::github::load_space_comment(&cwd, &repo, number)?;
+        let (space, r) = agentvc_core::bundle::restore(&cwd, &payload, &format!("{repo}#{n}"))?;
+        let prepare = if *no_prepare {
+            json!({ "skipped": "--no-prepare" })
+        } else {
+            prepare_in_background(&space)
+        };
+        let list = |v: &[i64]| {
+            if v.is_empty() {
+                "none".to_string()
+            } else {
+                v.iter()
+                    .map(|i| format!("a{i}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            }
+        };
+        let mut text = format!(
+            "Rebuilt space {} from {repo}#{n}: {} tasks, {} attempts, {} snapshots\n\
+             Files rebuilt for {}; views written for open attempts: {}",
+            r.space_id,
+            r.tasks,
+            r.attempts,
+            r.snapshots,
+            list(&r.rebuilt),
+            list(&r.views)
+        );
+        if !r.incomplete.is_empty() {
+            text += &format!(
+                "\nHistory only (files left out of the comment or base commit missing): {}",
+                list(&r.incomplete)
+            );
+        }
+        return Ok(Out {
+            text,
+            json: json!({ "workdir": space.workdir(), "restore": r, "prepare": prepare }),
+        });
+    }
+    if let Cmd::Init {
+        no_prepare,
         from_remote: Some(remote),
         space,
         this_branch,
+        ..
     } = &cli.cmd
     {
         let opts = agentvc_core::CloneOptions {
@@ -579,6 +661,8 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
             auto,
             no_auto,
             force,
+            pr,
+            repo,
         } => {
             if list {
                 let spaces = agentvc_core::sync::remote_spaces(space.workdir(), Some(&remote))?;
@@ -616,35 +700,44 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
                     json: json!({ "auto": null }),
                 });
             }
-            let r = agentvc_core::sync::sync(
+            let pr = match pr {
+                Some(n) => Some((
+                    agentvc_core::github::repo_for(space.workdir(), &remote, repo.as_deref())?,
+                    n,
+                )),
+                None => None,
+            };
+            let r = agentvc_core::github::save_space(
                 &space,
                 &agentvc_core::SyncOptions {
                     remote: Some(remote),
                     force,
                 },
-            )?;
-            let auto_note = match space.meta(agentvc_core::sync::AUTO_SYNC_KEY)? {
-                Some(r) => format!("\nauto-sync to {r} is on"),
-                None => String::new(),
-            };
-            Out {
-                text: format!(
-                    "{} space {} to {} {} at {}: {} tasks, {} attempts, {} snapshots{auto_note}",
-                    if r.unchanged {
-                        "Already synced"
-                    } else {
-                        "Synced"
-                    },
-                    r.space_id,
-                    r.remote,
-                    r.refname,
-                    &r.commit[..12],
-                    r.tasks,
-                    r.attempts,
-                    r.snapshots
-                ),
-                json: json!({ "sync": r, "auto": space.meta(agentvc_core::sync::AUTO_SYNC_KEY)? }),
+                pr,
+                false,
+            );
+            if !r.saved() {
+                let why = |e: &Option<Value>| {
+                    e.as_ref()
+                        .and_then(|e| e["message"].as_str().map(str::to_string))
+                };
+                return Err(Error::NotSaved {
+                    git: why(&r.git_error).unwrap_or_else(|| "not tried".into()),
+                    pr: why(&r.pr_error)
+                        .unwrap_or_else(|| "no PR yet (pass --pr, or run agentvc pr)".into()),
+                }
+                .into());
             }
+            let mut out = Out {
+                text: String::new(),
+                json: json!({ "auto": space.meta(agentvc_core::sync::AUTO_SYNC_KEY)? }),
+            };
+            add_sync(&mut out, Some(r));
+            out.text = out.text.trim_start().to_string();
+            if let Some(a) = space.meta(agentvc_core::sync::AUTO_SYNC_KEY)? {
+                out.text += &format!("\nauto-sync to {a} is on");
+            }
+            out
         }
         Cmd::Init { .. }
         | Cmd::Hook { .. }
@@ -775,7 +868,7 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
                 Status::Abandoned,
                 Some(&reason),
             )?);
-            add_sync(&mut out, agentvc_core::sync::auto_sync(&space));
+            add_sync(&mut out, agentvc_core::github::auto_save(&space));
             out
         }
         Cmd::Promote { attempt } => {
@@ -795,7 +888,7 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
                 out.text += &format!("\nabandoned as lost: {}", list.join(", "));
             }
             out.json["closed_siblings"] = json!(closed);
-            add_sync(&mut out, agentvc_core::sync::auto_sync(&space));
+            add_sync(&mut out, agentvc_core::github::auto_save(&space));
             out
         }
         Cmd::Status { attempt } => {
@@ -1049,7 +1142,7 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
                         "fork": fork_json(&fork),
                     }),
                 };
-                add_sync(&mut res, agentvc_core::sync::auto_sync(&space));
+                add_sync(&mut res, agentvc_core::github::auto_save(&space));
                 res
             }
         }
@@ -1068,7 +1161,7 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
                     "warnings": out.warnings,
                 }),
             };
-            add_sync(&mut res, agentvc_core::sync::auto_sync(&space));
+            add_sync(&mut res, agentvc_core::github::auto_save(&space));
             res
         }
         Cmd::Ps { all } => {
@@ -1250,12 +1343,14 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
             // The PR shows only the winner; the attempts behind it go to the
             // remote too, so they outlive this machine (#56).
             let sync = (!no_sync).then(|| {
-                agentvc_core::sync::sync(
+                agentvc_core::github::save_space(
                     &space,
                     &agentvc_core::SyncOptions {
                         remote: Some(remote),
                         force: false,
                     },
+                    Some((r.repo.clone(), r.number)),
+                    false,
                 )
             });
             let mut out = Out {
@@ -1536,30 +1631,51 @@ fn space_status_out(st: agentvc_core::status::SpaceStatus) -> Out {
     }
 }
 
-/// Report a sync that ran after a command: a line of text and `sync` in the
-/// JSON. A failed sync is a warning, never the command's failure.
-fn add_sync(out: &mut Out, sync: Option<agentvc_core::Result<agentvc_core::SyncResult>>) {
-    match sync {
-        None => {}
-        Some(Ok(r)) => {
-            if !r.unchanged {
-                out.text += &format!(
-                    "\nsynced space {} to {} ({})",
-                    r.space_id,
-                    r.remote,
-                    &r.commit[..12]
-                );
-            }
-            out.json["sync"] = json!(r);
-        }
-        Some(Err(e)) => {
-            out.text += &format!(
-                "\nwarning: could not sync the space ({}): {e}; run `agentvc sync`",
-                e.code()
-            );
-            out.json["sync"] = json!({ "error": { "code": e.code(), "message": e.to_string() } });
-        }
+/// Report where a command saved the space: lines of text and `sync` in the
+/// JSON. A failed save is a warning, never the command's failure.
+fn add_sync(out: &mut Out, sync: Option<agentvc_core::github::SaveResult>) {
+    let Some(r) = sync else { return };
+    if let Some(g) = &r.git {
+        out.text += &format!(
+            "\n{} space {} to {} {} ({})",
+            if g.unchanged {
+                "already synced"
+            } else {
+                "synced"
+            },
+            g.space_id,
+            g.remote,
+            g.refname,
+            &g.commit[..12]
+        );
     }
+    if let Some(c) = &r.pr {
+        out.text += &format!(
+            "\nsaved space {} in {}#{} ({} attempts, {} with their files{})",
+            c.bundle.space_id,
+            c.repo,
+            c.pr,
+            c.bundle.attempts,
+            c.bundle.patches,
+            if c.bundle.omitted.is_empty() {
+                String::new()
+            } else {
+                format!("; files left out for size: {}", c.bundle.omitted.join(", "))
+            }
+        );
+    }
+    if !r.saved() {
+        let msg = |e: &Option<Value>| {
+            e.as_ref()
+                .and_then(|e| e["message"].as_str().map(str::to_string))
+        };
+        if let Some(m) = msg(&r.git_error).or_else(|| msg(&r.pr_error)) {
+            out.text += &format!("\nwarning: could not save the space: {m}; run `agentvc sync`");
+        }
+    } else if let Some(m) = r.pr_error.as_ref().and_then(|e| e["message"].as_str()) {
+        out.text += &format!("\nwarning: could not update the PR's space comment: {m}");
+    }
+    out.json["sync"] = json!(r);
 }
 
 fn overview_out(
