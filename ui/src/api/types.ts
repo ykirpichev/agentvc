@@ -55,6 +55,8 @@ export interface Attempt {
   view_path: string
   backend: string
   created_at: Timestamp
+  /** Names (`agentvc tag`) on this attempt's snapshots. */
+  tags?: string[]
 }
 
 export interface Snapshot {
@@ -62,6 +64,8 @@ export interface Snapshot {
   attempt_id: number
   tree: string
   trigger: string
+  /** Names (`agentvc tag`) on this snapshot. */
+  tags?: string[]
   meta: Record<string, unknown> | null
   created_at: Timestamp
 }

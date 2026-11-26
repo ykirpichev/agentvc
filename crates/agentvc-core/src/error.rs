@@ -101,6 +101,17 @@ pub enum Error {
     BundleTooLarge(usize),
     #[error("the space was not saved: push: {git}; PR comment: {pr}")]
     NotSaved { git: String, pr: String },
+    #[error(
+        "applying would overwrite local changes in {}: {}; commit or stash them, \
+         limit it with --paths, or pass --force",
+        if paths.len() == 1 { "1 file".to_string() } else { format!("{} files", paths.len()) },
+        paths.join(", ")
+    )]
+    DirtyWorktree { paths: Vec<String> },
+    #[error("invalid tag name {name:?}: {reason}")]
+    BadTagName { name: String, reason: &'static str },
+    #[error("tag {0:?} already exists; delete it first with `agentvc tag -d {0}`")]
+    TagExists(String),
     #[error("io error at {path}: {source}")]
     Io {
         path: PathBuf,
@@ -154,6 +165,9 @@ impl Error {
             Error::GcBusy => "gc_busy",
             Error::BundleTooLarge(_) => "bundle_too_large",
             Error::NotSaved { .. } => "not_saved",
+            Error::DirtyWorktree { .. } => "dirty_worktree",
+            Error::BadTagName { .. } => "bad_tag_name",
+            Error::TagExists(_) => "exists",
             Error::Io { .. } => "io",
             Error::Spawn { .. } => "spawn_failed",
             Error::Db(_) => "db",
@@ -174,6 +188,7 @@ impl Error {
                 "onto": onto,
                 "paths": paths,
             })),
+            Error::DirtyWorktree { paths } => Some(serde_json::json!({ "paths": paths })),
             Error::TakeConflict {
                 attempt,
                 source_attempt,

@@ -110,8 +110,17 @@ enum Cmd {
         task: Option<String>,
         /// What to fork from: aN (latest state of an attempt) or sN. Defaults
         /// to the attempt of the current directory.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "from_worktree")]
         from: Option<String>,
+        /// Start from the host checkout's uncommitted work (tracked edits,
+        /// deletions, untracked files; not ignored ones), based on HEAD.
+        #[arg(long)]
+        from_worktree: bool,
+        /// With --from-worktree: then reset those files in the checkout to
+        /// HEAD, like `git stash` (the index is not touched). Bring them back
+        /// with `agentvc apply aN`.
+        #[arg(long = "move", requires = "from_worktree")]
+        move_changes: bool,
         /// Who works in this attempt, for example agent:claude-code or human.
         #[arg(long, default_value = "human")]
         actor: String,
@@ -123,6 +132,19 @@ enum Cmd {
         /// overlay or copy.
         #[arg(long, default_value = "auto", value_name = "BACKEND")]
         backend: BackendChoice,
+    },
+    /// Write an attempt's changes (against its base) into the host checkout
+    /// as uncommitted changes, like `git stash pop` or trying out a branch.
+    /// Refuses with `dirty_worktree` when that would overwrite local edits.
+    /// Never touches the index or the checked-out branch.
+    Apply {
+        attempt: String,
+        /// Only these files or directories. Repeatable.
+        #[arg(long = "paths", value_name = "PATH", num_args = 1..)]
+        paths: Vec<String>,
+        /// Overwrite local changes.
+        #[arg(long)]
+        force: bool,
     },
     /// Record the current state of an attempt's view.
     Snapshot {
@@ -159,8 +181,30 @@ enum Cmd {
         #[arg(long)]
         task: Option<String>,
     },
-    /// Show one attempt and its snapshots.
+    /// Show one attempt and its snapshots (aN, or a tag: its attempt).
     Show { attempt: String },
+    /// Name a snapshot (a checkpoint): `agentvc tag good a3` names a3's
+    /// current state, `agentvc tag demo s12` one snapshot. Names work
+    /// wherever a ref does (fork --from, diff, show), pin the snapshot
+    /// against gc, and travel with sync. `--list` lists, `-d` deletes.
+    Tag {
+        /// The name (letters, digits, '.', '_', '-', '/'; not aN/sN/tN).
+        #[arg(required_unless_present = "list")]
+        name: Option<String>,
+        /// What to name: aN (its latest state) or sN. Defaults to the
+        /// attempt of the current directory.
+        #[arg(conflicts_with_all = ["list", "delete"])]
+        target: Option<String>,
+        #[arg(long, conflicts_with_all = ["list", "delete"])]
+        note: Option<String>,
+        #[arg(long, conflicts_with = "delete")]
+        list: bool,
+        #[arg(short = 'd', long)]
+        delete: bool,
+        /// Who names it.
+        #[arg(long, default_value = "human")]
+        actor: String,
+    },
     /// Compare two refs (aN or sN). With one attempt, compares it with the
     /// snapshot it was forked from (or the commit it was rebased onto). With
     /// no refs, inside a view, compares the view's working state with that
@@ -595,13 +639,6 @@ fn attempt_id(s: &str) -> anyhow::Result<i64> {
     parse_id(s, 'a', "attempt")
 }
 
-fn parse_ref(s: &str) -> anyhow::Result<Ref> {
-    if s.chars().all(|c| c.is_ascii_digit()) {
-        return Ok(Ref::Attempt(s.parse()?));
-    }
-    Ok(s.parse()?)
-}
-
 fn run(cli: Cli) -> anyhow::Result<Out> {
     let cwd = match &cli.dir {
         Some(d) => d.clone(),
@@ -864,14 +901,100 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
         }
         Cmd::Fork {
             task,
+            from_worktree: true,
+            move_changes,
+            actor,
+            model,
+            prompt,
+            backend,
+            ..
+        } => {
+            let req = ForkRequest {
+                task_id: task.map(|t| parse_id(&t, 't', "task")).transpose()?,
+                from: None,
+                actor,
+                model,
+                prompt,
+                backend,
+            };
+            let r = agentvc_core::bridge::fork_from_worktree(&space, &req, move_changes)?;
+            let mut text = format!(
+                "a{} holds the checkout's work: {} files on top of HEAD {} (s{})\n{}",
+                r.fork.attempt.id,
+                r.paths.len(),
+                &r.base[..12.min(r.base.len())],
+                r.snapshot,
+                r.fork.attempt.view_path.display()
+            );
+            if move_changes {
+                text += &format!(
+                    "\nmoved {} files out of the checkout; `agentvc apply a{}` brings them back",
+                    r.moved.len(),
+                    r.fork.attempt.id
+                );
+            }
+            if !r.kept.is_empty() {
+                text += &format!(
+                    "\nleft in the checkout (agentvc does not capture them): {}",
+                    r.kept.join(", ")
+                );
+            }
+            if !r.staged.is_empty() {
+                text += &format!(
+                    "\nstill staged in the index (untouched): {}",
+                    r.staged.join(", ")
+                );
+            }
+            Out {
+                text,
+                json: json!({ "fork": r.fork, "worktree": {
+                    "base": r.base, "snapshot": r.snapshot, "paths": r.paths,
+                    "moved": r.moved, "kept": r.kept, "staged": r.staged,
+                } }),
+            }
+        }
+        Cmd::Apply {
+            attempt,
+            paths,
+            force,
+        } => {
+            let id = attempt_id(&attempt)?;
+            let r = agentvc_core::bridge::apply(
+                &space,
+                id,
+                &agentvc_core::bridge::ApplyOptions { paths, force },
+            )?;
+            let mut text = String::new();
+            for p in &r.written {
+                text += &format!("W  {p}\n");
+            }
+            for p in &r.deleted {
+                text += &format!("D  {p}\n");
+            }
+            text += &format!(
+                "applied a{id} (s{}, against {}) to the checkout: {} written, {} deleted, {} already matched",
+                r.snapshot,
+                r.base,
+                r.written.len(),
+                r.deleted.len(),
+                r.unchanged.len()
+            );
+            Out {
+                text,
+                json: json!({ "apply": r }),
+            }
+        }
+        Cmd::Fork {
+            task,
             from,
             actor,
             model,
             prompt,
             backend,
+            ..
         } => {
             let from = match from {
-                Some(f) => parse_ref(&f)?,
+                Some(f) => space.parse_ref(&f)?,
                 None => Ref::Attempt(current()?),
             };
             let req = ForkRequest {
@@ -1013,8 +1136,65 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
                 json: json!({ "attempts": attempts }),
             }
         }
+        Cmd::Tag {
+            name,
+            target,
+            note,
+            list,
+            delete,
+            actor,
+        } => {
+            if list {
+                let tags = space.tags()?;
+                let mut text = String::new();
+                for t in &tags {
+                    text += &format!(
+                        "{}  s{}  a{}{}\n",
+                        t.name,
+                        t.snapshot_id,
+                        t.attempt_id,
+                        t.note
+                            .as_ref()
+                            .map(|n| format!("  {n}"))
+                            .unwrap_or_default()
+                    );
+                }
+                if tags.is_empty() {
+                    text = "no tags".into();
+                }
+                Out {
+                    text,
+                    json: json!({ "tags": tags }),
+                }
+            } else if delete {
+                let t = space.delete_tag(name.as_deref().expect("clap"), &actor)?;
+                Out {
+                    text: format!("deleted tag {} (was s{})", t.name, t.snapshot_id),
+                    json: json!({ "deleted": t }),
+                }
+            } else {
+                let target = match target {
+                    Some(t) => space.parse_ref(&t)?,
+                    None => Ref::Attempt(current()?),
+                };
+                let t = space.create_tag(
+                    name.as_deref().expect("clap"),
+                    target,
+                    note.as_deref(),
+                    &actor,
+                )?;
+                Out {
+                    text: format!("{} -> s{} (a{})", t.name, t.snapshot_id, t.attempt_id),
+                    json: json!({ "tag": t }),
+                }
+            }
+        }
         Cmd::Show { attempt } => {
-            let a = space.attempt(attempt_id(&attempt)?)?;
+            let id = match space.parse_ref(&attempt)? {
+                Ref::Attempt(id) => id,
+                Ref::Snapshot(s) => space.snapshot_by_id(s)?.attempt_id,
+            };
+            let a = space.attempt(id)?;
             let snaps = space.snapshots(a.id)?;
             let mut text = format!(
                 "a{}  {}{}\nactor   {}\nmodel   {}\ntask    {}\nparent  {}\nview    {} ({})\n",
@@ -1036,7 +1216,7 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
             );
             for s in &snaps {
                 text += &format!(
-                    "  s{}  {}{}  {}{}\n",
+                    "  s{}  {}{}  {}{}{}\n",
                     s.id,
                     &s.tree[..12],
                     if s.pruned_at.is_some() {
@@ -1045,6 +1225,7 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
                         ""
                     },
                     s.trigger,
+                    s.tags.iter().map(|t| format!("  #{t}")).collect::<String>(),
                     s.meta
                         .as_ref()
                         .map(|m| format!("  {m}"))
@@ -1065,13 +1246,13 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
         } => {
             let (from, from_tree, to, to_tree) = match (a, b) {
                 (Some(a), Some(b)) => {
-                    let (ra, rb) = (parse_ref(&a)?, parse_ref(&b)?);
+                    let (ra, rb) = (space.parse_ref(&a)?, space.parse_ref(&b)?);
                     let ta = space.resolve(ra)?.tree_oid()?.to_hex();
                     let tb = space.resolve(rb)?.tree_oid()?.to_hex();
                     (ra.to_string(), ta, rb.to_string(), tb)
                 }
                 (Some(a), None) => {
-                    let Ref::Attempt(id) = parse_ref(&a)? else {
+                    let Ref::Attempt(id) = space.parse_ref(&a)? else {
                         anyhow::bail!("diff with one argument needs an attempt (aN)");
                     };
                     let (from, from_tree) = attempt_base(&space, id)?
@@ -1147,7 +1328,7 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
             command,
         } => {
             let from = match from {
-                Some(f) => parse_ref(&f)?,
+                Some(f) => space.parse_ref(&f)?,
                 None => Ref::Attempt(current()?),
             };
             let fork = space.fork(&ForkRequest {
@@ -1979,6 +2160,9 @@ fn describe(a: &Attempt) -> String {
     }
     if let Some(t) = a.task_id {
         s += &format!("  t{t}");
+    }
+    for t in &a.tags {
+        s += &format!("  #{t}");
     }
     s
 }

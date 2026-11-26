@@ -17,8 +17,8 @@
 //!
 //! Never pruned: the latest snapshot of every attempt, snapshots of open or
 //! promoted attempts, of attempts with an export or PR, snapshots something
-//! was forked from, rebase bases, named
-//! snapshots (meta `name` or `keep`), and, once the space has synced, any
+//! was forked from, rebase bases, tagged
+//! snapshots (`agentvc tag`) and ones with meta `name` or `keep`, and, once the space has synced, any
 //! snapshot the last sync did not carry to the remote. The root attempt's
 //! view (the host checkout) is never touched.
 //!
@@ -257,6 +257,7 @@ fn prunable(space: &Space, cutoff: i64) -> Result<(Vec<i64>, usize)> {
     let mut protected = ids(space, "SELECT parent_snapshot FROM attempts")?;
     protected.extend(ids(space, "SELECT snapshot_id FROM exports")?);
     protected.extend(ids(space, "SELECT snapshot_id FROM git_bases")?);
+    protected.extend(ids(space, "SELECT snapshot_id FROM tags")?);
     let exported = ids(space, "SELECT attempt_id FROM exports")?;
     let synced = synced_snapshots(space)?;
     let mut out = Vec::new();

@@ -110,7 +110,8 @@ function AttemptView({ detail }: { detail: AttemptDetail }) {
               <option value="">Latest</option>
               {[...snapshots.data].reverse().map((s) => (
                 <option key={s.id} value={s.id}>
-                  s{s.id} · {s.trigger} · {timeAgo(s.created_at)}
+                  s{s.id} · {s.trigger}
+                  {s.tags?.length ? ` · ${s.tags.map((t) => `#${t}`).join(' ')}` : ''} · {timeAgo(s.created_at)}
                 </option>
               ))}
             </select>

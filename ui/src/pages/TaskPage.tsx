@@ -268,6 +268,11 @@ function TreeItem({
         {a.model && !abandoned && <span className="muted"> · {a.model}</span>}
         {abandoned && a.reason && <span className="tree-reason"> · {a.reason}</span>}
       </span>
+      {a.tags?.map((t) => (
+        <span key={t} className="tag-chip" title={`agentvc tag ${t}`}>
+          #{t}
+        </span>
+      ))}
       {row.root && a.parent_attempt && a.parent_attempt !== 1 && <span className="muted tree-from">from a{a.parent_attempt}</span>}
       {(row.folded > 0 || unfolded) && (
         <button

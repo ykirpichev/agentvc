@@ -86,7 +86,12 @@ lists a3 under **Contributors**. In the review UI, Compare shows "Take into aN" 
 changed file of the other columns (aN is the focused column); the MCP tool is `take`.
 
 Human edits follow the same loop: `agentvc fork --task tN --actor human`, then work in
-`$(agentvc path aN)`.
+`$(agentvc path aN)`. If you already started in your normal checkout, turn that work into an
+attempt with `agentvc fork --from-worktree --task tN --actor human` (add `--move` to reset the
+checkout to HEAD, like `git stash`). To try an attempt in your own IDE, `agentvc apply aN`
+writes its changes into the checkout as uncommitted changes (`--paths` for some files); it
+refuses with `dirty_worktree` rather than overwrite local edits, and never touches the index
+or the branch.
 
 ## Checklist for every thread (cloud sessions included)
 

@@ -60,6 +60,7 @@ pub(crate) const TABLES: &[&str] = &[
     "tasks",
     "attempts",
     "snapshots",
+    "tags",
     "runs",
     "exports",
     "git_bases",
@@ -883,6 +884,15 @@ mod tests {
         fs::write(win.view_path.join("lib.rs"), "fn f() { 1; }\n").unwrap();
         space
             .snapshot(win.id, "manual", Some(json!({ "tests": "pass" })))
+            .unwrap();
+        // Tags travel with the space (#74).
+        space
+            .create_tag(
+                "demo",
+                crate::space::Ref::Attempt(win.id),
+                Some("shown"),
+                "human",
+            )
             .unwrap();
         fs::write(lose.view_path.join("new.rs"), "x\n").unwrap();
         let run = space

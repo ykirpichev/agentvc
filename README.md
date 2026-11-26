@@ -29,6 +29,8 @@ agentvc fork --task t1 --actor agent:claude   # -> a2 in .agentvc/views/a2, buil
 agentvc fork --task t1 --actor agent:codex    # -> a3, a sibling attempt
 cd "$(agentvc path a2)" && ...                # let an agent work there
 agentvc snapshot a2 --meta tests=pass         # record state with metadata
+agentvc fork --from-worktree --move           # stash: the checkout's uncommitted work becomes an attempt
+agentvc apply a2                              # pop: write a2's changes into the checkout, uncommitted
 agentvc diff a2 a3                            # files that differ between two attempts
 agentvc diff a2 a3 --patch                    # the unified diff (--stat for a summary)
 agentvc status                                # in a view: this attempt, its changes, runs, `behind`;
@@ -43,6 +45,7 @@ agentvc take a3 --into a2 --paths 'tests/**' --hunks src/lib.rs:2
 agentvc merge a3 --into a2                    # or three-way merge all of a3's changes into a2
 agentvc promote a2                            # pick the winner; a3 becomes abandoned (lost to a2)
 agentvc log --task t1                         # the attempt tree
+agentvc tag known-good a2 --note "pre-refactor" # name a checkpoint; use it as a ref, gc keeps it
 agentvc rebase a2                             # main moved? merge a2 onto origin/main first
 agentvc export a2 --branch parser-2x          # a2 as a commit on a branch; worktree untouched
 agentvc pr a2 --draft                         # push agentvc/a2 and open a PR listing rejected attempts
