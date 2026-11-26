@@ -79,6 +79,8 @@ pub enum Error {
     },
     #[error("nothing to take from a{source_attempt}: {reason}")]
     NothingToTake { source_attempt: i64, reason: String },
+    #[error("invalid query: {0}")]
+    BadQuery(String),
     #[error("invalid --hunks {spec:?}: {reason}")]
     BadHunk { spec: String, reason: String },
     #[error(
@@ -166,6 +168,7 @@ impl Error {
             Error::Conflict { .. } | Error::TakeConflict { .. } => "conflict",
             Error::NothingToTake { .. } => "nothing_to_take",
             Error::BadHunk { .. } => "bad_hunk",
+            Error::BadQuery(_) => "bad_query",
             Error::RootAttempt => "root_attempt",
             Error::SyncConflict { .. } => "sync_conflict",
             Error::AmbiguousSpace { .. } => "ambiguous_space",

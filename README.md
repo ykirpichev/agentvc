@@ -45,6 +45,10 @@ agentvc take a3 --into a2 --paths 'tests/**' --hunks src/lib.rs:2
 agentvc merge a3 --into a2                    # or three-way merge all of a3's changes into a2
 agentvc promote a2                            # pick the winner; a3 becomes abandoned (lost to a2)
 agentvc log --task t1                         # the attempt tree
+agentvc log --task t1 --touched src/parser.rs --meta tests=pass
+                                              # query: which attempts touched it and passed? (--status,
+                                              # --actor, --model, --since 2d, --grep; --json gives flat rows)
+agentvc blame src/parser.rs a2                # per line: the snapshot, attempt and agent that wrote it
 agentvc op log                                # every operation, with ids
 agentvc undo                                  # promoted the wrong one? reopen a2 and a3 (undo again to walk back)
 agentvc tag known-good a2 --note "pre-refactor" # name a checkpoint; use it as a ref, gc keeps it
@@ -136,7 +140,7 @@ steps and options.
 `agentvc mcp` serves the agentvc commands to coding agents over the Model
 Context Protocol (stdio). Tools: `task_new`, `task_list`, `fork`, `snapshot`,
 `mark`, `abandon`, `promote`, `log`, `show`, `diff`, `path`, `run`, `ps`, `pr`,
-`rebase`, `take`, `sync`, `op_log`, `undo`.
+`rebase`, `take`, `query`, `blame`, `sync`, `op_log`, `undo`.
 Each one runs the matching command with `--json` and returns the same JSON,
 with `isError` set and the stable `error.code` (for example `no_space`) on
 failure. Resources: `agentvc://tree` (attempts of the current task) and

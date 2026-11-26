@@ -25,6 +25,7 @@ use tokio::sync::{broadcast, Notify};
 mod api;
 mod assets;
 mod events;
+mod history;
 mod live;
 mod rebase;
 mod review;
