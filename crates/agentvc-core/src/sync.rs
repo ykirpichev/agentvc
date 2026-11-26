@@ -64,6 +64,7 @@ pub(crate) const TABLES: &[&str] = &[
     "runs",
     "exports",
     "git_bases",
+    "story_changes",
     "operations",
 ];
 /// Metadata keys that describe this machine's sync state, not the space.
@@ -175,7 +176,7 @@ fn json_to_sql(v: &Value) -> SqlValue {
 }
 
 fn dump_table(db: &Connection, table: &str) -> Result<Vec<Value>> {
-    let mut stmt = db.prepare(&format!("SELECT * FROM {table} ORDER BY id"))?;
+    let mut stmt = db.prepare(&format!("SELECT * FROM {table} ORDER BY rowid"))?;
     let names: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
     let rows = stmt.query_map([], |r| {
         let mut m = Map::new();
@@ -270,6 +271,38 @@ fn build_tree(space: &Space, doc: &Value) -> Result<Oid> {
             name: "snapshots".into(),
             mode: Mode::Tree,
             oid: store.write_tree(&mut snaps)?,
+        });
+    }
+
+    // Story trees (#21) are not snapshots, so they ride along on their own.
+    let mut story = Vec::new();
+    for c in rows("story_changes") {
+        let (Some(a), Some(p), Some(tree), Some(base)) = (
+            c["attempt_id"].as_i64(),
+            c["position"].as_i64(),
+            c["tree"].as_str(),
+            c["base_tree"].as_str(),
+        ) else {
+            continue;
+        };
+        story.push(TreeEntry {
+            name: format!("a{a}.{p}"),
+            mode: Mode::Tree,
+            oid: Oid::from_hex(tree)?,
+        });
+        if p == 1 {
+            story.push(TreeEntry {
+                name: format!("a{a}.base"),
+                mode: Mode::Tree,
+                oid: Oid::from_hex(base)?,
+            });
+        }
+    }
+    if !story.is_empty() {
+        root.push(TreeEntry {
+            name: "story".into(),
+            mode: Mode::Tree,
+            oid: store.write_tree(&mut story)?,
         });
     }
 
@@ -676,6 +709,15 @@ fn restore(
         if let Some(tree) = s["tree"].as_str() {
             if seen.insert(tree.to_string()) {
                 objects_imported += import_tree(&space, &mut git, &Oid::from_hex(tree)?)?;
+            }
+        }
+    }
+    for c in rows("story_changes") {
+        for k in ["tree", "base_tree"] {
+            if let Some(tree) = c[k].as_str() {
+                if seen.insert(tree.to_string()) {
+                    objects_imported += import_tree(&space, &mut git, &Oid::from_hex(tree)?)?;
+                }
             }
         }
     }

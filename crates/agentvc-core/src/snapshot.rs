@@ -186,6 +186,14 @@ fn build_tree(
     store.write_tree(&mut entries)
 }
 
+/// Write a tree from a flat map of paths (as [`flatten`] returns) and
+/// return its id.
+pub fn tree_from_files(store: &ObjectStore, files: &BTreeMap<String, (Mode, Oid)>) -> Result<Oid> {
+    let files: BTreeMap<PathBuf, (Mode, Oid)> =
+        files.iter().map(|(p, v)| (PathBuf::from(p), *v)).collect();
+    build_tree(store, &files, Path::new(""))
+}
+
 /// Write the tree `oid` out into `dest`, which must not exist yet.
 pub fn materialize(store: &ObjectStore, oid: &Oid, dest: &Path) -> Result<()> {
     fs::create_dir_all(dest).at(dest)?;

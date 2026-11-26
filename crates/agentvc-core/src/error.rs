@@ -122,6 +122,16 @@ pub enum Error {
     BadTagName { name: String, reason: &'static str },
     #[error("tag {0:?} already exists; delete it first with `agentvc tag -d {0}`")]
     TagExists(String),
+    #[error("bad story boundary: {0}")]
+    StoryBoundary(String),
+    #[error("restacking change {change} conflicts in {}", paths.join(", "))]
+    StoryConflict { change: String, paths: Vec<String> },
+    #[error(
+        "a{attempt} has work after its story in {}; run `agentvc story a{attempt} --absorb` \
+         or `--append TITLE`, or export with --squash",
+        paths.join(", ")
+    )]
+    StoryStale { attempt: i64, paths: Vec<String> },
     #[error("io error at {path}: {source}")]
     Io {
         path: PathBuf,
@@ -183,6 +193,9 @@ impl Error {
             Error::DirtyWorktree { .. } => "dirty_worktree",
             Error::BadTagName { .. } => "bad_tag_name",
             Error::TagExists(_) => "exists",
+            Error::StoryBoundary(_) => "bad_boundary",
+            Error::StoryConflict { .. } => "story_conflict",
+            Error::StoryStale { .. } => "story_stale",
             Error::Io { .. } => "io",
             Error::Spawn { .. } => "spawn_failed",
             Error::Db(_) => "db",
@@ -206,6 +219,13 @@ impl Error {
             Error::AlreadyUndone { op, by } => Some(serde_json::json!({ "op": op, "by": by })),
             Error::UndoConflict { op, .. } => Some(serde_json::json!({ "op": op })),
             Error::DirtyWorktree { paths } => Some(serde_json::json!({ "paths": paths })),
+            Error::StoryConflict { change, paths } => {
+                Some(serde_json::json!({ "change": change, "paths": paths }))
+            }
+            Error::StoryStale { attempt, paths } => Some(serde_json::json!({
+                "attempt": format!("a{attempt}"),
+                "paths": paths,
+            })),
             Error::TakeConflict {
                 attempt,
                 source_attempt,

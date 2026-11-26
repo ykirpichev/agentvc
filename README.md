@@ -53,7 +53,10 @@ agentvc op log                                # every operation, with ids
 agentvc undo                                  # promoted the wrong one? reopen a2 and a3 (undo again to walk back)
 agentvc tag known-good a2 --note "pre-refactor" # name a checkpoint; use it as a ref, gc keeps it
 agentvc rebase a2                             # main moved? merge a2 onto origin/main first
-agentvc export a2 --branch parser-2x          # a2 as a commit on a branch; worktree untouched
+agentvc story a2 --at s4:"Add parser" --last "Wire it up"
+                                              # split a2 into a stack of commits at snapshot s4
+agentvc story a2 --absorb                     # fold review fixes into the change that last touched each file
+agentvc export a2 --branch parser-2x          # a2 as a commit (or its story's commits) on a branch
 agentvc pr a2 --draft                         # push agentvc/a2 and open a PR listing rejected attempts
 agentvc sync                                  # push the whole space (losers too) to origin
 agentvc init --from-remote                    # elsewhere: rebuild that space, same ids
@@ -74,6 +77,24 @@ Record `tests` and `cost` with `snapshot --meta` and they show up in the PR body
 Every command takes `--json` and returns one JSON object; errors carry a
 stable `error.code`. Benchmark forks against `git worktree` with
 `scripts/bench-fork.sh <repo>`.
+
+### Telling the work as a series of commits
+
+By default an attempt exports as one squashed commit. `agentvc story` turns it
+into a stack of logical changes instead: `--at sN:TITLE` (repeatable, in
+order) ends a change at a snapshot and `--last TITLE` names the one ending at
+the attempt's head. Each change gets a stable id (`cmnrvpxls`, like jj's change
+ids) that survives `agentvc rebase`, which restacks the story onto the new base
+with `git merge-tree`. Work recorded after the story is *pending*: `--absorb`
+puts each pending file into the last change that touched it (new files go to
+the top change), `--append TITLE` adds a change on top, and `export`/`pr`
+refuse with `story_stale` until one of them runs (or `--squash` exports one
+commit). `export` and `pr` then write one commit per change with an
+`Agentvc-Change: <id>` trailer, list them in a "Story" section of the PR body,
+and with `--stack` point `<branch>-1`, `<branch>-2`, ... at the lower changes.
+`agentvc story aN --check "cargo test"` runs a command at every change in a
+scratch fork (warm build output, closed afterwards) and exits 1 if any fails.
+`--retitle CHANGE TITLE` renames a change and `--clear` drops the story.
 
 ### Keeping a space healthy and small
 
