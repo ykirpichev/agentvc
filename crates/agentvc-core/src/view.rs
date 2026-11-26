@@ -8,7 +8,7 @@
 //! [`crate::overlay`]), and files are copied as the last resort.
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use serde::Serialize;
@@ -108,13 +108,21 @@ pub struct ForkStats {
     pub bytes_copied: u64,
     pub dirs: u64,
     pub symlinks: u64,
+    /// Directories cloned whole with one `clonefile` (macOS APFS); their
+    /// files are not walked, so not counted in `files`.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub cloned_dirs: u64,
     pub millis: u128,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
 }
 
 impl ForkStats {
     pub fn backend(&self) -> Backend {
-        match (self.reflinked, self.copied) {
-            (_, 0) if self.reflinked > 0 => Backend::Reflink,
+        match (self.reflinked + self.cloned_dirs, self.copied) {
+            (r, 0) if r > 0 => Backend::Reflink,
             (0, _) => Backend::Copy,
             _ => Backend::Mixed,
         }
@@ -152,10 +160,19 @@ fn copy_tree(
             let target = fs::read_link(&from).at(&from)?;
             #[cfg(unix)]
             std::os::unix::fs::symlink(&target, &to).at(&to)?;
+            // Without symlinks (git's `core.symlinks=false`), a link is a
+            // small file holding its target, as git checks it out.
             #[cfg(not(unix))]
-            fs::copy(&from, &to).at(&to)?;
+            fs::write(&to, target.to_string_lossy().as_bytes()).at(&to)?;
             stats.symlinks += 1;
         } else if ft.is_dir() {
+            // APFS clones a whole directory tree in one call: the fork costs
+            // a syscall per top-level directory, not per file.
+            #[cfg(target_os = "macos")]
+            if !copy_only && clone_dir(&from, &to) {
+                stats.cloned_dirs += 1;
+                continue;
+            }
             fs::create_dir(&to).at(&to)?;
             stats.dirs += 1;
             copy_tree(&from, &to, stats, false, copy_only)?;
@@ -184,6 +201,38 @@ fn copy_tree(
     Ok(())
 }
 
+/// `clonefile(2)` of a directory (recursive, copy-on-write). False when the
+/// filesystem can't (not APFS), leaving nothing behind.
+#[cfg(target_os = "macos")]
+fn clone_dir(from: &Path, to: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    let (Ok(src), Ok(dst)) = (
+        std::ffi::CString::new(from.as_os_str().as_bytes()),
+        std::ffi::CString::new(to.as_os_str().as_bytes()),
+    ) else {
+        return false;
+    };
+    // SAFETY: both are valid NUL-terminated paths.
+    const CLONE_NOFOLLOW: u32 = 0x0001; // <sys/clonefile.h>
+    unsafe { libc::clonefile(src.as_ptr(), dst.as_ptr(), CLONE_NOFOLLOW) == 0 }
+}
+
+/// `fs::canonicalize`, but on Windows without the `\\?\` verbatim prefix
+/// when the path doesn't need it: git and most tools reject verbatim paths.
+pub fn canonical(path: impl AsRef<Path>) -> std::io::Result<PathBuf> {
+    let c = fs::canonicalize(path)?;
+    #[cfg(windows)]
+    {
+        let s = c.to_string_lossy();
+        if let Some(rest) = s.strip_prefix(r"\\?\") {
+            if !rest.starts_with("UNC\\") && rest.len() < 260 {
+                return Ok(PathBuf::from(rest.to_string()));
+            }
+        }
+    }
+    Ok(c)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -208,7 +257,13 @@ mod tests {
         );
         assert!(!dst.join(".git").exists());
         assert!(!dst.join(".agentvc").exists());
-        assert_eq!(stats.files, 2);
+        // On APFS `target/` is cloned whole with one clonefile, so its file
+        // isn't walked one by one.
+        if stats.cloned_dirs > 0 {
+            assert_eq!((stats.files, stats.cloned_dirs), (1, 1));
+        } else {
+            assert_eq!(stats.files, 2);
+        }
         #[cfg(unix)]
         assert_eq!(
             fs::read_link(dst.join("link.rs")).unwrap(),

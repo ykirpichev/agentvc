@@ -131,6 +131,8 @@ lost and deletes orphans.
 `fork` and `run` pick the fastest backend that works (`--backend` forces one):
 
 - `reflink` (btrfs, XFS, APFS): every file is cloned, which costs metadata only.
+  On macOS each top-level directory is cloned whole with one `clonefile(2)`,
+  so a fork costs a few system calls however big `node_modules` or `target/` is.
 - `overlay` (Linux without reflinks, e.g. ext4): the view is an overlayfs
   mount over frozen layers of the parent. A parent is copied once into a base
   layer (`agentvc init` starts that in the background, `agentvc prepare aN`
@@ -141,6 +143,28 @@ lost and deletes orphans.
   the view. Views are remounted on demand after a reboot (`agentvc path aN`).
 - `copy`: plain copy, the fallback. `--json` output says why in
   `fork.backend_reason`.
+
+### macOS and Windows
+
+CI runs the whole test suite on Linux, macOS and Windows (#78). On macOS
+(APFS) forks use `clonefile`; overlayfs is Linux-only and its tests are
+compiled out elsewhere. Windows forks with `copy`. There, as git does with
+`core.fileMode=false` and `core.symlinks=false`, a file keeps the executable
+bit and a symlink checked out as a plain file stays a symlink in snapshots,
+taken from the attempt's previous snapshot (or git's index for the first one),
+and paths may be given with `\`. Set up a Windows checkout with
+`scripts/dogfood-setup.ps1`.
+
+Fork benchmark on macOS (GitHub's `macos-latest` runner, APFS, this repo with a
+1.5 GB release `target/`, `scripts/bench-fork.sh . 3`, Nov 2026):
+
+| | time per fork | what the view has |
+|---|---|---|
+| `agentvc fork` (clonefile) | 110 to 285 ms; 435 ms after editing 10 files in the parent | sources plus the 1.5 GB of ignored build output, shared copy-on-write |
+| `git worktree add` | 81 to 105 ms | sources only; a rebuild is still needed |
+
+A forked view starts with a warm build for a fraction of a second more than a
+bare worktree.
 
 ## Overview for dashboards
 

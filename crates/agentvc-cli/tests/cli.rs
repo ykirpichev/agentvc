@@ -693,30 +693,34 @@ fn pr_pushes_branch_and_opens_pr_with_rejected_attempts() {
         .iter()
         .any(|(m, p, _)| m == "PATCH" && p == "/repos/acme/widget/pulls/7"));
 
-    // Without a token (and no `gh` on PATH) the command fails with a stable code.
-    let bin = tmp.path().join("bin");
-    fs::create_dir_all(&bin).unwrap();
-    let git_path = String::from_utf8(
-        std::process::Command::new("sh")
-            .args(["-c", "command -v git"])
-            .output()
-            .unwrap()
-            .stdout,
-    )
-    .unwrap();
-    std::os::unix::fs::symlink(git_path.trim(), bin.join("git")).unwrap();
-    let out = Command::cargo_bin("agentvc")
-        .unwrap()
-        .args(["--json", "-C"])
-        .arg(&w)
-        .args(["pr", "a2"])
-        .env_remove("GITHUB_TOKEN")
-        .env_remove("GH_TOKEN")
-        .env("PATH", &bin)
-        .output()
+    // Without a token (and no `gh` on PATH) the command fails with a stable
+    // code. Skipped on Windows: hiding `gh` relies on a PATH of symlinks.
+    #[cfg(unix)]
+    {
+        let bin = tmp.path().join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        let git_path = String::from_utf8(
+            std::process::Command::new("sh")
+                .args(["-c", "command -v git"])
+                .output()
+                .unwrap()
+                .stdout,
+        )
         .unwrap();
-    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(v["error"]["code"], "no_token", "{v}");
+        std::os::unix::fs::symlink(git_path.trim(), bin.join("git")).unwrap();
+        let out = Command::cargo_bin("agentvc")
+            .unwrap()
+            .args(["--json", "-C"])
+            .arg(&w)
+            .args(["pr", "a2"])
+            .env_remove("GITHUB_TOKEN")
+            .env_remove("GH_TOKEN")
+            .env("PATH", &bin)
+            .output()
+            .unwrap();
+        let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(v["error"]["code"], "no_token", "{v}");
+    }
 }
 
 #[test]
@@ -860,6 +864,16 @@ fn rebase_onto_moved_main_then_pr_has_only_own_changes() {
         git(&remote, &["diff", "--name-only", "main", "agentvc/a2"]),
         "README.md\nlib.rs"
     );
+}
+
+/// chmod +x where there is such a thing (git runs hooks through sh on
+/// Windows regardless).
+fn make_executable(_path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(_path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
 }
 
 fn agentvc_text(dir: &Path, args: &[&str]) -> String {
@@ -1136,8 +1150,7 @@ fn pr_from_a_thread_branch_keeps_prefix_trailers_and_checkout() {
         "#!/bin/sh\necho 'The requested URL returned error: 403' >&2\nexit 1\n",
     )
     .unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    make_executable(&hook);
     let v = agentvc_gh(
         &w,
         &api,
@@ -1249,8 +1262,7 @@ fn sync_falls_back_to_the_pr_comment_when_the_push_is_refused() {
          *) echo 'The requested URL returned error: 403' >&2; exit 1;; esac; done\n",
     )
     .unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    make_executable(&hook);
 
     let (api, _log) = fake_github();
     // No PR yet: nothing could be saved.
@@ -1513,8 +1525,7 @@ fn land_with_verify_reports_hook_failures_then_lands() {
     fs::write(view.join("lib.rs"), "pub fn f() -> u8 { 2 }\n").unwrap();
     let hook = w.join(".git/hooks/pre-commit");
     fs::write(&hook, "#!/bin/sh\necho 'lint: bad style' >&2\nexit 1\n").unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    make_executable(&hook);
     let before = git(w, &["rev-parse", "main"]);
 
     let v = agentvc(w, &["land", "a2", "--verify"]);

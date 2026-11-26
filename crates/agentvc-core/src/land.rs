@@ -505,8 +505,11 @@ mod tests {
     fn hook(w: &Path, name: &str, body: &str) {
         let p = w.join(".git/hooks").join(name);
         fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
+        }
     }
 
     #[test]

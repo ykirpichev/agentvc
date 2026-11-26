@@ -12,6 +12,9 @@ git clone git@github.com:ykirpichev/agentvc.git && cd agentvc
 scripts/dogfood-setup.sh        # builds release binaries, agentvc init, hooks, UI build
 ```
 
+On Windows, run `powershell -File scripts/dogfood-setup.ps1` instead (same steps; views
+use the copy backend). On macOS the bash script works as is, and forks use APFS clones.
+
 The script is idempotent. It:
 
 1. builds `agentvc` and `agentvcd` in release mode and the UI (`ui/dist`);

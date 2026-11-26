@@ -6,18 +6,44 @@ on:
 
 jobs:
   rust:
-    runs-on: ubuntu-latest
+    # macOS forks use APFS clonefile; Windows uses the copy backend. The
+    # overlayfs tests are Linux-only (`cfg(target_os = "linux")`) and are
+    # skipped elsewhere by design, as the step below says.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
     steps:
+      - name: Keep line endings and links as committed
+        if: runner.os == 'Windows'
+        run: git config --global core.autocrlf false && git config --global core.symlinks true
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
+        if: runner.os == 'Linux'
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+      - name: Overlay tests
+        if: runner.os != 'Linux'
+        run: echo "overlayfs is Linux-only; its tests are compiled out on ${{ runner.os }} (forks here use ${{ runner.os == 'macOS' && 'clonefile' || 'copy' }})"
+      # APFS numbers for docs/design.md: this checkout with its warm target/.
+      - name: Fork benchmark (#7)
+        if: runner.os == 'macOS'
+        run: |
+          cargo build --release -p agentvc-cli
+          git config --global user.name ci && git config --global user.email ci@example.com
+          scripts/bench-fork.sh "$PWD" 3
       - run: integrations/claude-code/tests/plugin.sh
+        if: runner.os == 'Linux'
       - run: scripts/package-skills.py
+        if: runner.os == 'Linux'
 
   ui:
     runs-on: ubuntu-latest

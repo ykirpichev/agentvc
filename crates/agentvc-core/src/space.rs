@@ -398,7 +398,7 @@ impl Space {
     /// Create a space in `workdir`, capture its current state as the first
     /// snapshot, and register it as the root attempt `a1`.
     pub fn init(workdir: &Path) -> Result<Space> {
-        let workdir = fs::canonicalize(workdir).at(workdir)?;
+        let workdir = crate::view::canonical(workdir).at(workdir)?;
         let dir = workdir.join(SPACE_DIR);
         if dir.join("meta.db").exists() {
             return Err(Error::SpaceExists(workdir));
@@ -434,7 +434,7 @@ impl Space {
 
     /// Open the space that contains `start`, searching parent directories.
     pub fn discover(start: &Path) -> Result<Space> {
-        let start = fs::canonicalize(start).at(start)?;
+        let start = crate::view::canonical(start).at(start)?;
         for dir in start.ancestors() {
             if dir.join(SPACE_DIR).join("meta.db").is_file() {
                 return Space::open_at(dir.to_path_buf());
@@ -640,7 +640,7 @@ impl Space {
     /// The attempt whose view contains `path` (the deepest match wins, so a
     /// path inside `.agentvc/views/a3` resolves to a3, not the root attempt).
     pub fn attempt_for_path(&self, path: &Path) -> Result<Attempt> {
-        let path = fs::canonicalize(path).at(path)?;
+        let path = crate::view::canonical(path).at(path)?;
         self.attempts(None)?
             .into_iter()
             .filter(|a| path.starts_with(&a.view_path))
@@ -1119,7 +1119,16 @@ impl Space {
             .join(SPACE_DIR)
             .join("index")
             .join(format!("a{}", attempt.id));
-        snapshot::capture_indexed(&self.objects, &attempt.view_path, Some(&index))
+        let previous = self
+            .head_snapshot(attempt.id)
+            .ok()
+            .and_then(|s| s.tree_oid().ok());
+        snapshot::capture_with_modes(
+            &self.objects,
+            &attempt.view_path,
+            Some(&index),
+            previous.as_ref(),
+        )
     }
 
     /// Resolve a reference to a stored snapshot.

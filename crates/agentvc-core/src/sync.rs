@@ -722,7 +722,7 @@ fn choose(
 /// Rebuild a space in `workdir` from one synced to a remote, keeping its ids.
 /// See [`CloneOptions`] and [`choose`] for which space.
 pub fn clone_from_remote(workdir: &Path, opts: &CloneOptions) -> Result<(Space, CloneResult)> {
-    let workdir = fs::canonicalize(workdir).at(workdir)?;
+    let workdir = crate::view::canonical(workdir).at(workdir)?;
     let dir = workdir.join(SPACE_DIR);
     if dir.join("meta.db").exists() {
         return Err(Error::SpaceExists(workdir));

@@ -177,7 +177,7 @@ fn hook_script(name: &str, orig: &str, exe: Option<&Path>) -> String {
         return format!("{head}if [ -x \"$orig\" ]; then exec \"$orig\" \"$@\"; fi\nexit 0\n");
     }
     let exe = exe
-        .map(|e| sh_quote(&e.to_string_lossy()))
+        .map(|e| sh_quote(&git_path(e)))
         .unwrap_or_else(|| "agentvc".into());
     format!(
         "{head}if [ -x \"$orig\" ]; then \"$orig\" \"$@\"; fi\n\
@@ -245,7 +245,7 @@ impl Space {
                 hooks = git_run(work, &["config", "extensions.worktreeConfig", "true"]).is_ok();
             }
         }
-        let orig_abs = if orig_hooks.starts_with('/') {
+        let orig_abs = if Path::new(&orig_hooks).is_absolute() {
             PathBuf::from(&orig_hooks)
         } else {
             work.join(&orig_hooks)
@@ -331,10 +331,7 @@ impl Space {
             let p = gd.join(name);
             fs::write(&p, body).at(&p)
         };
-        w(
-            "commondir",
-            format!("{}\n", shared.common_dir.to_string_lossy()),
-        )?;
+        w("commondir", format!("{}\n", git_path(&shared.common_dir)))?;
         w("HEAD", format!("{head}\n"))?;
         let hooks = capture && shared.hooks;
         let cfg = gd.join("config.worktree");
@@ -346,7 +343,7 @@ impl Space {
                     "# Written by agentvc: views run the repository's hooks through\n\
                      # agentvc's, which also record `git commit` as a snapshot.\n\
                      [core]\n\thooksPath = {}\n",
-                    dir.to_string_lossy()
+                    git_path(&dir)
                 ),
             )?;
         } else {
@@ -369,7 +366,7 @@ impl Space {
         )?;
         // Last, so a half-made link is never picked up.
         let dot = attempt.view_path.join(".git");
-        let link = format!("gitdir: {gd_s}\n");
+        let link = format!("gitdir: {}\n", git_path(&gd));
         if fs::read_to_string(&dot).ok().as_deref() != Some(link.as_str()) {
             if fs::symlink_metadata(&dot).is_ok_and(|m| m.is_dir()) {
                 // Never touch a real git directory someone put there.
@@ -401,7 +398,7 @@ impl Space {
     /// agentvc's), its git directory and the ref pinning its commits.
     pub fn unlink_view_git(&self, id: i64) -> Result<()> {
         let gd = self.view_git_dir(id);
-        let link = format!("gitdir: {}\n", gd.to_string_lossy());
+        let link = format!("gitdir: {}\n", git_path(&gd));
         let mut dots = Vec::new();
         if let Ok(a) = self.attempt(id) {
             dots.push(a.view_path.join(".git"));
@@ -459,6 +456,17 @@ impl Space {
         )?;
         let _ = fs::write(gd.join("pinned"), "");
         Ok(r)
+    }
+}
+
+/// A path as git wants it in config and `.git` files: on Windows a `\` in
+/// a config value is an escape, so use `/`, which git accepts everywhere.
+fn git_path(p: &Path) -> String {
+    let s = p.to_string_lossy();
+    if cfg!(windows) {
+        s.replace('\\', "/")
+    } else {
+        s.into_owned()
     }
 }
 
@@ -593,10 +601,7 @@ mod tests {
             let bv = &b.attempt.view_path;
             assert_eq!(
                 fs::read_to_string(bv.join(".git")).unwrap(),
-                format!(
-                    "gitdir: {}\n",
-                    space.view_git_dir(b.attempt.id).to_string_lossy()
-                )
+                format!("gitdir: {}\n", git_path(&space.view_git_dir(b.attempt.id)))
             );
             // b sees what its parent changed on top of the base commit.
             assert_eq!(git(bv, &["status", "--porcelain"]), "?? a.txt");
@@ -622,7 +627,7 @@ mod tests {
         );
         assert_eq!(
             git(view, &["config", "core.hooksPath"]),
-            space.workdir().join(".agentvc/git/hooks").to_string_lossy()
+            git_path(&space.workdir().join(".agentvc/git/hooks"))
         );
         // The host's own pre-commit hook still runs in views.
         let hooks = tmp.path().join(".git/hooks");

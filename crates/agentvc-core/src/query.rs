@@ -243,7 +243,9 @@ impl Space {
             let mut b = GlobSetBuilder::new();
             let mut plain = Vec::new();
             for p in &q.touched {
-                let p = p.trim_start_matches("./").trim_end_matches('/').to_string();
+                let p = crate::objects::tree_path(p)
+                    .trim_end_matches('/')
+                    .to_string();
                 b.add(Glob::new(&p).map_err(|e| Error::BadQuery(format!("--touched {p:?}: {e}")))?);
                 plain.push(p);
             }

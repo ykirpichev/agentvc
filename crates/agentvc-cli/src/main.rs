@@ -778,6 +778,17 @@ struct Out {
 }
 
 fn main() -> ExitCode {
+    // Windows gives the main thread 1 MiB of stack, which the parser and the
+    // larger commands overflow in debug builds; run on a thread with room.
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(real_main)
+        .expect("spawn main thread")
+        .join()
+        .unwrap_or(ExitCode::FAILURE)
+}
+
+fn real_main() -> ExitCode {
     let cli = Cli::parse();
     if let Cmd::Mcp { space } = &cli.cmd {
         return mcp(space.as_ref().or(cli.dir.as_ref()));
@@ -2581,6 +2592,7 @@ fn config_cmd(
 
 /// Fork stats for `run --json`, the same numbers `fork --json` reports.
 fn fork_json(f: &agentvc_core::ForkResult) -> Value {
+    #[allow(unused_mut)] // only Linux adds overlay details
     let mut v = json!({
         "backend": f.backend.as_str(),
         "backend_reason": f.backend_reason,
