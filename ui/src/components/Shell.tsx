@@ -14,6 +14,7 @@ const NAV: { to: string; label: string; icon: IconName; keys: string }[] = [
   { to: '/inbox', label: 'Inbox', icon: 'inbox', keys: 'g i' },
   { to: '/tasks', label: 'Tasks', icon: 'tasks', keys: 'g t' },
   { to: '/live', label: 'Live', icon: 'live', keys: 'g l' },
+  { to: '/find', label: 'Find', icon: 'search', keys: 'g f' },
 ]
 
 export function Shell() {

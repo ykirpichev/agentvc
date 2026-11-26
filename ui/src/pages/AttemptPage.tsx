@@ -5,11 +5,13 @@ import { ActionButtons, useAttemptActions } from '../components/ReviewActions'
 import { useResource } from '../api/useResource'
 import { AttemptMeta } from '../components/AttemptMeta'
 import { ChangeList } from '../components/ChangeList'
+import { BlameView } from '../components/BlameView'
 import { DiffView } from '../components/DiffView'
 import { Empty, ErrorNote, Kbd, PageHeader, Skeleton, StatusPill } from '../components/bits'
 import { Icon } from '../components/Icon'
 import { useHotkeys } from '../keyboard/hotkeys'
 import { useListNavigation } from '../keyboard/useListNavigation'
+import { findLink } from '../lib/find'
 import { actorName, timeAgo } from '../lib/format'
 
 export function AttemptPage() {
@@ -72,10 +74,29 @@ function AttemptView({ detail }: { detail: AttemptDetail }) {
   })
   const selected = nav.selected
   const upTo = attempt.task_id ? `/tasks/${attempt.task_id}` : '/tasks'
+  const current = changes[selected]
+  const blame = params.get('mode') === 'blame' && current?.kind !== 'removed'
+  const setMode = (m: 'diff' | 'blame') => {
+    const next = new URLSearchParams(params)
+    if (m === 'blame') next.set('mode', 'blame')
+    else next.delete('mode')
+    setParams(next, { replace: true })
+  }
   useHotkeys([
     { keys: ['u', 'backspace'], description: 'Up to the task', group: 'Attempt', handler: () => navigate(upTo) },
+    {
+      keys: 'b',
+      description: 'Toggle blame for this file',
+      group: 'Files',
+      handler: () => setMode(blame ? 'diff' : 'blame'),
+    },
+    {
+      keys: 'shift+f',
+      description: 'Find attempts that touched this file',
+      group: 'Files',
+      handler: () => current && navigate(findLink({ task: attempt.task_id, touched: current.path })),
+    },
   ])
-  const current = changes[selected]
 
   return (
     <>
@@ -165,13 +186,41 @@ function AttemptView({ detail }: { detail: AttemptDetail }) {
             </div>
           </aside>
           {current && (
-            <DiffView
-              key={current.path}
-              base={diff.data.a_ref}
-              head={ref.snapshot(diff.data.b.id)}
-              path={current.path}
-              kind={current.kind}
-            />
+            <div className="review-main">
+              <div className="review-tools">
+                <div className="segmented" role="tablist" aria-label="File view">
+                  <button role="tab" aria-selected={!blame} onClick={() => setMode('diff')}>
+                    Diff
+                  </button>
+                  <button
+                    role="tab"
+                    aria-selected={blame}
+                    disabled={current.kind === 'removed'}
+                    title={current.kind === 'removed' ? 'Removed in this attempt' : 'Who wrote each line (b)'}
+                    onClick={() => setMode('blame')}
+                  >
+                    Blame <Kbd keys="b" />
+                  </button>
+                </div>
+                {blame && snapParam && (
+                  <span className="muted small">Blame shows the latest state, not s{snapParam}.</span>
+                )}
+                <Link className="btn btn-ghost btn-sm review-find" to={findLink({ task: attempt.task_id, touched: current.path })}>
+                  <Icon name="search" size={13} /> Attempts that touched this file
+                </Link>
+              </div>
+              {blame ? (
+                <BlameView key={current.path} attempt={attempt.id} path={current.path} />
+              ) : (
+                <DiffView
+                  key={current.path}
+                  base={diff.data.a_ref}
+                  head={ref.snapshot(diff.data.b.id)}
+                  path={current.path}
+                  kind={current.kind}
+                />
+              )}
+            </div>
           )}
         </div>
       )}

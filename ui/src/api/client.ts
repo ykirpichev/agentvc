@@ -2,6 +2,9 @@ import type {
   ActionResponse,
   ApiErrorBody,
   AttemptStats,
+  Blame,
+  QueryParams,
+  QueryRow,
   CompareResponse,
   InboxItem,
   LiveAttempt,
@@ -90,6 +93,21 @@ export const api = {
   rebase: (id: number, opts: RebaseOptions = {}) => post<RebaseResponse>(`/attempts/${id}/rebase`, opts),
   /** Take files (or hunks) of `opts.source`'s changes into attempt `id`. */
   take: (id: number, opts: TakeOptions) => post<TakeResponse>(`/attempts/${id}/take`, opts),
+  /** Attempts matching every filter, oldest first. */
+  query: (q: QueryParams) =>
+    get<QueryRow[]>('/query', {
+      task: q.task === undefined ? undefined : `t${q.task}`,
+      status: q.status?.length ? q.status.join(',') : undefined,
+      actor: q.actor || undefined,
+      model: q.model || undefined,
+      touched: q.touched?.length ? q.touched.join(',') : undefined,
+      since: q.since || undefined,
+      meta: q.meta?.length ? q.meta.join(',') : undefined,
+      grep: q.grep || undefined,
+    }),
+  /** Who wrote each line of `path` in attempt `id`. */
+  blame: (id: number, path: string, working = true) =>
+    get<Blame>('/blame', { attempt: `a${id}`, path, working: String(working) }),
   mark: (id: number, status: 'passed' | 'failed' | 'exploring') =>
     post<ActionResponse>(`/attempts/${id}/mark`, { status }),
 }

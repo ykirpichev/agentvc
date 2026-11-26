@@ -11,6 +11,7 @@ import { ActionButtons, useAttemptActions } from '../components/ReviewActions'
 import { StatChips } from '../components/StatChips'
 import { useHotkeys } from '../keyboard/hotkeys'
 import { useListNavigation } from '../keyboard/useListNavigation'
+import { findLink } from '../lib/find'
 import { actorName, fullDate, money, timeAgo } from '../lib/format'
 import { triggerKind, triggerLabel } from '../lib/snapshot'
 import { visibleTree, type VisibleRow } from '../lib/tree'
@@ -99,6 +100,9 @@ export function TaskPage() {
         <>
           <PageHeader title={data.task.goal} eyebrow={`t${data.task.id} · created ${timeAgo(data.task.created_at)}`}>
             <TaskTotals attempts={attempts} stats={stats.data} />
+            <Link className="btn btn-ghost btn-sm" to={findLink({ task: data.task.id })} title="Filter this task's attempts">
+              <Icon name="search" size={13} /> Find
+            </Link>
           </PageHeader>
           {data.task.criteria && (
             <div className="criteria">
