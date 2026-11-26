@@ -253,35 +253,64 @@ pub struct FileChange {
 
 /// Files that differ between trees `a` and `b`, sorted by path.
 pub fn diff(store: &ObjectStore, a: &Oid, b: &Oid) -> Result<Vec<FileChange>> {
-    if a == b {
-        return Ok(Vec::new());
-    }
-    let fa = flatten(store, a)?;
-    let fb = flatten(store, b)?;
     let mut out = Vec::new();
-    for (path, va) in &fa {
-        match fb.get(path) {
-            None => out.push(FileChange {
-                path: path.clone(),
-                kind: ChangeKind::Removed,
-            }),
-            Some(vb) if vb != va => out.push(FileChange {
-                path: path.clone(),
-                kind: ChangeKind::Modified,
-            }),
-            _ => {}
-        }
-    }
-    for path in fb.keys() {
-        if !fa.contains_key(path) {
-            out.push(FileChange {
-                path: path.clone(),
-                kind: ChangeKind::Added,
-            });
-        }
-    }
+    diff_into(store, Some(a), Some(b), "", &mut out)?;
     out.sort_by(|x, y| x.path.cmp(&y.path));
     Ok(out)
+}
+
+fn subtree(e: Option<&(Mode, Oid)>) -> Option<&Oid> {
+    e.filter(|(m, _)| *m == Mode::Tree).map(|(_, o)| o)
+}
+
+/// Walk two trees together, skipping subtrees with the same id, so a diff
+/// costs what changed rather than the size of the tree.
+fn diff_into(
+    store: &ObjectStore,
+    a: Option<&Oid>,
+    b: Option<&Oid>,
+    prefix: &str,
+    out: &mut Vec<FileChange>,
+) -> Result<()> {
+    if a == b {
+        return Ok(());
+    }
+    let read = |t: Option<&Oid>| -> Result<BTreeMap<String, (Mode, Oid)>> {
+        Ok(match t {
+            Some(t) => store
+                .read_tree(t)?
+                .into_iter()
+                .map(|e| (e.name, (e.mode, e.oid)))
+                .collect(),
+            None => BTreeMap::new(),
+        })
+    };
+    let (ea, eb) = (read(a)?, read(b)?);
+    let names: std::collections::BTreeSet<&String> = ea.keys().chain(eb.keys()).collect();
+    for name in names {
+        let path = format!("{prefix}{name}");
+        let (x, y) = (ea.get(name), eb.get(name));
+        let (tx, ty) = (subtree(x), subtree(y));
+        let (bx, by) = (
+            x.filter(|e| e.0 != Mode::Tree),
+            y.filter(|e| e.0 != Mode::Tree),
+        );
+        // Directories on either side recurse; a file that became a directory
+        // (or back) is a removal plus additions.
+        if tx.is_some() || ty.is_some() {
+            diff_into(store, tx, ty, &format!("{path}/"), out)?;
+        }
+        let kind = match (bx, by) {
+            (Some(_), None) => Some(ChangeKind::Removed),
+            (None, Some(_)) => Some(ChangeKind::Added),
+            (Some(p), Some(q)) if p != q => Some(ChangeKind::Modified),
+            _ => None,
+        };
+        if let Some(kind) = kind {
+            out.push(FileChange { path, kind });
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

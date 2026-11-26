@@ -437,6 +437,65 @@ pub static TOOLS: &[Tool] = &[
         argv: |a| Ok(Argv::new(&["log"]).opt("task", a.str("task")?).done()),
     },
     Tool {
+        name: "query",
+        title: "Query attempts",
+        description: "Find attempts by task, status, actor, model, files their own changes touched, creation time, snapshot metadata and text, all combined with AND. For example attempts on t3 that touched x.py and passed tests: {task: \"t3\", touched: [\"x.py\"], meta: [\"tests=pass\"]}. Returns {rows}: flat rows with the task goal, latest metadata and the matching touched files.",
+        read_only: true,
+        destructive: false,
+        open_world: false,
+        params: || {
+            let list = |d: &str| json!({ "type": "array", "items": { "type": "string" }, "description": d });
+            vec![
+                ("task", s(TASK), false),
+                ("status", list("Any of: exploring, passed, failed, abandoned, promoted."), false),
+                ("actor", s("Actor, exact or prefix: \"agent:claude\", or \"agent\" for every agent."), false),
+                ("model", s("Model, exact or prefix."), false),
+                ("touched", list("Paths, directories or globs; the attempt's own changes must touch one."), false),
+                ("since", s("Created since: 30m, 2h, 3d, 1w, YYYY-MM-DD or Unix seconds."), false),
+                ("meta", list("KEY=VALUE snapshot metadata the attempt must have, e.g. tests=pass."), false),
+                ("grep", s("Text in the task goal, prompt, reason or metadata (any case)."), false),
+            ]
+        },
+        argv: |a| {
+            let mut argv = Argv::new(&["log"]);
+            for (key, flag) in [("status", "status"), ("touched", "touched"), ("meta", "meta")] {
+                for v in a.strings(key)? {
+                    argv.opt(flag, Some(v));
+                }
+            }
+            Ok(argv
+                .flag("flat", Some(true))
+                .opt("task", a.str("task")?)
+                .opt("actor", a.str("actor")?)
+                .opt("model", a.str("model")?)
+                .opt("since", a.str("since")?)
+                .opt("grep", a.str("grep")?)
+                .done())
+        },
+    },
+    Tool {
+        name: "blame",
+        title: "Blame lines to attempts",
+        description: "For each line of a file in an attempt: the snapshot, attempt, actor, model and trigger that last changed it, across the attempts it was forked from; lines older than the attempt come from git blame. Includes the view's unsnapshotted work unless no_working. Returns {blame: {lines: [{line, text, origin}]}}.",
+        read_only: true,
+        destructive: false,
+        open_world: false,
+        params: || {
+            vec![
+                ("path", s("File path relative to the view root."), true),
+                ("attempt", s(ATTEMPT), true),
+                ("no_working", b("Blame the head snapshot only."), false),
+            ]
+        },
+        argv: |a| {
+            Ok(Argv::new(&["blame"])
+                .flag("no-working", a.bool("no_working")?)
+                .pos(Some(a.req("path")?))
+                .pos(Some(a.req("attempt")?))
+                .done())
+        },
+    },
+    Tool {
         name: "show",
         title: "Show attempt",
         description: "Show one attempt and its snapshots. Returns {attempt, snapshots}.",

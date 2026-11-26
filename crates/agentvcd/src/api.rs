@@ -13,7 +13,7 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::{events, rebase, review, take, AppState};
+use crate::{events, history, rebase, review, take, AppState};
 
 /// Files larger than this are listed but their content is not sent.
 pub const MAX_FILE_BYTES: usize = 2 * 1024 * 1024;
@@ -29,6 +29,8 @@ pub(crate) fn routes() -> Router<AppState> {
         .route("/attempts/{id}/snapshots", get(list_snapshots))
         .route("/snapshots/{id}", get(get_snapshot))
         .route("/diff", get(diff))
+        .route("/query", get(history::query))
+        .route("/blame", get(history::blame))
         .route("/file", get(file))
         .route("/events", get(events::websocket))
         .route("/attempts/{id}/rebase", post(rebase::rebase))
@@ -82,9 +84,10 @@ impl From<Error> for ApiError {
             Error::AttemptClosed { .. } | Error::Conflict { .. } | Error::TakeConflict { .. } => {
                 StatusCode::CONFLICT
             }
-            Error::RootAttempt | Error::NothingToTake { .. } | Error::BadHunk { .. } => {
-                StatusCode::BAD_REQUEST
-            }
+            Error::RootAttempt
+            | Error::NothingToTake { .. }
+            | Error::BadHunk { .. }
+            | Error::BadQuery(_) => StatusCode::BAD_REQUEST,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         };
         let mut err = ApiError::new(status, e.code(), e.to_string());

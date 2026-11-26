@@ -89,6 +89,24 @@ in its metadata; a3 is not touched and can still be abandoned later. The PR body
 lists a3 under **Contributors**. In the review UI, Compare shows "Take into aN" on each
 changed file of the other columns (aN is the focused column); the MCP tool is `take`.
 
+### Asking the history: filtered log and blame (#73)
+
+`agentvc log` takes filters that combine with AND and then prints flat rows (`--json`:
+`rows`, with the task goal, latest metadata and matched files):
+
+```sh
+agentvc log --task t3 --touched x.py --meta tests=pass   # touched x.py and passed tests
+agentvc log --status failed --actor agent:claude --since 2d
+agentvc log --grep "flaky" --touched 'crates/**'
+```
+
+`agentvc blame <path> [aN]` goes below the squashed PR commit: each line gets the
+snapshot, attempt, actor, model and trigger that last changed it, across the attempts aN
+was forked from. Lines older than the attempt (or brought in from main by a rebase) show
+the `git blame` of that commit; inside a view, unsnapshotted lines show as `(working)`.
+A line that came in with `agentvc take` names its source attempt. The MCP tools are `query`
+and `blame`; the daemon serves `GET /api/query` and `GET /api/blame`.
+
 Human edits follow the same loop: `agentvc fork --task tN --actor human`, then work in
 `$(agentvc path aN)`. If you already started in your normal checkout, turn that work into an
 attempt with `agentvc fork --from-worktree --task tN --actor human` (add `--move` to reset the

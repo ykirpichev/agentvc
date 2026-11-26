@@ -419,7 +419,8 @@ mod tests {
             .collect();
         for want in [
             "task_new", "fork", "snapshot", "mark", "abandon", "promote", "log", "show", "diff",
-            "path", "run", "ps", "pr", "rebase", "take", "sync", "op_log", "undo",
+            "path", "run", "ps", "pr", "rebase", "take", "query", "blame", "sync", "op_log",
+            "undo",
         ] {
             assert!(names.contains(&want), "missing {want}");
         }

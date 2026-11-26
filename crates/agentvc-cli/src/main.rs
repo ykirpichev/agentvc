@@ -194,9 +194,48 @@ enum Cmd {
     /// what is running. Takes no snapshot and fetches nothing.
     Status { attempt: Option<String> },
     /// Show attempts as a tree.
+    /// The attempt tree, or with filters a flat list of matching attempts:
+    /// for example `agentvc log --task t3 --touched x.py --meta tests=pass`.
     Log {
         #[arg(long)]
         task: Option<String>,
+        /// Only attempts with this status (repeatable: any of them).
+        #[arg(long, value_parser = ["exploring", "passed", "failed", "abandoned", "promoted"])]
+        status: Vec<String>,
+        /// Actor, exact or prefix: `agent:claude`, or `agent` for every agent.
+        #[arg(long)]
+        actor: Option<String>,
+        /// Model, exact or prefix.
+        #[arg(long)]
+        model: Option<String>,
+        /// Only attempts whose own changes touch this path, directory or
+        /// glob (repeatable: any of them).
+        #[arg(long, value_name = "PATH|GLOB")]
+        touched: Vec<String>,
+        /// Created since: 30m, 2h, 3d, 1w, YYYY-MM-DD or Unix seconds.
+        #[arg(long)]
+        since: Option<String>,
+        /// Snapshot metadata the attempt must have, as KEY=VALUE
+        /// (repeatable: all of them), e.g. tests=pass.
+        #[arg(long = "meta", value_name = "KEY=VALUE")]
+        meta: Vec<String>,
+        /// Text in the task goal, prompt, reason or metadata (any case).
+        #[arg(long)]
+        grep: Option<String>,
+        /// Flat rows (with task, metadata) even without filters.
+        #[arg(long)]
+        flat: bool,
+    },
+    /// Which snapshot, attempt and agent wrote each line of a file, below
+    /// the squashed PR commit; lines older than the attempt fall through to
+    /// git blame. Defaults to the attempt of the current view, including
+    /// its unsnapshotted work.
+    Blame {
+        path: String,
+        attempt: Option<String>,
+        /// Blame the head snapshot only, not the view's working state.
+        #[arg(long)]
+        no_working: bool,
     },
     /// Show one attempt and its snapshots (aN, or a tag: its attempt).
     Show { attempt: String },
@@ -1214,12 +1253,140 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
             }
         }
         Cmd::Overview { out } => overview_out(&space, out.as_deref(), cli.json)?,
-        Cmd::Log { task } => {
+        Cmd::Log {
+            task,
+            status,
+            actor,
+            model,
+            touched,
+            since,
+            meta,
+            grep,
+            flat,
+        } => {
             let task = task.map(|t| parse_id(&t, 't', "task")).transpose()?;
-            let attempts = space.attempts(task)?;
+            let filtered = flat
+                || !(status.is_empty()
+                    && actor.is_none()
+                    && model.is_none()
+                    && touched.is_empty()
+                    && since.is_none()
+                    && meta.is_empty()
+                    && grep.is_none());
+            if !filtered {
+                let attempts = space.attempts(task)?;
+                Out {
+                    text: render_tree(&attempts),
+                    json: json!({ "attempts": attempts }),
+                }
+            } else {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)?
+                    .as_secs() as i64;
+                let q = agentvc_core::query::Query {
+                    task,
+                    status: status
+                        .iter()
+                        .filter_map(|s| agentvc_core::Status::parse(s))
+                        .collect(),
+                    actor,
+                    model,
+                    touched,
+                    since: since
+                        .map(|s| agentvc_core::query::parse_since(&s, now))
+                        .transpose()?,
+                    meta: meta
+                        .iter()
+                        .map(|kv| {
+                            kv.split_once('=')
+                                .map(|(k, v)| (k.to_string(), v.to_string()))
+                                .ok_or_else(|| {
+                                    anyhow::anyhow!("--meta expects KEY=VALUE, got {kv:?}")
+                                })
+                        })
+                        .collect::<anyhow::Result<_>>()?,
+                    grep,
+                };
+                let rows = space.query(&q)?;
+                let mut text = String::new();
+                for r in &rows {
+                    let who = match &r.model {
+                        Some(m) => format!("{} ({m})", r.actor),
+                        None => r.actor.clone(),
+                    };
+                    text += &format!("a{:<4} {:<10} {who}", r.id, r.status.as_str());
+                    if let (Some(t), Some(g)) = (r.task_id, &r.task) {
+                        text += &format!("  t{t} {g}");
+                    }
+                    let m: Vec<String> = r.meta.iter().map(|(k, v)| format!("{k}={v}")).collect();
+                    if !m.is_empty() {
+                        text += &format!("  [{}]", m.join(" "));
+                    }
+                    if let Some(f) = &r.touched {
+                        text += &format!("  touched {}", f.join(", "));
+                    }
+                    if let Some(reason) = &r.reason {
+                        text += &format!("  ({reason})");
+                    }
+                    text.push('\n');
+                }
+                if rows.is_empty() {
+                    text = "no matching attempts".into();
+                }
+                Out {
+                    text: text.trim_end().to_string(),
+                    json: json!({ "rows": rows }),
+                }
+            }
+        }
+        Cmd::Blame {
+            path,
+            attempt,
+            no_working,
+        } => {
+            let (id, rel) = match attempt {
+                Some(a) => (attempt_id(&a)?, path),
+                None => {
+                    let a = space.attempt(current()?)?;
+                    // A path relative to the current directory inside the view.
+                    let abs = cwd.join(&path);
+                    let rel = abs
+                        .strip_prefix(&a.view_path)
+                        .map(|p| p.to_string_lossy().into_owned())
+                        .unwrap_or(path);
+                    (a.id, rel)
+                }
+            };
+            let b = space.blame(id, &rel, !no_working)?;
+            let mut text = String::new();
+            let width = b.lines.len().to_string().len();
+            for l in &b.lines {
+                use agentvc_core::blame::Origin;
+                let who = match &l.origin {
+                    Origin::Snapshot {
+                        snapshot,
+                        attempt,
+                        actor,
+                        trigger,
+                        source,
+                        ..
+                    } => {
+                        let via = source
+                            .as_ref()
+                            .map(|s| format!(" from {s}"))
+                            .unwrap_or_default();
+                        format!("s{snapshot:<5} a{attempt:<4} {actor:<18} {trigger}{via}")
+                    }
+                    Origin::Git { commit, author, .. } => {
+                        format!("git {:<9} {author}", &commit[..8.min(commit.len())])
+                    }
+                    Origin::Working { attempt } => format!("(working)    a{attempt}"),
+                };
+                text += &format!("{who:<48} {:>width$}) {}\n", l.line, l.text);
+            }
             Out {
-                text: render_tree(&attempts),
-                json: json!({ "attempts": attempts }),
+                text: text.trim_end().to_string(),
+                json: json!({ "blame": b }),
             }
         }
         Cmd::Tag {

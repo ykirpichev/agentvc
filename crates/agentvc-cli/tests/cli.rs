@@ -1583,3 +1583,70 @@ fn take_files_and_hunks_then_merge_conflicts_with_a_code() {
         "exploring"
     );
 }
+
+#[test]
+fn log_filters_and_blame() {
+    let tmp = tempdir();
+    let w = tmp.path();
+    git(w, &["init", "-q", "-b", "main"]);
+    fs::write(w.join("x.py"), "one\ntwo\n").unwrap();
+    git(w, &["add", "-A"]);
+    git(w, &["commit", "-q", "-m", "base"]);
+    agentvc(w, &["init"]);
+    agentvc(w, &["task", "new", "parser"]);
+    let fork = |actor: &str, from: &str| {
+        let v = agentvc(
+            w,
+            &["fork", "--task", "t1", "--actor", actor, "--from", from],
+        );
+        v["fork"]["attempt"]["view_path"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    let va = fork("agent:claude", "a1");
+    fs::write(Path::new(&va).join("x.py"), "one\nTWO\n").unwrap();
+    agentvc(w, &["snapshot", "a2", "--meta", "tests=pass"]);
+    let vb = fork("agent:codex", "a1");
+    fs::write(Path::new(&vb).join("other.txt"), "x\n").unwrap();
+    agentvc(w, &["snapshot", "a3", "--meta", "tests=pass"]);
+
+    let v = agentvc(
+        w,
+        &[
+            "log",
+            "--task",
+            "t1",
+            "--touched",
+            "x.py",
+            "--meta",
+            "tests=pass",
+        ],
+    );
+    let ids: Vec<i64> = v["rows"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{v}"))
+        .iter()
+        .map(|r| r["id"].as_i64().unwrap())
+        .collect();
+    assert_eq!(ids, [2]);
+    let v = agentvc(w, &["log", "--actor", "agent:codex", "--since", "1h"]);
+    assert_eq!(v["rows"][0]["id"], 3, "{v}");
+    let v = agentvc(w, &["log", "--since", "soon"]);
+    assert_eq!(v["error"]["code"], "bad_query", "{v}");
+
+    // Inside a2's view: blame includes unsnapshotted work.
+    fs::write(Path::new(&va).join("x.py"), "one\nTWO\nthree\n").unwrap();
+    let v = agentvc(Path::new(&va), &["blame", "x.py"]);
+    let kinds: Vec<&str> = v["blame"]["lines"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{v}"))
+        .iter()
+        .map(|l| l["origin"]["kind"].as_str().unwrap())
+        .collect();
+    assert_eq!(kinds, ["git", "snapshot", "working"]);
+    assert_eq!(v["blame"]["lines"][1]["origin"]["attempt"], 2);
+    let text = agentvc_text(w, &["blame", "x.py", "a2", "--no-working"]);
+    assert!(text.contains("agent:claude"), "{text}");
+    assert!(!text.contains("three"), "{text}");
+}
