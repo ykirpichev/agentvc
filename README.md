@@ -178,9 +178,11 @@ the local one, so all PRs' attempt trees show together. See
 
 ## Side panel in Claude
 
-`integrations/claude-desktop` is a Claude Code plugin that shows the attempt
-tree and running agents in a pane beside the chat (desktop app Code tab or
-terminal), read live from agentvcd:
+`integrations/claude-desktop` is a Claude Code plugin that shows the review
+UI's branch tree in a pane beside the chat (desktop app Code tab or terminal):
+main, each window's stack, and agent versions, with the same actions, move
+preview, conflict resolver and diffs as the web and VS Code UI, read live from
+agentvcd:
 
 ```
 /plugin install agentvc-panel --marketplace ykirpichev/agentvc

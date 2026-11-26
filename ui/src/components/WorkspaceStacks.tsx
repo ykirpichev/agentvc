@@ -10,9 +10,10 @@ import { api } from '../api/client'
 import { useLive } from '../api/live'
 import type { WorkspaceInfo, WsBranch, WsOp, WsRequest } from '../api/types'
 import { branchLink, selectionFromPath, useGo } from '../core/links'
+import { canMoveBranch } from '../core/graph'
 import { shortSha } from '../core/words'
 import { timeAgo } from '../lib/format'
-import { BRANCH_MIME, canMoveBranch, useStackEdit } from './stackEdit'
+import { BRANCH_MIME, useStackEdit } from './stackEdit'
 import { useToast } from './Toaster'
 
 export function WindowStack({

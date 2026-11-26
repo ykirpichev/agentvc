@@ -2,7 +2,7 @@
 // Cursor, Claude Code) says the same thing. The UI speaks git and GitHub;
 // agentvc's own terms (attempt, promote, take) stay in the CLI and docs.
 
-import type { Attempt, Status } from '../api/types'
+import type { Attempt, ConflictHunk, Status } from '../api/types'
 import { actorName } from '../lib/format'
 
 export const WORDS = {
@@ -14,6 +14,7 @@ export const WORDS = {
   discard: 'Discard',
   updateFromMain: 'Update from main',
   rebaseOnto: 'Rebase onto…',
+  moveOnto: 'Move onto…',
   updateFromParent: (name: string) => `Update from ${name}`,
   useIn: (name: string) => `Use in ${name}`,
   openPr: 'Open PR',
@@ -39,6 +40,7 @@ export const HELP = {
   take: (name: string) => `Copies this version's changes into ${name}, the version you chose.`,
   discard: 'Sets this version aside with a reason. It stays in history; Undo brings it back.',
   checkout: 'Switches that window (worktree) to this branch.',
+  moveBranch: 'Moves this branch, with the branches above it, onto another branch or onto main. A clash stops the move here so you can settle it.',
   restack: 'Its parent changed. Replays this branch, and the branches above it, onto the parent\'s new tip.',
   resolve: 'Pick what each place should say, then continue.',
 } as const
@@ -66,3 +68,10 @@ export function statusWords(s: Status): { label: string; tone: 'ok' | 'bad' | 'r
 }
 
 export const shortSha = (c: string) => c.slice(0, 7)
+
+/** The other side of a conflict hunk: `main` for a commit or main itself, else its label. */
+export function theirsName(h: Pick<ConflictHunk, 'theirs_label'>): string {
+  const l = h.theirs_label.trim()
+  if (!l || /^[0-9a-f]{7,40}$/.test(l) || /^(main|master|origin\/)/.test(l)) return 'main'
+  return l
+}

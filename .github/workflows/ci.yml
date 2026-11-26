@@ -61,6 +61,8 @@ jobs:
       - run: npm run typecheck
       - run: npm run lint
       - run: npm run build
+      - name: The Claude Code pane's copy of the shared UI code is current
+        run: sh ../integrations/claude-desktop/sync-shared.sh --check
 
   vscode:
     runs-on: ubuntu-latest

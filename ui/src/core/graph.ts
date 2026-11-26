@@ -2,7 +2,7 @@
 // task's versions hung off the commit they are based on, forks nested under
 // the version they came from. Pure, so every surface draws the same rows.
 
-import type { Graph, GraphAttempt, TaskSummary } from '../api/types'
+import type { Graph, GraphAttempt, TaskSummary, WorkspaceInfo } from '../api/types'
 
 /** One cell of the tree's left gutter. */
 export type Cell = 'blank' | 'pipe' | 'tee' | 'elbow' | 'trunk'
@@ -165,3 +165,16 @@ export function canMoveOnto(g: GraphAttempt | undefined, commit: string): boolea
   const s = g.attempt.status
   return (s === 'exploring' || s === 'passed' || s === 'failed' || s === 'promoted') && g.base_commit !== commit
 }
+
+/** `branch` of `w` can move onto `onto` (a branch name or `w.trunk`). */
+export function canMoveBranch(w: WorkspaceInfo, branch: string, onto: string): boolean {
+  if (w.kind === 'remote') return false
+  const byName = new Map(w.branches.map((b) => [b.name, b]))
+  const b = byName.get(branch)
+  if (!b || b.parent === onto || (onto === w.trunk && b.parent_kind === 'trunk')) return false
+  const upstack = new Set<string>([branch])
+  const walk = (n: string) => byName.get(n)?.children.forEach((c) => (upstack.has(c) ? undefined : (upstack.add(c), walk(c))))
+  walk(branch)
+  return !upstack.has(onto)
+}
+
