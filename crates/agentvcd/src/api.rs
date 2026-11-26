@@ -277,6 +277,10 @@ struct AttemptDetail {
     git_base: Option<GitBase>,
     /// The git commit the head is based on (what `pr` parents on).
     base_commit: Option<String>,
+    /// Its pull request, if `agentvc pr` opened one.
+    pr_url: Option<String>,
+    /// The local branch `agentvc land` put it on.
+    landed: Option<agentvc_core::land::Landing>,
 }
 
 async fn get_attempt(
@@ -311,6 +315,8 @@ async fn get_attempt(
                 children,
                 git_base,
                 base_commit,
+                pr_url: s.pr_url(id)?,
+                landed: s.landing(id)?,
             })
         })
         .await?;

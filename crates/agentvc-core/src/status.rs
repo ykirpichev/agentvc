@@ -36,6 +36,8 @@ pub struct AttemptStatus {
     pub changes: Option<Vec<FileChange>>,
     pub runs: Vec<Run>,
     pub pr_url: Option<String>,
+    /// The local branch `agentvc land` put it on, and the commit.
+    pub landed: Option<crate::land::Landing>,
     /// `None` outside a git repo, or without a remote-tracking branch.
     pub upstream: Option<Upstream>,
 }
@@ -136,6 +138,7 @@ impl Space {
             .collect();
         Ok(AttemptStatus {
             pr_url: self.pr_url(id)?,
+            landed: self.landing(id)?,
             upstream: upstream(self, &head)?,
             attempt,
             task,

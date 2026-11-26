@@ -42,6 +42,8 @@ pub struct PrOptions {
     /// Extra `Key: value` trailers for the exported commit, added to those
     /// in `agentvc config pr.trailer`.
     pub trailers: Vec<String>,
+    /// Run the repository's git hooks first; see [`ExportOptions::verify`].
+    pub verify: Option<bool>,
     /// One commit even when the attempt has a story.
     pub squash: bool,
     /// Push a branch per story change too (see [`ExportOptions::stack`]).
@@ -820,6 +822,7 @@ pub fn open_pr(space: &Space, attempt_id: i64, opts: &PrOptions) -> Result<PrRes
             message: opts.title.clone(),
             force: opts.force || ours,
             trailers,
+            verify: opts.verify,
             squash: opts.squash,
             stack: opts.stack,
         },
@@ -1093,6 +1096,7 @@ mod tests {
             replaced: None,
             checkout_updated: false,
             objects_copied: 0,
+            hooks: vec![],
             story: Vec::new(),
         };
         let body = pr_body(&space, &winner, &exp).unwrap();

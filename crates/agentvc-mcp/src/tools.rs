@@ -192,6 +192,16 @@ const ACTOR: &str =
 /// to `human`; a caller of this server is an agent.
 const DEFAULT_ACTOR: &str = "agent";
 
+const VERIFY: &str = "true: run the repository's pre-commit and commit-msg hooks in the attempt's view first (a failure returns `hook_failed` with the output and writes nothing); false: skip them. Defaults to `agentvc config export.verify`.";
+
+fn verify_arg(argv: &mut Argv, verify: Option<bool>) {
+    match verify {
+        Some(true) => argv.opts.push("--verify".into()),
+        Some(false) => argv.opts.push("--no-verify".into()),
+        None => {}
+    }
+}
+
 fn fork_params() -> Vec<(&'static str, Value, bool)> {
     vec![
         ("task", s(TASK), false),
@@ -670,10 +680,12 @@ pub static TOOLS: &[Tool] = &[
                 ("force", b("Move the branch even if another attempt exported to it."), false),
                 ("body_prefix", s("File whose text goes above the generated PR body (for example attribution lines). Kept on later updates."), false),
                 ("trailers", json!({ "type": "array", "items": { "type": "string" }, "description": "Extra \"Key: value\" trailers for the exported commit." }), false),
+                ("verify", b(VERIFY), false),
             ]
         },
         argv: |a| {
             let mut argv = Argv::new(&["pr"]);
+            verify_arg(&mut argv, a.bool("verify")?);
             for t in a.strings("trailers")? {
                 argv.opt("trailer", Some(t));
             }
@@ -686,6 +698,33 @@ pub static TOOLS: &[Tool] = &[
                 .opt("repo", a.str("repo")?)
                 .flag("force", a.bool("force")?)
                 .opt("body-prefix", a.str("body_prefix")?)
+                .pos(Some(a.req("attempt")?))
+                .done())
+        },
+    },
+    Tool {
+        name: "land",
+        title: "Land attempt on a local branch",
+        description: "Put an attempt on a local git branch without GitHub (then `git push` works with any remote): rebase it onto the branch when the branch moved (a conflict fails with `conflict` and changes nothing), then fast-forward the branch to one clean commit, or write a merge commit with merge=true. Defaults to the checked-out branch, whose working tree moves along; local edits the move would overwrite fail with `checkout_dirty`. Returns {land: {branch, commit, previous, rebased, checkout_updated, hooks}}.",
+        read_only: false,
+        destructive: false,
+        open_world: false,
+        params: || {
+            vec![
+                ("attempt", s(ATTEMPT), true),
+                ("onto", s("Local branch to land on. Defaults to the checked-out branch."), false),
+                ("merge", b("Write a merge commit instead of one commit on top."), false),
+                ("message", s("Commit message. Defaults to the task goal."), false),
+                ("verify", b(VERIFY), false),
+            ]
+        },
+        argv: |a| {
+            let mut argv = Argv::new(&["land"]);
+            verify_arg(&mut argv, a.bool("verify")?);
+            Ok(argv
+                .opt("onto", a.str("onto")?)
+                .flag("merge", a.bool("merge")?)
+                .opt("message", a.str("message")?)
                 .pos(Some(a.req("attempt")?))
                 .done())
         },
@@ -723,6 +762,26 @@ mod tests {
 
     fn argv(tool: &str, args: Value) -> Result<Vec<String>, BadArgs> {
         find(tool).unwrap().build(&args)
+    }
+
+    #[test]
+    fn land_argv() {
+        assert_eq!(
+            argv(
+                "land",
+                json!({ "attempt": "a3", "merge": true, "verify": false })
+            )
+            .unwrap(),
+            ["land", "--no-verify", "--merge", "--", "a3"]
+        );
+        assert_eq!(
+            argv(
+                "land",
+                json!({ "attempt": "a3", "onto": "main", "verify": true })
+            )
+            .unwrap(),
+            ["land", "--verify", "--onto=main", "--", "a3"]
+        );
     }
 
     #[test]

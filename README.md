@@ -58,6 +58,8 @@ agentvc story a2 --at s4:"Add parser" --last "Wire it up"
 agentvc story a2 --absorb                     # fold review fixes into the change that last touched each file
 agentvc export a2 --branch parser-2x          # a2 as a commit (or its story's commits) on a branch
 agentvc pr a2 --draft                         # push agentvc/a2 and open a PR listing rejected attempts
+agentvc land a2 [--onto main] [--merge]       # no GitHub? put a2 on a local branch, then `git push`
+agentvc config export.verify true             # run the repo's pre-commit/commit-msg hooks before export/pr/land
 agentvc sync                                  # push the whole space (losers too) to origin
 agentvc init --from-remote                    # elsewhere: rebuild that space, same ids
 agentvc init --from-pr 12                     # or rebuild it from the comment `agentvc pr` keeps on PR #12
@@ -163,7 +165,7 @@ steps and options.
 `agentvc mcp` serves the agentvc commands to coding agents over the Model
 Context Protocol (stdio). Tools: `task_new`, `task_list`, `fork`, `snapshot`,
 `mark`, `abandon`, `promote`, `log`, `show`, `diff`, `path`, `run`, `ps`, `pr`,
-`rebase`, `take`, `query`, `blame`, `sync`, `op_log`, `undo`.
+`rebase`, `take`, `query`, `blame`, `sync`, `op_log`, `undo`, `land`.
 Each one runs the matching command with `--json` and returns the same JSON,
 with `isError` set and the stable `error.code` (for example `no_space`) on
 failure. Resources: `agentvc://tree` (attempts of the current task) and
