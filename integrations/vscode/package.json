@@ -1,7 +1,7 @@
 {
   "name": "agentvc",
   "displayName": "agentvc",
-  "description": "Review agent attempts in the editor, and keep a stack of branches per window: attempt tree, native diff compare, pick a winner, stacked PRs.",
+  "description": "Review agent work in the editor with the same branch graph as the web UI: drag to rebase, resolve conflicts inline, see every window's stack.",
   "version": "0.1.0",
   "publisher": "avc",
   "license": "MIT OR Apache-2.0",
@@ -40,6 +40,13 @@
     },
     "views": {
       "agentvc": [
+        {
+          "type": "webview",
+          "id": "agentvc.branches",
+          "name": "Branches",
+          "icon": "media/agentvc.svg",
+          "contextualTitle": "agentvc"
+        },
         {
           "id": "agentvc.stack.view",
           "name": "Stack (this window)",
@@ -330,10 +337,31 @@
         "command": "agentvc.stack.squash",
         "title": "Squash Current Branch",
         "category": "agentvc stack"
+      },
+      {
+        "command": "agentvc.openReview",
+        "title": "Open Review",
+        "category": "agentvc",
+        "icon": "$(preview)"
       }
     ],
     "menus": {
       "view/title": [
+        {
+          "command": "agentvc.openReview",
+          "when": "view == agentvc.branches",
+          "group": "navigation@1"
+        },
+        {
+          "command": "agentvc.openInWebUi",
+          "when": "view == agentvc.branches",
+          "group": "navigation@2"
+        },
+        {
+          "command": "agentvc.startDaemon",
+          "when": "view == agentvc.branches && agentvc.state != connected",
+          "group": "navigation@3"
+        },
         {
           "command": "agentvc.compareAttempts",
           "when": "view == agentvc.attempts",

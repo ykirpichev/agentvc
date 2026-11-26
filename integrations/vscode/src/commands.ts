@@ -344,10 +344,10 @@ export class Commands {
   private async openInWebUi(n?: Node) {
     const d = this.conn.daemon
     if (!d) throw new Error('the review UI needs agentvcd; run "agentvc: Start agentvcd"')
-    let p = '/inbox'
-    if (n?.kind === 'task') p = `/tasks/${n.task.id}`
-    else if (n?.kind === 'attempt') p = `/attempts/${n.node.attempt.id}`
-    else if (n?.kind === 'snapshot') p = `/attempts/${n.attempt.id}`
+    let p = '/review'
+    if (n?.kind === 'task') p = `/review/t/${n.task.id}`
+    else if (n?.kind === 'attempt') p = `/review/v/${n.node.attempt.id}`
+    else if (n?.kind === 'snapshot') p = `/review/v/${n.attempt.id}`
     await vscode.env.openExternal(vscode.Uri.parse(d.baseUrl + p))
   }
 

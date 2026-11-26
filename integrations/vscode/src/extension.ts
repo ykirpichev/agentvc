@@ -1,6 +1,7 @@
 import * as vscode from 'vscode'
 import { Commands } from './commands'
 import { Connection } from './connection'
+import { ReviewHost } from './review'
 import { SCHEME, SnapshotContent } from './content'
 import { StackView, type StackItem } from './stack'
 import { StatusBar } from './statusBar'
@@ -13,6 +14,7 @@ export interface AgentvcApi {
   commands: Commands
   statusBar: StatusBar
   stack: StackView
+  review: ReviewHost
   /** Resolves after the next tree reload. */
   whenRefreshed(): Promise<void>
 }
@@ -29,6 +31,9 @@ export async function activate(ctx: vscode.ExtensionContext): Promise<AgentvcApi
   const statusBar = new StatusBar(conn, tree)
   const commands = new Commands(conn, tree, view)
   commands.register(ctx)
+  // The branch graph and review: the same UI as the browser, in a frame.
+  const review = new ReviewHost(conn)
+  review.register(ctx)
   // This window's own stack (#107): CLI only, no space or daemon needed.
   const stack = new StackView(log)
   const stackView = vscode.window.createTreeView<StackItem>('agentvc.stack.view', {
@@ -74,6 +79,7 @@ export async function activate(ctx: vscode.ExtensionContext): Promise<AgentvcApi
     commands,
     statusBar,
     stack,
+    review,
     whenRefreshed: () => new Promise((resolve) => {
       const d = refreshed.event(() => {
         d.dispose()

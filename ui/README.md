@@ -49,6 +49,23 @@ The UI speaks git and GitHub (version, choose, update from main, open PR);
 out the graph and `src/core/next.ts` decides the next step, so other surfaces
 (the VS Code and Cursor extension, the Claude Code panel) can share them.
 
+Under the graph, **Stacks** lists the branches stacked in each workspace (each
+worktree, so each editor window): *This* for the window you are in, *All* for
+every one (`GET /api/workspaces`). Drag a branch onto another branch or main
+to move it; the workspace that owns it applies the move, at once when idle and
+after its agent stops otherwise (`POST /api/workspaces/{id}/stack`, queued
+edits show with Cancel). ↻ restacks a branch that needs it.
+
+### Inside an editor
+
+Editors frame the same app: `?embed=sidebar` shows only the graph and stacks,
+`?embed=panel` only the review pane. `&theme=light|dark`, `&bg=<color>` and
+`&here=<folder>` (the window's workspace) are optional. In the sidebar,
+clicking something posts `{type: 'agentvc.open', path}` to the host, which
+shows it in its review tab; the host can send `agentvc.navigate` and
+`agentvc.theme`. See `src/core/embed.ts` and
+`integrations/vscode/src/reviewHtml.ts`.
+
 ## Layout
 
 | Path | What |

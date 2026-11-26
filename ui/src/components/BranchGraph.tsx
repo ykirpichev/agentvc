@@ -3,8 +3,8 @@
 // it there; the detail pane then previews the move before anything changes.
 
 import { useMemo, useState, type DragEvent } from 'react'
-import { useLocation, useNavigate } from 'react-router'
-import { commitLink, selectionFromPath, taskLink, usePick, versionLink } from '../core/links'
+import { useLocation } from 'react-router'
+import { commitLink, selectionFromPath, taskLink, useGo, usePick, versionLink } from '../core/links'
 import type { Graph, GraphAttempt, TaskSummary } from '../api/types'
 import { canMoveOnto, layout, type Cell, type GraphRow } from '../core/graph'
 import { shortSha, versionName } from '../core/words'
@@ -21,7 +21,7 @@ function Gutter({ cells }: { cells: Cell[] }) {
 }
 
 export function BranchGraph({ graph, tasks }: { graph: Graph; tasks: TaskSummary[] }) {
-  const navigate = useNavigate()
+  const navigate = useGo()
   const loc = useLocation()
   const sel = selectionFromPath(loc.pathname)
   const pick = usePick()

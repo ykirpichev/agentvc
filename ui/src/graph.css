@@ -644,3 +644,112 @@
     grid-template-columns: 1fr;
   }
 }
+
+/* ---- workspaces: every window's stack ---- */
+.wsx {
+  flex: none;
+  max-height: 45%;
+  overflow-y: auto;
+  margin: 0 -10px;
+  padding-top: 6px;
+  border-top: 1px solid var(--border);
+  font-size: 13px;
+  user-select: none;
+}
+.seg {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.seg button {
+  border: 0;
+  background: none;
+  padding: 1px 8px;
+  font: inherit;
+  font-size: 11px;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--muted);
+  cursor: pointer;
+}
+.seg button.on {
+  background: var(--selected);
+  color: var(--text);
+}
+.seg button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.wst + .wst {
+  margin-top: 6px;
+}
+.wst.busy {
+  opacity: 0.6;
+  pointer-events: none;
+}
+.wst-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 12px 2px;
+  font-weight: 600;
+}
+.wst-head .bsub {
+  margin-left: auto;
+  font-weight: 400;
+}
+.wst-elbow {
+  width: 12px;
+  flex: none;
+  color: var(--line);
+  align-self: center;
+  margin-right: 2px;
+}
+.wst-branch.cur .bname {
+  font-weight: 600;
+}
+.wst-empty {
+  margin: 2px 12px 4px 30px;
+  font-size: 12px;
+}
+.wst-req {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 12px 2px 30px;
+  font-size: 12px;
+}
+.wst-req-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.wst-req-bad .wst-req-text {
+  color: var(--conf);
+}
+.bbadge-run {
+  color: var(--accent-text);
+  border-color: var(--accent);
+}
+
+/* ---- inside an editor (VS Code, Cursor) ---- */
+:root[data-embed] body {
+  background: transparent;
+}
+.shell-embed-sidebar {
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  padding: 4px 10px 0;
+  overflow: hidden;
+}
+.shell-embed-panel {
+  height: 100vh;
+  display: flex;
+}
+.shell-embed-panel .main {
+  flex: 1;
+}

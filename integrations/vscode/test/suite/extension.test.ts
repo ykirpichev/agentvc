@@ -151,4 +151,17 @@ describe('agentvc extension', function () {
     // Leave the checkout on the trunk for anything after this.
     cli('stack', 'untrack', 'st3')
   })
+
+  it('opens the shared review UI in a tab, framed from the daemon', async () => {
+    const d = api.connection.daemon!
+    await vscode.commands.executeCommand('agentvc.openReview', '/review/v/2')
+    const html = await until('review tab', () => api.review.panelHtml)
+    const origin = new URL(d.baseUrl).origin
+    assert.ok(html.includes(`frame-src ${origin}`), html)
+    assert.match(html, /"surface":"panel"/)
+    assert.match(html, /"path":"\/review\/v\/2"/)
+    // The graph it draws comes from the daemon this window uses.
+    const g = (await (await fetch(`${d.baseUrl}/api/graph`)).json()) as { attempts: unknown[] }
+    assert.ok(g.attempts.length >= 5)
+  })
 })
