@@ -3,6 +3,7 @@ import { Empty } from './components/bits'
 import { Shell } from './components/Shell'
 import { AttemptPage } from './pages/AttemptPage'
 import { Compare } from './pages/Compare'
+import { Find } from './pages/Find'
 import { Inbox } from './pages/Inbox'
 import { Live } from './pages/Live'
 import { TaskPage } from './pages/TaskPage'
@@ -19,6 +20,7 @@ export function App() {
         <Route path="attempts/:id" element={<AttemptPage />} />
         <Route path="compare" element={<Compare />} />
         <Route path="live" element={<Live />} />
+        <Route path="find" element={<Find />} />
         <Route
           path="*"
           element={

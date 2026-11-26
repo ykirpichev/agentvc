@@ -1308,3 +1308,394 @@
 .take-file:hover {
   border-color: var(--accent);
 }
+
+/* ---- Find: query filters (#88) ----------------------------------------- */
+
+.filter-bar {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  padding: 12px 14px;
+  margin-bottom: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.filter-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 18px;
+  align-items: center;
+}
+
+.filter-row-text {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  gap: 8px 12px;
+}
+
+.filter {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.filter-text {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 3px;
+  position: relative;
+}
+
+.filter-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+
+.filter select,
+.filter-input {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  color: var(--text);
+  font: inherit;
+  font-size: 12.5px;
+}
+
+.filter select {
+  padding: 4px 8px;
+  max-width: 340px;
+}
+
+.filter-input {
+  display: flex;
+  align-items: center;
+}
+
+.filter-input:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+
+.filter-input input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  padding: 5px 8px;
+}
+
+.filter-input input::placeholder {
+  color: var(--faint);
+  font-family: var(--font-sans);
+}
+
+.filter-clear {
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 0 7px;
+  display: inline-flex;
+}
+
+.filter-presets {
+  position: absolute;
+  right: 6px;
+  bottom: 4px;
+  display: flex;
+  gap: 3px;
+}
+
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.chip {
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--muted);
+  border-radius: 999px;
+  padding: 2px 10px;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.chip:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+
+.chip-sm {
+  padding: 0 6px;
+  font-size: 11px;
+  background: var(--surface-2);
+}
+
+.chip[aria-pressed='true'] {
+  color: var(--text);
+  font-weight: 550;
+  border-color: currentColor;
+}
+
+.chip-exploring[aria-pressed='true'] {
+  color: var(--exploring);
+  background: var(--exploring-bg);
+}
+.chip-passed[aria-pressed='true'] {
+  color: var(--passed);
+  background: var(--passed-bg);
+}
+.chip-failed[aria-pressed='true'] {
+  color: var(--failed);
+  background: var(--failed-bg);
+}
+.chip-promoted[aria-pressed='true'] {
+  color: var(--promoted);
+  background: var(--promoted-bg);
+}
+.chip-abandoned[aria-pressed='true'] {
+  color: var(--abandoned);
+  background: var(--abandoned-bg);
+}
+
+.find-row .row-title {
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+  min-width: 0;
+}
+
+.find-task {
+  font-weight: 400;
+  font-size: 12px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  margin-left: 6px;
+}
+
+.find-task:hover {
+  color: var(--accent-text);
+}
+
+.find-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 3px;
+  align-items: center;
+  min-width: 0;
+}
+
+.tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  padding: 0 6px;
+  border-radius: 4px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  color: var(--text-2);
+  max-width: 280px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tag-file {
+  background: var(--accent-soft);
+  border-color: transparent;
+  color: var(--accent-text);
+}
+
+.find-reason {
+  margin-left: 4px;
+}
+
+/* ---- Attempt page: diff / blame toggle ---------------------------------- */
+
+.review-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.review-tools {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.review-tools .segmented .kbd {
+  margin-left: 2px;
+}
+
+.review-find {
+  margin-left: auto;
+}
+
+/* ---- Blame view (#88) ----------------------------------------------------
+   Rows are fixed-height (no wrapping) so off-screen chunks can be skipped
+   with content-visibility and still scroll to the right place. */
+
+.blame-body {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  line-height: 20px;
+  overflow-x: auto;
+}
+
+.blame-chunk {
+  content-visibility: auto;
+  width: max-content;
+  min-width: 100%;
+}
+
+.blame-run {
+  display: flex;
+  border-top: 1px solid var(--border);
+  --stripe: var(--border-strong);
+}
+
+.blame-chunk:first-child .blame-run:first-child {
+  border-top: 0;
+}
+
+.blame-gutter {
+  flex: none;
+  width: 260px;
+  padding: 0 10px 0 12px;
+  border-left: 3px solid var(--stripe);
+  background: var(--surface-2);
+  border-right: 1px solid var(--border);
+  position: sticky;
+  left: 0;
+  z-index: 1;
+}
+
+.blame-label {
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+  height: 20px;
+  font-family: var(--font-sans);
+  font-size: 11.5px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+a.blame-label:hover .blame-who {
+  color: var(--accent-text);
+  text-decoration: underline;
+}
+
+.blame-label code {
+  font-size: 11px;
+  color: var(--text-2);
+}
+
+.blame-who {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.blame-src {
+  color: var(--faint);
+}
+
+.blame-when {
+  color: var(--faint);
+  flex: none;
+}
+
+.blame-lines {
+  flex: 1;
+}
+
+.blame-line {
+  display: flex;
+  height: 20px;
+}
+
+.blame-line .ln {
+  flex: none;
+  width: 48px;
+  padding: 0 8px;
+  text-align: right;
+  color: var(--faint);
+  user-select: none;
+  font-size: 11.5px;
+}
+
+.blame-line .code {
+  white-space: pre;
+  padding: 0 12px 0 4px;
+  tab-size: 4;
+}
+
+/* Lines this attempt wrote stand out; git history stays quiet. */
+.blame-self {
+  --stripe: var(--accent);
+}
+.blame-self .blame-lines {
+  background: var(--accent-soft);
+}
+.blame-self .blame-label code {
+  color: var(--accent-text);
+  font-weight: 600;
+}
+.blame-working {
+  --stripe: var(--promoted);
+}
+.blame-working .blame-lines {
+  background: var(--promoted-bg);
+}
+.blame-git {
+  --stripe: var(--border);
+}
+.blame-c0 {
+  --stripe: #2f7de1;
+}
+.blame-c1 {
+  --stripe: #1f9d55;
+}
+.blame-c2 {
+  --stripe: #c27c0e;
+}
+.blame-c3 {
+  --stripe: #d6409f;
+}
+.blame-c4 {
+  --stripe: #0ea5a4;
+}
+.blame-c5 {
+  --stripe: #8e4ec6;
+}
+
+.blame-stat {
+  font-family: var(--font-sans);
+  font-size: 12px;
+  color: var(--muted);
+}

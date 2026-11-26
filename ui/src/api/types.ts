@@ -297,3 +297,69 @@ export interface RebaseOptions {
   keep_conflicts?: boolean
   no_fetch?: boolean
 }
+
+// ---- history queries (crates/agentvc-core/src/query.rs, blame.rs) ---------
+
+/** Filters for `GET /api/query`; every field narrows the result (AND). */
+export interface QueryParams {
+  task?: number
+  status?: Status[]
+  /** Substring of the actor, e.g. `claude`. */
+  actor?: string
+  model?: string
+  /** Paths, directories or globs the attempt changed (any of them). */
+  touched?: string[]
+  /** `2h`, `3d`, `1w`, `YYYY-MM-DD` or Unix seconds. */
+  since?: string
+  /** KEY=VALUE pairs on the attempt's snapshot meta (all of them). */
+  meta?: string[]
+  /** Substring of the prompt or reason. */
+  grep?: string
+}
+
+/** One attempt matching a query (`agentvc log --flat --json`). */
+export interface QueryRow {
+  id: number
+  task_id: number | null
+  task: string | null
+  parent_attempt: number | null
+  actor: string
+  model: string | null
+  status: Status
+  reason: string | null
+  created_at: Timestamp
+  snapshots: number
+  last_snapshot_at: Timestamp | null
+  meta: Record<string, string>
+  /** Files it changed that match `touched`; absent without that filter. */
+  touched?: string[] | null
+}
+
+export type BlameOrigin =
+  | {
+      kind: 'snapshot'
+      snapshot: number
+      attempt: number
+      actor: string
+      model: string | null
+      trigger: string
+      created_at: Timestamp
+      /** For a `take`/`merge` snapshot: the attempt it came from, as aN. */
+      source?: string
+    }
+  | { kind: 'git'; commit: string; author: string; time: Timestamp; summary: string }
+  | { kind: 'working'; attempt: number }
+
+export interface BlameLine {
+  line: number
+  text: string
+  origin: BlameOrigin
+}
+
+export interface Blame {
+  attempt: number
+  path: string
+  snapshot: number | null
+  working: boolean
+  lines: BlameLine[]
+}
