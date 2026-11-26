@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { NavLink, Outlet, useNavigate } from 'react-router'
 import { api } from '../api/client'
 import { useLive } from '../api/live'
@@ -11,6 +11,8 @@ import { Icon, type IconName } from './Icon'
 import { ShortcutHelp } from './ShortcutHelp'
 import { BranchGraph } from './BranchGraph'
 import { ToastProvider } from './Toaster'
+import { WorkspaceStacks } from './WorkspaceStacks'
+import { embedMode, onHost, toHost } from '../core/embed'
 import type { ReviewContext } from '../pages/reviewContext'
 
 const NAV: { to: string; label: string; icon: IconName; keys: string }[] = [
@@ -61,6 +63,47 @@ export function Shell() {
     },
   ])
 
+  // An editor host can send us somewhere (its review tab follows the sidebar).
+  useEffect(() => {
+    toHost({ type: 'agentvc.ready', mode: embedMode })
+    return onHost((msg) => {
+      if (msg.type === 'agentvc.navigate' && msg.path.startsWith('/')) navigate(msg.path)
+    })
+  }, [navigate])
+
+  const graphBox =
+    graph.data && tasks.data ? (
+      <BranchGraph graph={graph.data} tasks={tasks.data} />
+    ) : (
+      <div className="bgraph bgraph-empty muted">{graph.error ? `Graph: ${graph.error.message}` : 'Loading branches…'}</div>
+    )
+
+  if (embedMode === 'sidebar') {
+    // An editor's side bar: the graph and the stacks, nothing else.
+    return (
+      <ToastProvider>
+        <div className="shell-embed shell-embed-sidebar">
+          {graphBox}
+          <WorkspaceStacks />
+        </div>
+      </ToastProvider>
+    )
+  }
+  if (embedMode === 'panel') {
+    // An editor tab: the review pane alone; the side bar has the graph.
+    return (
+      <ToastProvider>
+        <div className="shell-embed shell-embed-panel">
+          <main className="main">
+            <Outlet context={ctx} />
+          </main>
+          <ShortcutHelp />
+          {paletteOpen && <CommandPalette onClose={() => setPaletteOpen(false)} />}
+        </div>
+      </ToastProvider>
+    )
+  }
+
   const themeIcon: IconName =
     theme.pref === 'system' ? 'system' : theme.pref === 'dark' ? 'moon' : 'sun'
 
@@ -96,11 +139,8 @@ export function Shell() {
           ))}
         </nav>
 
-        {graph.data && tasks.data ? (
-          <BranchGraph graph={graph.data} tasks={tasks.data} />
-        ) : (
-          <div className="bgraph bgraph-empty muted">{graph.error ? `Graph: ${graph.error.message}` : 'Loading branches…'}</div>
-        )}
+        {graphBox}
+        <WorkspaceStacks />
 
         <div className="sidebar-foot">
           <span className={`conn conn-${connection}`} title={`Event stream: ${connection}`}>

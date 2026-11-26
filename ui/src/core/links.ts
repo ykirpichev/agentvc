@@ -1,6 +1,7 @@
 // Where each thing in the branch graph lives, so every surface links the same way.
 
-import { useLocation } from 'react-router'
+import { useLocation, useNavigate } from 'react-router'
+import { routeFor, toHost } from './embed'
 
 export type Selection = { kind: 'version'; id: number } | { kind: 'task'; id: number } | { kind: 'commit'; commit: string } | null
 
@@ -25,3 +26,15 @@ export function usePick() {
   return pick ? Number(pick) : null
 }
 
+
+/**
+ * Navigate from the branch graph. Inside an editor's sidebar the host also
+ * opens the path in its review tab; the frame follows so the selection shows.
+ */
+export function useGo() {
+  const navigate = useNavigate()
+  return (path: string) => {
+    if (routeFor(path) === 'host') toHost({ type: 'agentvc.open', path })
+    navigate(path)
+  }
+}

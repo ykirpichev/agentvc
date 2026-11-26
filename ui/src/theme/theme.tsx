@@ -1,7 +1,9 @@
 import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from 'react'
+import { cssColor, embedMode, hostBg, hostTheme, onHost } from '../core/embed'
 
 export type ThemePref = 'system' | 'light' | 'dark'
 const ORDER: ThemePref[] = ['system', 'light', 'dark']
+
 const STORAGE_KEY = 'agentvc.theme'
 
 interface ThemeState {
@@ -26,7 +28,7 @@ function readPref(): ThemePref {
 const media = () => window.matchMedia('(prefers-color-scheme: dark)')
 
 export function ThemeProvider({ children }: { children: ReactNode }) {
-  const [pref, setPref] = useState<ThemePref>(readPref)
+  const [pref, setPref] = useState<ThemePref>(() => hostTheme ?? readPref())
   const [systemDark, setSystemDark] = useState(() => media().matches)
 
   useEffect(() => {
@@ -36,13 +38,30 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
     return () => m.removeEventListener('change', on)
   }, [])
 
+  // An editor host follows its own theme and tells us when it changes.
+  const [bg, setBg] = useState<string | null>(hostBg)
+  useEffect(
+    () =>
+      onHost((msg) => {
+        if (msg.type !== 'agentvc.theme') return
+        setPref(msg.theme)
+        setBg(cssColor(msg.bg) ?? null)
+      }),
+    [],
+  )
+  // Inside an editor, paint its own background so the frame blends in.
+  useEffect(() => {
+    if (embedMode) document.documentElement.style.background = bg ?? ''
+  }, [bg])
+
   const resolved = pref === 'system' ? (systemDark ? 'dark' : 'light') : pref
 
   useEffect(() => {
     document.documentElement.dataset.theme = resolved
     document.documentElement.style.colorScheme = resolved
+    if (embedMode) document.documentElement.dataset.embed = embedMode
     try {
-      localStorage.setItem(STORAGE_KEY, pref)
+      if (!embedMode) localStorage.setItem(STORAGE_KEY, pref)
     } catch {
       // Not persisted; fine.
     }

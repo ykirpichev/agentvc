@@ -29,6 +29,10 @@ import type {
   RebasePreview,
   ResolveResponse,
   UndoResponse,
+  WorkspaceList,
+  WsEditOutcome,
+  WsOp,
+  WsRequest,
 } from './types'
 
 /** An error from the daemon, carrying its stable `code`. */
@@ -127,6 +131,11 @@ export const api = {
   undo: (op?: number) => post<UndoResponse>('/undo', op === undefined ? {} : { op }),
   /** Export, push and open (or update) the attempt's PR. */
   openPr: (id: number, draft = false) => post<PrResponse>(`/attempts/${id}/pr`, { draft }),
+  /** Every workspace (worktree) of the repo with its stack. */
+  workspaces: () => get<WorkspaceList>('/workspaces'),
+  /** Change a workspace's stack from here: applied now, or queued while its agent works. */
+  stackEdit: (workspace: string, op: WsOp) => post<WsEditOutcome>(`/workspaces/${encodeURIComponent(workspace)}/stack`, op),
+  cancelRequest: (id: string) => post<{ request: WsRequest }>(`/requests/${encodeURIComponent(id)}/cancel`),
   mark: (id: number, status: 'passed' | 'failed' | 'exploring') =>
     post<ActionResponse>(`/attempts/${id}/mark`, { status }),
 }

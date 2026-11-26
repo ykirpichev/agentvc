@@ -485,3 +485,78 @@ export interface RebasePreview extends RebaseResult {
   conflict_files: { path: string; strategy: string; hunks: number; remaining: number }[]
   preview: boolean
 }
+
+// ---- workspaces (every worktree's stack; docs/stacks.md "Workspaces") ------
+
+export interface WsBranch {
+  name: string
+  workspace: string
+  parent: string
+  parent_kind: 'trunk' | 'stack' | 'other_window' | 'branch'
+  parent_workspace: string | null
+  parent_rev: string
+  tip: string | null
+  commits: number
+  needs_restack: boolean
+  behind: number
+  conflicts: number
+  current: boolean
+  depth: number
+  children: string[]
+  pr: { number: number; state: string | null } | null
+  attempt: number | null
+  task: number | null
+  status: string | null
+}
+
+export type WsOp =
+  | { op: 'move'; branch: string; onto: string }
+  | { op: 'restack'; branch?: string }
+  | { op: 'rename'; branch: string; new_name: string }
+  | { op: 'delete'; branch: string }
+
+export interface WsRequest {
+  id: string
+  workspace: string
+  op: string
+  branch?: string
+  onto?: string
+  new_name?: string
+  from?: string
+  created_at: number
+  status: 'queued' | 'applied' | 'failed' | 'cancelled'
+  reason?: string
+  code?: string
+  finished_at?: number
+}
+
+export interface WorkspaceInfo {
+  id: string
+  name: string
+  kind: 'main' | 'worktree' | 'remote'
+  machine: string
+  path: string
+  here: boolean
+  state: 'idle' | 'agent_running'
+  busy?: { since: number; seen: number; by: string | null }
+  last_seen: number | null
+  current: string | null
+  trunk: string
+  base_ref: string
+  base: string | null
+  pending: { branch: string; onto: string } | null
+  branches: WsBranch[]
+  requests: WsRequest[]
+}
+
+export interface WorkspaceList {
+  here: string | null
+  workspaces: WorkspaceInfo[]
+}
+
+export interface WsEditOutcome {
+  outcome: 'applied' | 'queued'
+  request_id: string
+  workspace: string
+  reason?: string
+}
