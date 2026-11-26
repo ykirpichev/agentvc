@@ -45,6 +45,11 @@ pub enum Error {
     },
     #[error("git {cmd} failed: {stderr}")]
     Git { cmd: String, stderr: String },
+    #[error(
+        "a{attempt} has unresolved conflicts in {}; resolve them first (`agentvc conflicts list a{attempt}`, `agentvc resolve`, or edit the markers away and snapshot)",
+        paths.join(", ")
+    )]
+    UnresolvedConflicts { attempt: i64, paths: Vec<String> },
     #[error("bad merge rule: {0}")]
     BadMergeRule(String),
     #[error("unknown config key {0:?}; known keys: {keys}", keys = crate::config::KEYS.iter().map(|k| k.name).collect::<Vec<_>>().join(", "))]
@@ -204,6 +209,7 @@ impl Error {
             Error::Git { .. } => "git",
             Error::BadConfigKey(_) => "bad_config_key",
             Error::BadMergeRule(_) => "bad_merge_rule",
+            Error::UnresolvedConflicts { .. } => "unresolved_conflicts",
             Error::BadRemote(_) => "bad_remote",
             Error::NoToken => "no_token",
             Error::GitHub { .. } => "github",
@@ -266,6 +272,10 @@ impl Error {
             Error::AlreadyUndone { op, by } => Some(serde_json::json!({ "op": op, "by": by })),
             Error::UndoConflict { op, .. } => Some(serde_json::json!({ "op": op })),
             Error::DirtyWorktree { paths } => Some(serde_json::json!({ "paths": paths })),
+            Error::UnresolvedConflicts { attempt, paths } => Some(serde_json::json!({
+                "attempt": format!("a{attempt}"),
+                "paths": paths,
+            })),
             Error::StoryConflict { change, paths } => {
                 Some(serde_json::json!({ "change": change, "paths": paths }))
             }

@@ -373,6 +373,13 @@ fn story_message(
 pub fn export(space: &Space, attempt_id: i64, opts: &ExportOptions) -> Result<ExportResult> {
     let repo = HostRepo::open(space.workdir())?;
     let attempt = space.attempt(attempt_id)?;
+    let open = space.conflicts(attempt_id, false)?;
+    if !open.is_empty() {
+        return Err(Error::UnresolvedConflicts {
+            attempt: attempt_id,
+            paths: open.into_iter().map(|c| c.path).collect(),
+        });
+    }
     if repo
         .git(&["check-ref-format", "--branch", &opts.branch], None)
         .is_err()

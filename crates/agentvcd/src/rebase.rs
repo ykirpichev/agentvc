@@ -24,6 +24,10 @@ pub(crate) struct RebaseBody {
     keep_conflicts: bool,
     #[serde(default)]
     no_auto_resolve: bool,
+    /// Report what would happen (clean, auto-resolved and conflicting
+    /// files) and change nothing.
+    #[serde(default)]
+    preview: bool,
 }
 
 #[derive(Serialize)]
@@ -47,6 +51,7 @@ pub(crate) async fn rebase(
         no_fetch: body.no_fetch,
         keep_conflicts: body.keep_conflicts,
         no_auto_resolve: body.no_auto_resolve,
+        preview: body.preview,
         actor: Some(st.actor().to_string()),
     };
     let out = st

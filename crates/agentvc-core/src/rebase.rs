@@ -48,6 +48,9 @@ pub struct RebaseOptions {
     pub keep_conflicts: bool,
     /// Report git's conflicts as they are, without resolution strategies.
     pub no_auto_resolve: bool,
+    /// Work out the result and report it, changing nothing: which files
+    /// merge cleanly, which a strategy resolves and which conflict.
+    pub preview: bool,
     /// Who rebases, for the operation log. Defaults to the attempt's actor.
     pub actor: Option<String>,
 }
@@ -86,6 +89,10 @@ pub struct RebaseResult {
     pub conflicts: Vec<String>,
     /// Files whose conflicts a resolution strategy resolved (see `resolve`).
     pub resolved: Vec<Resolution>,
+    /// For a preview: hunks left per conflicted file.
+    pub conflict_files: Vec<Resolution>,
+    /// True for `preview`: nothing was changed.
+    pub preview: bool,
     /// Whether the view on disk was updated. False for a closed attempt whose
     /// view is gone; history is updated either way.
     pub view_updated: bool,
@@ -306,6 +313,8 @@ pub(crate) struct Merge {
     pub(crate) files: Vec<Resolution>,
     /// The merged blob of each path resolution rewrote.
     pub(crate) blobs: BTreeMap<String, String>,
+    /// Blob ids of the base, ours and theirs sides of each conflicted path.
+    pub(crate) stages: BTreeMap<String, [Option<String>; 3]>,
 }
 
 impl Merge {
@@ -417,6 +426,18 @@ pub(crate) fn merge_commits(
         conflicts: Vec::new(),
         files: Vec::new(),
         blobs: BTreeMap::new(),
+        stages: stages
+            .iter()
+            .map(|(p, st)| {
+                let ids = [0, 1, 2].map(|i| {
+                    st[i]
+                        .as_ref()
+                        .filter(|(m, _)| is_file_mode(m))
+                        .map(|(_, o)| o.clone())
+                });
+                (p.clone(), ids)
+            })
+            .collect(),
     };
     if paths.is_empty() {
         return Ok(merge);
@@ -543,7 +564,7 @@ impl CatFile {
         })
     }
 
-    fn read(&mut self, oid: &Oid) -> Result<(String, Vec<u8>)> {
+    pub(crate) fn read(&mut self, oid: &Oid) -> Result<(String, Vec<u8>)> {
         let hex = oid.to_hex();
         writeln!(self.stdin, "{hex}").at("git cat-file")?;
         self.stdin.flush().at("git cat-file")?;
@@ -746,6 +767,8 @@ pub fn rebase(space: &Space, attempt_id: i64, opts: &RebaseOptions) -> Result<Re
             changes: Vec::new(),
             conflicts: Vec::new(),
             resolved: Vec::new(),
+            conflict_files: Vec::new(),
+            preview: opts.preview,
             view_updated: false,
             status: attempt.status,
         });
@@ -764,6 +787,35 @@ pub fn rebase(space: &Space, attempt_id: i64, opts: &RebaseOptions) -> Result<Re
     };
     let merge = merge_trees(&repo, &from, &current, &onto, &rules, &sides)?;
     let resolved = merge.resolved();
+    let conflict_files: Vec<Resolution> = merge
+        .files
+        .iter()
+        .filter(|f| f.remaining > 0)
+        .cloned()
+        .collect();
+    if opts.preview {
+        let changes = snapshot::diff(space.objects(), &Oid::from_hex(&current)?, &{
+            let mut git = CatFile::start(&repo)?;
+            let merged = Oid::from_hex(&merge.tree)?;
+            import_tree(space.objects(), &mut git, &merged)?;
+            merged
+        })?;
+        return Ok(RebaseResult {
+            attempt: attempt_id,
+            onto,
+            onto_ref,
+            from: Some(from),
+            rebased: false,
+            snapshot: None,
+            changes,
+            conflicts: merge.conflicts,
+            resolved,
+            conflict_files,
+            preview: true,
+            view_updated: false,
+            status: attempt.status,
+        });
+    }
     let keep = !merge.conflicts.is_empty();
     if keep && !(opts.keep_conflicts && view_ok) {
         return Err(Error::Conflict {
@@ -797,6 +849,7 @@ pub fn rebase(space: &Space, attempt_id: i64, opts: &RebaseOptions) -> Result<Re
         meta["auto_resolved"] = serde_json::json!(resolved);
     }
     let snap = insert_snapshot(space, attempt_id, &merge.tree, "rebase", Some(meta))?;
+    space.record_conflicts(&repo, attempt_id, snap.id, "rebase", &merge, &sides)?;
     space.db.execute(
         "INSERT INTO git_bases (attempt_id, snapshot_id, commit_id, tree, created_at)
          VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -835,6 +888,8 @@ pub fn rebase(space: &Space, attempt_id: i64, opts: &RebaseOptions) -> Result<Re
         changes,
         conflicts: merge.conflicts,
         resolved,
+        conflict_files,
+        preview: false,
         view_updated: view_ok,
         status: space.attempt(attempt_id)?.status,
     })
@@ -1046,6 +1101,107 @@ mod tests {
         assert_eq!(space.git_base_commit(&head).unwrap(), Some(c1));
         let first = space.snapshots(ROOT_ATTEMPT).unwrap()[0].clone();
         assert_eq!(space.git_base_commit(&first).unwrap(), Some(c0));
+    }
+
+    #[test]
+    fn conflicts_are_recorded_previewed_and_resolved_per_hunk() {
+        let (tmp, space, _) = repo();
+        let w = tmp.path();
+        let a = fork(&space, BackendChoice::Copy).unwrap();
+        fs::write(a.view_path.join("README.md"), "# demo\n\nline ONE\n").unwrap();
+        space.snapshot(a.id, "manual", None).unwrap();
+        let c1 = advance_main(w, "# demo\n\nline uno\n");
+
+        // Preview: nothing changes, the conflict is named.
+        let p = rebase(
+            &space,
+            a.id,
+            &RebaseOptions {
+                preview: true,
+                ..onto("main")
+            },
+        )
+        .unwrap();
+        assert!(p.preview && !p.rebased && p.snapshot.is_none());
+        assert_eq!(p.conflicts, ["README.md"]);
+        assert_eq!(p.conflict_files[0].remaining, 1);
+        assert!(p.changes.iter().any(|c| c.path == "docs/new.md"));
+        assert!(space.conflicts(a.id, true).unwrap().is_empty());
+        assert_eq!(
+            fs::read_to_string(a.view_path.join("README.md")).unwrap(),
+            "# demo\n\nline ONE\n"
+        );
+
+        let r = rebase(
+            &space,
+            a.id,
+            &RebaseOptions {
+                keep_conflicts: true,
+                ..onto("main")
+            },
+        )
+        .unwrap();
+        assert_eq!(r.conflicts, ["README.md"]);
+        let cs = space.conflicts(a.id, false).unwrap();
+        assert_eq!(cs.len(), 1);
+        let c = &cs[0];
+        assert_eq!(
+            (c.operation.as_str(), c.ours_label.as_str()),
+            ("rebase", "a2")
+        );
+        assert_eq!(
+            space
+                .objects()
+                .read_blob(&Oid::from_hex(c.ours.as_ref().unwrap()).unwrap())
+                .unwrap(),
+            b"# demo\n\nline ONE\n"
+        );
+        assert_eq!(space.attempt_status(a.id).unwrap().conflicts, ["README.md"]);
+
+        // Markers never ship.
+        let e = export(
+            &space,
+            a.id,
+            &ExportOptions {
+                branch: "x".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert_eq!(e.code(), "unresolved_conflicts");
+
+        let f = space.conflict_file(a.id, "README.md").unwrap();
+        assert_eq!(f.hunks.len(), 1);
+        assert_eq!(f.hunks[0].ours, "line ONE\n");
+        assert_eq!(f.hunks[0].base.as_deref(), Some("line one\n"));
+        assert_eq!(f.hunks[0].theirs, "line uno\n");
+        let choice = crate::conflicts::HunkChoice {
+            index: 1,
+            take: crate::conflicts::Take::Custom,
+            text: Some("line ONE uno\n".into()),
+        };
+        let res = space
+            .resolve_conflict(a.id, "README.md", &[choice], None, "human")
+            .unwrap();
+        assert_eq!((res.resolved_hunks, res.remaining_hunks), (1, 0));
+        assert!(res.open.is_empty());
+        assert_eq!(res.snapshot.as_ref().unwrap().trigger, "resolve");
+        assert_eq!(
+            fs::read_to_string(a.view_path.join("README.md")).unwrap(),
+            "# demo\n\nline ONE uno\n"
+        );
+        let all = space.conflicts(a.id, true).unwrap();
+        assert_eq!(all[0].resolution.as_deref(), Some("custom"));
+        let e = export(
+            &space,
+            a.id,
+            &ExportOptions {
+                branch: "x".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(e.parent.as_deref(), Some(c1.as_str()));
     }
 
     #[test]

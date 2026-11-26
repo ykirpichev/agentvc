@@ -65,6 +65,7 @@ pub(crate) const TABLES: &[&str] = &[
     "exports",
     "git_bases",
     "story_changes",
+    "conflicts",
     "operations",
 ];
 /// Metadata keys that describe this machine's sync state, not the space.

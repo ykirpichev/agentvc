@@ -413,6 +413,7 @@ pub fn take(space: &Space, into: i64, source: i64, opts: &TakeOptions) -> Result
         meta["auto_resolved"] = json!(resolved);
     }
     let snap = insert_snapshot(space, into, &merge.tree, mode, Some(meta))?;
+    space.record_conflicts(&repo, into, snap.id, mode, &merge, &sides)?;
     if keep && target.status != Status::Exploring {
         space.db.execute(
             "UPDATE attempts SET status = 'exploring', reason = ?1 WHERE id = ?2",

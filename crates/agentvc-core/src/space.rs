@@ -131,6 +131,22 @@ CREATE TABLE IF NOT EXISTS story_changes (
     created_at INTEGER NOT NULL,
     PRIMARY KEY (attempt_id, position)
 );
+CREATE TABLE IF NOT EXISTS conflicts (
+    id INTEGER PRIMARY KEY,
+    attempt_id INTEGER NOT NULL REFERENCES attempts(id),
+    snapshot_id INTEGER NOT NULL REFERENCES snapshots(id),
+    operation TEXT NOT NULL,
+    path TEXT NOT NULL,
+    base TEXT,
+    ours TEXT,
+    theirs TEXT,
+    ours_label TEXT NOT NULL,
+    theirs_label TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    resolved_at INTEGER,
+    resolution TEXT
+);
+CREATE INDEX IF NOT EXISTS conflicts_attempt ON conflicts(attempt_id);
 CREATE INDEX IF NOT EXISTS attempts_task ON attempts(task_id);
 CREATE INDEX IF NOT EXISTS snapshots_attempt ON snapshots(attempt_id);
 "#;

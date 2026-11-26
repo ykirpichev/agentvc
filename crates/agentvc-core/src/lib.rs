@@ -6,6 +6,7 @@ pub mod bridge;
 pub mod bundle;
 pub mod combine;
 pub mod config;
+pub mod conflicts;
 pub mod cursor;
 pub mod doctor;
 pub mod error;
@@ -18,6 +19,7 @@ pub mod import;
 pub mod index;
 pub mod land;
 pub mod objects;
+pub mod overlaps;
 #[cfg(target_os = "linux")]
 pub mod overlay;
 pub mod overview;
