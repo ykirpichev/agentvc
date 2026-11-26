@@ -78,6 +78,10 @@ pub enum Error {
     },
     #[error("several spaces match on the remote: {}; pass --space <id>", ids.join(", "))]
     AmbiguousSpace { ids: Vec<String> },
+    #[error("the space doesn't fit in a PR comment even without file contents ({0} characters)")]
+    BundleTooLarge(usize),
+    #[error("the space was not saved: push: {git}; PR comment: {pr}")]
+    NotSaved { git: String, pr: String },
     #[error("io error at {path}: {source}")]
     Io {
         path: PathBuf,
@@ -125,6 +129,8 @@ impl Error {
             Error::RootAttempt => "root_attempt",
             Error::SyncConflict { .. } => "sync_conflict",
             Error::AmbiguousSpace { .. } => "ambiguous_space",
+            Error::BundleTooLarge(_) => "bundle_too_large",
+            Error::NotSaved { .. } => "not_saved",
             Error::Io { .. } => "io",
             Error::Spawn { .. } => "spawn_failed",
             Error::Db(_) => "db",

@@ -101,9 +101,9 @@ thread goes idle. Use your thread's own push branch wherever `<branch>` appears.
    the winning path aX -> aY.
 8. **If agentvc gets in the way**, don't silently fall back to git: file a `dogfood` issue,
    then say in the PR why it didn't go through agentvc.
-9. **Before the thread ends:** `agentvc pr` runs `agentvc sync`, which keeps the space on
-   the remote (#56). Cloud sessions can't push it yet (#64), so there paste `agentvc log`
-   into the PR or thread so the losing attempts aren't lost.
+9. **Before the thread ends:** nothing to do. `agentvc pr` saves the space (on the remote,
+   or in cloud sessions in a PR comment, #56/#64), and with auto-sync every later
+   `run`, `promote` and `abandon` updates it.
 
 ## Rules while dogfooding
 
@@ -183,9 +183,15 @@ Cloud threads run in throwaway containers, and Claude Code there ignores
   (`--this-branch`), so a thread that lost its container picks up where it stopped.
   If two machines continue the same space, the later sync fails with `sync_conflict`
   instead of hiding the other's attempts; `--force` overwrites.
-  **Not yet in Claude Code cloud sessions:** their git proxy lets a thread push only its
-  own branch, so the push is refused with HTTP 403 (#64). The setup script then leaves
-  auto-sync off; keep pasting `agentvc log` into the PR there.
+  **Claude Code cloud sessions** may push only their own branch, so the push is refused
+  (HTTP 403). There the space goes into the PR instead (#64): `agentvc pr`, and every
+  `sync` after it, keeps one collapsed comment on the PR with the whole space and, for
+  each attempt, a git patch from its parent attempt (or its base commit). If that nears
+  GitHub's 65,536-character limit, the largest patches are left out first and those
+  attempts keep only their history. `agentvc init --from-pr [N]` rebuilds the space with
+  the same ids, losers' files included, and the setup script does that on its own in the
+  thread's next container. Intermediate snapshots keep their metadata but not their
+  files. After one refused push, automatic saves stop trying to push.
 - **Hooks (#57).** `agentvc run -- claude ...` adds `--settings .agentvc/claude-hooks.json`
   (a file with only agentvc's hooks) unless the command already passes `--settings` or
   `--plugin-dir`, or, outside a cloud session, the view's own settings install the hooks.

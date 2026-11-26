@@ -568,7 +568,7 @@ pub static TOOLS: &[Tool] = &[
     Tool {
         name: "sync",
         title: "Sync space to remote",
-        description: "Push the whole space (tasks, attempts including abandoned ones, snapshots, reasons, run logs) to a git remote as refs/agentvc/spaces/<id>, so the history outlives this machine; `agentvc init --from-remote` restores it elsewhere. `pr` syncs on its own. Returns {sync}.",
+        description: "Save the whole space (tasks, attempts including abandoned ones, snapshots, reasons, run logs) so the history outlives this machine: push it to a git remote as refs/agentvc/spaces/<id>, and write it into a comment on the space's latest PR (for machines that may push only one branch). `agentvc init --from-remote` or `--from-pr` restores it. `pr` saves on its own. Returns {sync: {git, pr}}.",
         read_only: false,
         destructive: false,
         open_world: true,

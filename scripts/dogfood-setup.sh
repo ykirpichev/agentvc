@@ -20,6 +20,10 @@ elif "$bin" init --from-remote --this-branch 2>/dev/null; then
   # A new container for the same thread: pick up the attempts the last one
   # synced (agentvc sync, #56).
   echo "==> restored this branch's space from origin"
+elif [ -n "${CLAUDE_CODE_REMOTE:-}" ] && "$bin" init --from-pr 2>/dev/null; then
+  # Cloud sessions can't push refs/agentvc/*, so the space lives in a comment
+  # on this branch's PR (#64).
+  echo "==> restored this branch's space from its PR"
 else
   echo "==> agentvc init"
   "$bin" init
@@ -28,12 +32,11 @@ fi
 # Cloud containers are thrown away: keep the space on origin after every
 # run, promote, abandon and pr, so losing attempts survive.
 if [ -n "${CLAUDE_CODE_REMOTE:-}" ]; then
+  # Saves go to the PR comment once `agentvc pr` has run; a refused push
+  # is remembered, so later automatic saves don't retry it.
   echo "==> agentvc sync --auto (cloud session)"
-  if ! "$bin" sync --auto; then
-    # Don't warn after every command when the remote refuses the push.
-    "$bin" sync --no-auto >/dev/null
-    echo "    sync failed, auto-sync left off; paste \`agentvc log\` into the PR before the thread ends"
-  fi
+  "$bin" sync --auto 2>/dev/null ||
+    echo "    nothing saved yet: the space goes into the PR when \`agentvc pr\` opens it"
 fi
 
 echo "==> installing Claude Code hooks"
