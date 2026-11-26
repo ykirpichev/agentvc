@@ -407,3 +407,81 @@ export interface Blame {
   working: boolean
   lines: BlameLine[]
 }
+
+// ---- branch graph (crates/agentvcd/src/graph.rs) ---------------------------
+
+export interface TrunkCommit {
+  commit: string
+  summary: string
+  time: Timestamp
+  /** False for a base commit that is not on the upstream branch. */
+  on_upstream: boolean
+}
+
+export interface GraphAttempt {
+  attempt: Attempt
+  base_commit: string | null
+  /** Commits on the upstream its base lacks; null when unknown. */
+  behind: number | null
+  /** Conflicted files still open. */
+  conflicts: number
+  head_snapshot: number | null
+  pr: { number: number; url: string; state: 'open' | 'closed' | 'merged' | null } | null
+}
+
+export interface Graph {
+  /** Like `origin/main`, or `HEAD` without a remote. */
+  upstream: string
+  /** Newest first. */
+  trunk: TrunkCommit[]
+  attempts: GraphAttempt[]
+}
+
+export interface UndoResponse {
+  op: number
+  undid: { id: number; kind: string; summary: string }
+  warnings: string[]
+}
+
+export interface PrResponse {
+  pr: { number: number; url: string; updated: boolean; base: string; repo: string }
+  attempt: Attempt
+}
+
+// ---- conflicts (crates/agentvcd/src/conflicts.rs) --------------------------
+
+export interface ConflictHunk {
+  index: number
+  line: number
+  ours: string
+  base: string | null
+  theirs: string
+  ours_label: string
+  theirs_label: string
+}
+
+export interface ConflictFile {
+  path: string
+  hunks: ConflictHunk[]
+  text: string
+}
+
+export interface ConflictsResponse {
+  attempt: Attempt
+  conflicts: { id: number; path: string; operation: string; theirs_label: string | null }[]
+  files: ConflictFile[]
+}
+
+export type HunkTake = 'ours' | 'theirs' | 'both' | 'both-theirs-first' | 'base' | 'custom'
+
+export interface ResolveResponse {
+  resolve: { path: string; resolved_hunks: number; remaining_hunks: number; open: string[] }
+  attempt: Attempt
+}
+
+/** What a rebase would do (`preview: true`); nothing is changed. */
+export interface RebasePreview extends RebaseResult {
+  resolved: { path: string; strategy: string; hunks: number; remaining: number }[]
+  conflict_files: { path: string; strategy: string; hunks: number; remaining: number }[]
+  preview: boolean
+}

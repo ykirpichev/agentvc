@@ -13,7 +13,7 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::{events, history, rebase, review, take, AppState};
+use crate::{events, graph, history, rebase, review, take, AppState};
 
 /// Files larger than this are listed but their content is not sent.
 pub const MAX_FILE_BYTES: usize = 2 * 1024 * 1024;
@@ -42,6 +42,7 @@ pub(crate) fn routes() -> Router<AppState> {
         )
         .route("/attempts/{id}/take", post(take::take))
         .merge(review::routes())
+        .merge(graph::routes())
         .fallback(|| async {
             ApiError::new(
                 StatusCode::NOT_FOUND,

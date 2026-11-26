@@ -228,10 +228,10 @@ export function ActionButtons({
       {actions.canAct && (
         <>
           <button className="btn btn-win" onClick={actions.promote} disabled={actions.busy}>
-            <Icon name="star" size={13} /> {compact ? 'Pick' : 'Pick winner'} <Kbd keys="p" />
+            <Icon name="star" size={13} /> {compact ? 'Choose' : 'Choose this version'} <Kbd keys="p" />
           </button>
           <button className="btn btn-ghost" onClick={actions.abandon} disabled={actions.busy}>
-            Abandon <Kbd keys="x" />
+            Discard <Kbd keys="x" />
           </button>
         </>
       )}
@@ -250,7 +250,7 @@ export function RebaseButton({ actions }: { actions: AttemptActions }) {
       disabled={actions.busy}
       title="Merge the newer main into this attempt, so its PR carries only its own changes"
     >
-      <Icon name="branch" size={13} /> {actions.busy ? 'Rebasing…' : 'Rebase onto main'} <Kbd keys="r b" />
+      <Icon name="branch" size={13} /> {actions.busy ? 'Updating…' : 'Update from main'} <Kbd keys="r b" />
     </button>
   )
 }

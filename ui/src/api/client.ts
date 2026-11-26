@@ -22,6 +22,13 @@ import type {
   TakeResponse,
   TaskDetail,
   TaskSummary,
+  ConflictsResponse,
+  Graph,
+  HunkTake,
+  PrResponse,
+  RebasePreview,
+  ResolveResponse,
+  UndoResponse,
 } from './types'
 
 /** An error from the daemon, carrying its stable `code`. */
@@ -108,6 +115,18 @@ export const api = {
   /** Who wrote each line of `path` in attempt `id`. */
   blame: (id: number, path: string, working = true) =>
     get<Blame>('/blame', { attempt: `a${id}`, path, working: String(working) }),
+  /** Trunk commits and every attempt, for the branch graph. */
+  graph: () => get<Graph>('/graph'),
+  /** What a rebase onto `onto` would do; changes nothing. */
+  rebasePreview: (id: number, onto?: string) =>
+    post<{ rebase: RebasePreview }>(`/attempts/${id}/rebase`, { onto, preview: true }),
+  conflicts: (id: number) => get<ConflictsResponse>(`/attempts/${id}/conflicts`),
+  resolve: (id: number, path: string, hunks: { index: number; take: HunkTake; text?: string }[]) =>
+    post<ResolveResponse>(`/attempts/${id}/conflicts/resolve`, { path, hunks }),
+  /** Reverse `op`, or the newest undoable operation. */
+  undo: (op?: number) => post<UndoResponse>('/undo', op === undefined ? {} : { op }),
+  /** Export, push and open (or update) the attempt's PR. */
+  openPr: (id: number, draft = false) => post<PrResponse>(`/attempts/${id}/pr`, { draft }),
   mark: (id: number, status: 'passed' | 'failed' | 'exploring') =>
     post<ActionResponse>(`/attempts/${id}/mark`, { status }),
 }
