@@ -11,14 +11,11 @@ import { Icon, type IconName } from './Icon'
 import { ShortcutHelp } from './ShortcutHelp'
 import { BranchGraph } from './BranchGraph'
 import { ToastProvider } from './Toaster'
-import { WorkspaceStacks } from './WorkspaceStacks'
-import { SplitPane } from './SplitPane'
 import { embedMode, onHost, toHost } from '../core/embed'
 import type { ReviewContext } from '../pages/reviewContext'
 
 const NAV: { to: string; label: string; icon: IconName; keys: string }[] = [
   { to: '/review', label: 'Review', icon: 'inbox', keys: 'g r' },
-  { to: '/tasks', label: 'Tasks', icon: 'tasks', keys: 'g t' },
   { to: '/live', label: 'Live', icon: 'live', keys: 'g l' },
   { to: '/find', label: 'Find', icon: 'search', keys: 'g f' },
 ]
@@ -80,11 +77,11 @@ export function Shell() {
     )
 
   if (embedMode === 'sidebar') {
-    // An editor's side bar: the graph and the stacks, nothing else.
+    // An editor's side bar: the one branch tree, nothing else.
     return (
       <ToastProvider>
         <div className="shell-embed shell-embed-sidebar">
-          <SplitPane id="sidebar" top={graphBox} bottom={<WorkspaceStacks />} />
+          <div className="tree-scroll">{graphBox}</div>
         </div>
       </ToastProvider>
     )
@@ -139,7 +136,7 @@ export function Shell() {
           ))}
         </nav>
 
-        <SplitPane id="web" top={graphBox} bottom={<WorkspaceStacks />} />
+        <div className="tree-scroll">{graphBox}</div>
 
         <div className="sidebar-foot">
           <span className={`conn conn-${connection}`} title={`Event stream: ${connection}`}>

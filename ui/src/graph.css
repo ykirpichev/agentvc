@@ -645,41 +645,21 @@
   }
 }
 
-/* ---- workspaces: every window's stack ---- */
-.wsx {
-  flex: none;
-  max-height: 45%;
-  overflow-y: auto;
-  margin: 0 -10px;
-  padding-top: 6px;
-  border-top: 1px solid var(--border);
-  font-size: 13px;
-  user-select: none;
+/* ---- each window's stack, inside the one tree ---- */
+.wst-in {
+  position: relative;
 }
-.seg {
-  display: inline-flex;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  overflow: hidden;
+.wst-in.lead-trunk::before {
+  content: '';
+  position: absolute;
+  left: 20px;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: var(--trunk);
 }
-.seg button {
-  border: 0;
-  background: none;
-  padding: 1px 8px;
-  font: inherit;
-  font-size: 11px;
-  letter-spacing: 0;
-  text-transform: none;
-  color: var(--muted);
-  cursor: pointer;
-}
-.seg button.on {
-  background: var(--selected);
-  color: var(--text);
-}
-.seg button:disabled {
-  opacity: 0.5;
-  cursor: default;
+.wst-head {
+  padding-left: 30px !important;
 }
 .wst + .wst {
   margin-top: 6px;
@@ -709,15 +689,11 @@
 .wst-branch.cur .bname {
   font-weight: 600;
 }
-.wst-empty {
-  margin: 2px 12px 4px 30px;
-  font-size: 12px;
-}
 .wst-req {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 2px 12px 2px 30px;
+  padding: 2px 12px 2px 38px;
   font-size: 12px;
 }
 .wst-req {
@@ -799,56 +775,16 @@
   gap: 4px;
 }
 
-/* ---- graph above, stacks below, a handle between ---- */
-.vsplit {
+/* ---- the one tree fills the side bar and scrolls ---- */
+.tree-scroll {
   flex: 1;
   min-height: 0;
   display: flex;
   flex-direction: column;
-}
-.vsplit-top {
-  flex: 0 0 auto;
-  min-height: 60px;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-}
-.vsplit-top > .bgraph {
-  flex: 1;
-}
-.vsplit-bottom {
-  flex: 1 1 0;
   overflow-x: hidden;
-  min-height: 60px;
-  overflow-y: auto;
 }
-.vsplit-bottom > .wsx {
-  max-height: none;
-  overflow: visible;
-  border-top: 0;
-}
-.vsplit-handle {
-  flex: none;
-  height: 7px;
-  margin: 0 -10px;
-  cursor: row-resize;
-  position: relative;
-  touch-action: none;
-}
-.vsplit-handle::after {
-  content: '';
-  position: absolute;
-  left: 0;
-  right: 0;
-  top: 3px;
-  height: 1px;
-  background: var(--border);
-}
-.vsplit-handle:hover::after,
-.vsplit-handle:focus-visible::after {
-  height: 3px;
-  top: 2px;
-  background: var(--accent);
+.tree-scroll > .bgraph {
+  flex: 1;
 }
 
 /* A stacked version's task name gives way to the version's own name. */

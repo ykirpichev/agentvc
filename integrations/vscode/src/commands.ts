@@ -22,7 +22,6 @@ export class Commands {
   constructor(
     private readonly conn: Connection,
     private readonly tree: AttemptsTree,
-    private readonly view: vscode.TreeView<Node>,
   ) {}
 
   register(ctx: vscode.ExtensionContext): void {
@@ -356,10 +355,10 @@ export class Commands {
     if (ref) await vscode.env.clipboard.writeText(ref)
   }
 
+  /** Show an attempt: its page in the review panel. */
   private async reveal(id?: number) {
     if (id === undefined) return
-    const node = await this.tree.nodeFor(id)
-    if (node) await this.view.reveal(node, { select: true, focus: true, expand: true })
+    await vscode.commands.executeCommand('agentvc.openReview', `/review/v/${id}`)
   }
 
   private done(r: ActionResponse, msg: string, actions: string[] = []) {
@@ -377,9 +376,7 @@ export class Commands {
   /** The attempt a command acts on: its tree node, the selection, or a pick. */
   private async attemptArg(n?: Node, filter: (a: Attempt) => boolean = () => true): Promise<Attempt | undefined> {
     if (n?.kind === 'attempt') return n.node.attempt
-    const sel = this.view.selection[0]
-    if (!n && sel?.kind === 'attempt') return sel.node.attempt
-    if (!n && sel?.kind === 'snapshot') return sel.attempt
+    if (n?.kind === 'snapshot') return n.attempt
     const pool = this.tree.allAttempts.filter(filter)
     if (!pool.length) {
       void vscode.window.showInformationMessage('agentvc: no matching attempts')

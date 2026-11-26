@@ -40,7 +40,7 @@ export const HELP = {
   discard: 'Sets this version aside with a reason. It stays in history; Undo brings it back.',
   checkout: 'Switches that window (worktree) to this branch.',
   restack: 'Its parent changed. Replays this branch, and the branches above it, onto the parent\'s new tip.',
-  resolve: 'Restacking stopped on a clash. Pick what each place should say, then continue.',
+  resolve: 'Pick what each place should say, then continue.',
 } as const
 
 /** How a version is named: who made it, e.g. `claude · opus`. */

@@ -83,6 +83,10 @@ pub struct Pending {
     pub branch: String,
     /// The commit the branch is being rebased onto.
     pub onto: String,
+    /// The parent the branch had before a move that stopped here: an
+    /// aborted rebase puts it back.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub moved_from: Option<String>,
 }
 
 /// The contents of `stack.json`.
@@ -743,6 +747,9 @@ impl Window {
         if let (Some(i), Some(tip)) = (self.find(&p.branch), self.branch_tip(&p.branch)) {
             if self.repo.is_ancestor(&p.onto, &tip) {
                 self.state.branches[i].parent_rev = p.onto.clone();
+            } else if let Some(parent) = &p.moved_from {
+                // The rebase was aborted: the move did not happen.
+                self.state.branches[i].parent = parent.clone();
             }
         }
         self.state.pending = None;
@@ -1040,6 +1047,7 @@ impl Window {
         self.state.pending = Some(Pending {
             branch: c.branch.clone(),
             onto: c.onto.clone(),
+            moved_from: None,
         });
         self.save()?;
         // Expected to stop on the conflict; git leaves the state in the
@@ -1518,7 +1526,15 @@ impl Window {
         let old = self.state.branches[i].parent.clone();
         self.state.branches[i].parent = onto.clone();
         match self.restack(Some(&up), keep_conflicts) {
-            Ok(r) => Ok(r),
+            Ok(r) => {
+                // Stopped on the moved branch itself: remember where it came
+                // from, so an abort puts it back.
+                if let Some(p) = self.state.pending.as_mut().filter(|p| p.branch == branch) {
+                    p.moved_from = Some(old);
+                    self.save()?;
+                }
+                Ok(r)
+            }
             Err(e) => {
                 // Nothing moved: put the parent back.
                 if let Some(i) = self.find(branch) {

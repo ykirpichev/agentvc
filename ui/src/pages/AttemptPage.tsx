@@ -73,7 +73,7 @@ function AttemptView({ detail }: { detail: AttemptDetail }) {
     onSelect: select,
   })
   const selected = nav.selected
-  const upTo = attempt.task_id ? `/tasks/${attempt.task_id}` : '/tasks'
+  const upTo = attempt.task_id ? `/review/t/${attempt.task_id}` : '/review'
   const current = changes[selected]
   const blame = params.get('mode') === 'blame' && current?.kind !== 'removed'
   const setMode = (m: 'diff' | 'blame') => {

@@ -9,12 +9,24 @@ export type Cell = 'blank' | 'pipe' | 'tee' | 'elbow' | 'trunk'
 
 export type GraphRow =
   | { kind: 'trunk'; key: string; commit: string; first: boolean; last: boolean }
+  /** A window's stack of branches, drawn on the commit its trunk is at. */
+  | { kind: 'window'; key: string; workspace: string; commit: string; lead: Cell }
   | { kind: 'task'; key: string; task: number | null; commit: string; prefix: Cell[] }
   | { kind: 'version'; key: string; id: number; prefix: Cell[] }
 
 export interface LayoutOptions {
   /** Show versions that were not chosen (abandoned). */
   showClosed?: boolean
+  /** Each window's stack and the main commit it sits on. */
+  windows?: { id: string; base: string | null }[]
+  /** Tips of stacked branches: versions based on one hang under that branch. */
+  tips?: ReadonlySet<string>
+}
+
+export interface Layout {
+  rows: GraphRow[]
+  /** Rows for the versions based on each branch tip, gutters from the branch. */
+  onTip: Map<string, GraphRow[]>
 }
 
 const isRoot = (g: GraphAttempt) => g.attempt.parent_attempt === null && g.attempt.task_id === null
@@ -26,7 +38,12 @@ export function visibleVersions(graph: Graph, opts: LayoutOptions = {}): GraphAt
   )
 }
 
-export function layout(graph: Graph, tasks: TaskSummary[], opts: LayoutOptions = {}): GraphRow[] {
+/**
+ * One tree: main's commits that something sits on (and its newest), each
+ * window's stack on the commit it is based on, and every version under the
+ * commit, branch or version it is based on.
+ */
+export function layout(graph: Graph, tasks: TaskSummary[], opts: LayoutOptions = {}): Layout {
   const shown = visibleVersions(graph, opts)
   const byId = new Map(shown.map((g) => [g.attempt.id, g]))
   // Nest a fork under its parent while both sit on the same commit; a fork
@@ -46,38 +63,69 @@ export function layout(graph: Graph, tasks: TaskSummary[], opts: LayoutOptions =
     else kids.set(p, [...(kids.get(p) ?? []), g])
   }
 
-  const trunk = graph.trunk
-  const onTrunk = new Set(trunk.map((c) => c.commit))
-  const fallback = trunk[trunk.length - 1]?.commit ?? ''
+  const tips = opts.tips ?? new Set<string>()
+  const onBranch = (g: GraphAttempt) => !!g.base_commit && tips.has(g.base_commit)
+  const all = graph.trunk.filter((c) => c.on_upstream || !tips.has(c.commit))
+  const onTrunk = new Set(all.map((c) => c.commit))
+  const fallback = all[all.length - 1]?.commit ?? ''
   const anchor = (g: GraphAttempt) => (g.base_commit && onTrunk.has(g.base_commit) ? g.base_commit : fallback)
+  const windowAt = (w: { base: string | null }) => (w.base && onTrunk.has(w.base) ? w.base : (all[0]?.commit ?? ''))
   const taskOrder = new Map(tasks.map((t, i) => [t.id, i]))
 
-  const rows: GraphRow[] = []
-  const walk = (list: GraphAttempt[], prefix: Cell[]) =>
+  const walk = (out: GraphRow[], list: GraphAttempt[], prefix: Cell[]) =>
     list.forEach((g, i) => {
       const last = i === list.length - 1
-      rows.push({ kind: 'version', key: `v${g.attempt.id}`, id: g.attempt.id, prefix: [...prefix, last ? 'elbow' : 'tee'] })
-      walk(kids.get(g.attempt.id) ?? [], [...prefix, last ? 'blank' : 'pipe'])
+      out.push({ kind: 'version', key: `v${g.attempt.id}`, id: g.attempt.id, prefix: [...prefix, last ? 'elbow' : 'tee'] })
+      walk(out, kids.get(g.attempt.id) ?? [], [...prefix, last ? 'blank' : 'pipe'])
     })
-
-  trunk.forEach((c, i) => {
-    const lastTrunk = i === trunk.length - 1
-    rows.push({ kind: 'trunk', key: `c${c.commit}`, commit: c.commit, first: i === 0, last: lastTrunk })
-    const here = roots.filter((g) => anchor(g) === c.commit)
+  /** Task groups for `here`, each with its versions, under `lead`. */
+  const hang = (out: GraphRow[], here: GraphAttempt[], commit: string, lead: Cell[]) => {
     const taskIds = [...new Set(here.map((g) => g.attempt.task_id))].sort(
       (a, b) => (taskOrder.get(a ?? -1) ?? 1e9) - (taskOrder.get(b ?? -1) ?? 1e9),
     )
-    const lead: Cell = lastTrunk ? 'blank' : 'trunk'
     taskIds.forEach((t, j) => {
       const lastT = j === taskIds.length - 1
-      rows.push({ kind: 'task', key: `t${t}@${c.commit}`, task: t, commit: c.commit, prefix: [lead, lastT ? 'elbow' : 'tee'] })
+      out.push({ kind: 'task', key: `t${t}@${commit}`, task: t, commit, prefix: [...lead, lastT ? 'elbow' : 'tee'] })
       walk(
+        out,
         here.filter((g) => g.attempt.task_id === t),
-        [lead, lastT ? 'blank' : 'pipe'],
+        [...lead, lastT ? 'blank' : 'pipe'],
       )
     })
+  }
+
+  const onTip = new Map<string, GraphRow[]>()
+  for (const tip of tips) {
+    const here = roots.filter((g) => g.base_commit === tip)
+    if (!here.length) continue
+    const out: GraphRow[] = []
+    hang(out, here, tip, [])
+    onTip.set(tip, out)
+  }
+
+  const trunkRoots = roots.filter((g) => !onBranch(g))
+  const windows = opts.windows ?? []
+  // Main's commits with nothing on them are left out, but for the newest.
+  const trunk = all.filter(
+    (c, i) =>
+      i === 0 || trunkRoots.some((g) => anchor(g) === c.commit) || windows.some((w) => windowAt(w) === c.commit),
+  )
+  const rows: GraphRow[] = []
+  trunk.forEach((c, i) => {
+    const lastTrunk = i === trunk.length - 1
+    rows.push({ kind: 'trunk', key: `c${c.commit}`, commit: c.commit, first: i === 0, last: lastTrunk })
+    const lead: Cell = lastTrunk ? 'blank' : 'trunk'
+    for (const w of windows.filter((x) => windowAt(x) === c.commit)) {
+      rows.push({ kind: 'window', key: `w${w.id}`, workspace: w.id, commit: c.commit, lead })
+    }
+    hang(
+      rows,
+      trunkRoots.filter((g) => anchor(g) === c.commit),
+      c.commit,
+      [lead],
+    )
   })
-  return rows
+  return { rows, onTip }
 }
 
 /** The versions `g` is stacked on, nearest first. */

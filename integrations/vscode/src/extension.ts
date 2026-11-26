@@ -3,9 +3,9 @@ import { Commands } from './commands'
 import { Connection } from './connection'
 import { ReviewHost } from './review'
 import { SCHEME, SnapshotContent } from './content'
-import { StackView, type StackItem } from './stack'
+import { StackView } from './stack'
 import { StatusBar } from './statusBar'
-import { AttemptsTree, type Node } from './tree'
+import { AttemptsTree } from './tree'
 
 /** Returned from `activate`, for tests and other extensions. */
 export interface AgentvcApi {
@@ -22,26 +22,19 @@ export interface AgentvcApi {
 export async function activate(ctx: vscode.ExtensionContext): Promise<AgentvcApi> {
   const log = vscode.window.createOutputChannel('agentvc')
   const conn = new Connection(log)
+  // The attempt and stack models back the commands and the status bar; the
+  // one tree people see is the Branches view (the shared review UI).
   const tree = new AttemptsTree(conn)
-  const view = vscode.window.createTreeView<Node>('agentvc.attempts', {
-    treeDataProvider: tree,
-    showCollapseAll: true,
-  })
   const content = new SnapshotContent(conn)
   const statusBar = new StatusBar(conn, tree)
-  const commands = new Commands(conn, tree, view)
+  const commands = new Commands(conn, tree)
   commands.register(ctx)
   // The branch graph and review: the same UI as the browser, in a frame.
   const review = new ReviewHost(conn)
   review.register(ctx)
   // This window's own stack (#107): CLI only, no space or daemon needed.
   const stack = new StackView(log)
-  const stackView = vscode.window.createTreeView<StackItem>('agentvc.stack.view', {
-    treeDataProvider: stack,
-    dragAndDropController: stack,
-    showCollapseAll: true,
-  })
-  stack.register(ctx, stackView)
+  stack.register(ctx)
   ctx.subscriptions.push(stack)
   void stack.reload()
 
@@ -49,15 +42,12 @@ export async function activate(ctx: vscode.ExtensionContext): Promise<AgentvcApi
   const refresh = async () => {
     await tree.reload()
     await statusBar.update()
-    const t = tree.allTasks.filter((x) => x.attempts.passed > 0 && x.attempts.promoted === 0).length
-    view.badge = t ? { value: t, tooltip: `${t} task${t === 1 ? '' : 's'} ready to pick a winner` } : undefined
     refreshed.fire()
   }
 
   ctx.subscriptions.push(
     log,
     conn,
-    view,
     statusBar,
     refreshed,
     vscode.workspace.registerTextDocumentContentProvider(SCHEME, content),

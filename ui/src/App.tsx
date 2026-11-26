@@ -1,14 +1,11 @@
 import { BranchReview } from './pages/BranchReview'
-import { Navigate, Route, Routes } from 'react-router'
+import { Navigate, Route, Routes, useParams } from 'react-router'
 import { Empty } from './components/bits'
 import { Shell } from './components/Shell'
 import { AttemptPage } from './pages/AttemptPage'
 import { Compare } from './pages/Compare'
 import { Find } from './pages/Find'
-import { Inbox } from './pages/Inbox'
 import { Live } from './pages/Live'
-import { TaskPage } from './pages/TaskPage'
-import { Tasks } from './pages/Tasks'
 import { CommitReview, ReviewHome, TaskReview, VersionReview } from './pages/Review'
 
 export function App() {
@@ -21,9 +18,10 @@ export function App() {
         <Route path="review/v/:id" element={<VersionReview />} />
         <Route path="review/c/:sha" element={<CommitReview />} />
         <Route path="review/b/:workspace/*" element={<BranchReview />} />
-        <Route path="inbox" element={<Inbox />} />
-        <Route path="tasks" element={<Tasks />} />
-        <Route path="tasks/:id" element={<TaskPage />} />
+        {/* Old addresses: the tree and the review pages cover them now. */}
+        <Route path="inbox" element={<Navigate to="/review" replace />} />
+        <Route path="tasks" element={<Navigate to="/review" replace />} />
+        <Route path="tasks/:id" element={<ToTaskReview />} />
         <Route path="attempts/:id" element={<AttemptPage />} />
         <Route path="compare" element={<Compare />} />
         <Route path="live" element={<Live />} />
@@ -39,4 +37,9 @@ export function App() {
       </Route>
     </Routes>
   )
+}
+
+function ToTaskReview() {
+  const { id = '' } = useParams()
+  return <Navigate to={`/review/t/${id}`} replace />
 }
