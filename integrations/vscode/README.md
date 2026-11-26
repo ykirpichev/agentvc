@@ -62,7 +62,7 @@ From the VS Code Marketplace (VS Code) or Open VSX (Cursor, VSCodium): search
 for **agentvc**, or
 
 ```sh
-code --install-extension agentvc.agentvc
+code --install-extension avc.agentvc
 ```
 
 Or download `agentvc.vsix` from a GitHub Release or a CI run, then

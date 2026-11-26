@@ -29,7 +29,7 @@ describe('agentvc extension', function () {
   let api: AgentvcApi
 
   before(async () => {
-    const ext = vscode.extensions.getExtension<AgentvcApi>('agentvc.agentvc')!
+    const ext = vscode.extensions.getExtension<AgentvcApi>('avc.agentvc')!
     api = await ext.activate()
     await until('connection', () => api.connection.state === 'connected')
     await until('attempts', () => api.tree.allAttempts.length >= 5)

@@ -3,7 +3,7 @@
   "displayName": "agentvc",
   "description": "Review agent attempts in the editor: attempt tree, native diff compare, and pick a winner.",
   "version": "0.1.0",
-  "publisher": "agentvc",
+  "publisher": "avc",
   "license": "MIT OR Apache-2.0",
   "preview": true,
   "pricing": "Free",
