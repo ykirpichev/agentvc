@@ -8,14 +8,17 @@ import { useLive } from '../api/live'
 import type { ConflictHunk, HunkTake, PrBrief, WorkspaceInfo, WsConflicts, WsOp } from '../api/types'
 import { useResource } from '../api/useResource'
 import { ErrorNote, Skeleton } from '../components/bits'
+import { Icon } from '../components/Icon'
 import { HunkList } from '../components/ConflictResolver'
 import { DiffView } from '../components/DiffView'
+import { ReviewBar, ThreadList } from '../components/Comments'
+import { scrollToThread, useThreads } from '../core/comments'
 import { undoIn } from '../components/stackEdit'
 import { useToast } from '../components/Toaster'
 import { canMoveBranch } from '../core/graph'
 import { HELP, prWords, shortSha, WORDS } from '../core/words'
 import { plural, timeAgo } from '../lib/format'
-import { agentsOn, settingsLine } from '../core/agents'
+import { agentsOn, agentWorkingOn, settingsLine } from '../core/agents'
 import { AgentSettingsForm, AgentsFrom, StartAgent } from './Agents'
 import { branchLink, codeLink } from '../core/links'
 import { useReview } from './reviewContext'
@@ -33,6 +36,8 @@ export function BranchReview() {
   const [busy, setBusy] = useState(false)
   const [open, setOpen] = useState<string | null>(null)
   const agents = useReview().agents?.agents ?? []
+  const target = `branch:${workspace}/${name}`
+  const { threads } = useThreads(workspace && name ? target : null)
 
   const run = async (op: WsOp, done: string, keep = false) => {
     setBusy(true)
@@ -167,6 +172,17 @@ export function BranchReview() {
       {!readOnly && !stopped && <StartAgent workspace={w.id} branch={b.name} label={b.name} canRevise settings={w.agent_settings} settingsLink={`${branchLink(w.id, w.trunk)}#agent-settings`} />}
       <AgentsFrom agents={agentsOn(agents, w.id, b.name)} workspace={w.id} branch={b.name} />
 
+      <ReviewBar target={target} threads={threads} agent={agentWorkingOn(agents, w.id, b.name)} readOnly={readOnly} />
+      <ThreadList
+        target={target}
+        threads={threads}
+        onJump={(t) => {
+          if (t.anchor) setOpen(t.anchor.path)
+          scrollToThread(t.id)
+        }}
+        readOnly={readOnly}
+      />
+
       <section>
         <h2 className="rv-h2">Commits</h2>
         {detail.error && <ErrorNote error={detail.error} />}
@@ -194,15 +210,35 @@ export function BranchReview() {
                 <button type="button" className="rv-file-head" onClick={() => setOpen((o) => (o === f.path ? null : f.path))}>
                   <span className={`change change-${f.kind}`}>{f.kind}</span>
                   <span className="mono">{f.path}</span>
+                  <FileComments n={threads.filter((t) => t.anchor?.path === f.path && t.state !== 'resolved').length} />
                   <span className="muted">{open === f.path ? '▾' : '▸'}</span>
                 </button>
-                {open === f.path && <DiffView base={ref.git(d.base)} head={ref.git(d.tip)} path={f.path} kind={f.kind} codeRef={readOnly ? undefined : `branch:${w.id}/${b.name}`} />}
+                {open === f.path && (
+                  <DiffView
+                    base={ref.git(d.base)}
+                    head={ref.git(d.tip)}
+                    path={f.path}
+                    kind={f.kind}
+                    codeRef={readOnly ? undefined : `branch:${w.id}/${b.name}`}
+                    comments={{ target, threads, readOnly }}
+                  />
+                )}
               </div>
             ))}
           </div>
         </section>
       )}
     </div>
+  )
+}
+
+/** How many open threads a file has, beside its name. */
+function FileComments({ n }: { n: number }) {
+  if (n === 0) return null
+  return (
+    <span className="file-ncomments" title={`${n} open comment${n === 1 ? '' : 's'}`}>
+      <Icon name="comment" size={12} /> {n}
+    </span>
   )
 }
 

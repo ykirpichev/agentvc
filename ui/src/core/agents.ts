@@ -39,6 +39,12 @@ export const working = (agents: Agent[]) => agents.filter((a) => a.state === 'ru
 export const agentsOn = (agents: Agent[], ws: string, branch: string) =>
   agents.filter((a) => a.workspace === ws && a.start.branch === branch && a.state !== 'landed' && a.state !== 'discarded')
 
+/** The agent a review of `branch` goes to, like the daemon picks it: the newest open agent working on that branch itself. */
+export const agentWorkingOn = (agents: Agent[], ws: string, branch: string) =>
+  [...agents]
+    .sort((a, b) => b.created_at - a.created_at)
+    .find((a) => a.workspace === ws && a.state !== 'landed' && a.state !== 'discarded' && (a.branch === branch || (a.mode === 'revise' && a.start.branch === branch)))
+
 export const agentLink = (id: string) => `/review/a/${encodeURIComponent(id)}`
 
 /** Where its work goes, in words. */

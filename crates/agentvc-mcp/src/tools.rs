@@ -833,6 +833,65 @@ pub static TOOLS: &[Tool] = &[
         },
     },
     Tool {
+        name: "review_comments",
+        title: "Review comments sent to you",
+        description: "The review comments on what you work on: your own agent (agN) and the branch checked out here, or another target (branch:WS/NAME, agent:agN, attempt:aN). Each thread has its id (cN), state (open, addressed, resolved), file, side and line range as they are now (current; null when outdated), the quoted lines it was written on, and its comments. Call it before you finish and address every open thread: fix the code, reply_comment to say what you did, resolve_comment to mark it done. Returns {threads}.",
+        read_only: true,
+        destructive: false,
+        open_world: false,
+        params: || {
+            vec![
+                ("target", s("Another target to list instead: branch:WS/NAME, agent:agN or attempt:aN."), false),
+                ("all", b("Also resolved threads."), false),
+            ]
+        },
+        argv: |a| {
+            let all = a.bool("all")?.unwrap_or(false);
+            let target = a.str("target")?;
+            let mut argv = Argv::new(&["comment", "ls"]);
+            if target.is_none() {
+                argv.flag("here", Some(true));
+            }
+            Ok(argv.flag("open", Some(!all)).pos(target).done())
+        },
+    },
+    Tool {
+        name: "reply_comment",
+        title: "Reply to a review comment",
+        description: "Reply in a review thread (id cN from review_comments), as the agent working here: say what you changed, or ask what the reviewer meant. Returns {thread}.",
+        read_only: false,
+        destructive: false,
+        open_world: false,
+        params: || {
+            vec![
+                ("id", s("Thread id, for example \"c3\"."), true),
+                ("text", s("The reply."), true),
+            ]
+        },
+        argv: |a| {
+            Ok(Argv::new(&["comment", "reply"])
+                .flag("as-agent", Some(true))
+                .pos(Some(a.req("id")?))
+                .pos(Some(a.req("text")?))
+                .done())
+        },
+    },
+    Tool {
+        name: "resolve_comment",
+        title: "Mark a review comment done",
+        description: "Mark a review thread (id cN) as addressed once you dealt with it; the person who wrote it resolves it after looking. Returns {thread}.",
+        read_only: false,
+        destructive: false,
+        open_world: false,
+        params: || vec![("id", s("Thread id, for example \"c3\"."), true)],
+        argv: |a| {
+            Ok(Argv::new(&["comment", "resolve"])
+                .flag("as-agent", Some(true))
+                .pos(Some(a.req("id")?))
+                .done())
+        },
+    },
+    Tool {
         name: "land",
         title: "Land attempt on a local branch",
         description: "Put an attempt on a local git branch without GitHub (then `git push` works with any remote): rebase it onto the branch when the branch moved (a conflict fails with `conflict` and changes nothing), then fast-forward the branch to one clean commit, or write a merge commit with merge=true. Defaults to the checked-out branch, whose working tree moves along; local edits the move would overwrite fail with `checkout_dirty`. Returns {land: {branch, commit, previous, rebased, checkout_updated, hooks}}.",

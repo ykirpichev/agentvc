@@ -41,6 +41,10 @@ pub enum CommentCmd {
     Ls {
         /// Only this branch, agent or try.
         target: Option<String>,
+        /// What the agent (or person) working here works on: this agent and
+        /// the checked-out branch. Hands over reviews sent its way.
+        #[arg(long, conflicts_with = "target")]
+        here: bool,
         #[arg(long)]
         workspace: Option<String>,
         /// Only open and addressed threads.
@@ -57,6 +61,10 @@ pub enum CommentCmd {
         id: String,
         #[arg(long)]
         author: Option<String>,
+        /// Write as the agent working here (`agent:agN`, from
+        /// $AGENTVC_AGENT or this worktree).
+        #[arg(long, conflicts_with = "author")]
+        as_agent: bool,
         #[arg(required = true, num_args = 1.., trailing_var_arg = true)]
         text: Vec<String>,
     },
@@ -65,12 +73,20 @@ pub enum CommentCmd {
         id: String,
         #[arg(long)]
         author: Option<String>,
+        /// Write as the agent working here (`agent:agN`, from
+        /// $AGENTVC_AGENT or this worktree).
+        #[arg(long, conflicts_with = "author")]
+        as_agent: bool,
     },
     /// Open a thread again.
     Reopen {
         id: String,
         #[arg(long)]
         author: Option<String>,
+        /// Write as the agent working here (`agent:agN`, from
+        /// $AGENTVC_AGENT or this worktree).
+        #[arg(long, conflicts_with = "author")]
+        as_agent: bool,
     },
     /// Delete one of your drafts, or with --all every draft on a target.
     Discard {
@@ -257,6 +273,7 @@ pub fn run(cwd: &Path, cmd: CommentCmd) -> anyhow::Result<(Value, String)> {
         }
         CommentCmd::Ls {
             target,
+            here,
             workspace,
             open,
             drafts,
@@ -264,14 +281,18 @@ pub fn run(cwd: &Path, cmd: CommentCmd) -> anyhow::Result<(Value, String)> {
             let target = target
                 .map(|t| parse_target(cwd, &t, workspace.as_deref()))
                 .transpose()?;
-            let threads = comments::list(
-                cwd,
-                &Filter {
-                    target,
-                    active: open,
-                    pending: drafts,
-                },
-            )?;
+            let threads = if here {
+                comments::here(cwd, open)?
+            } else {
+                comments::list(
+                    cwd,
+                    &Filter {
+                        target,
+                        active: open,
+                        pending: drafts,
+                    },
+                )?
+            };
             let text = if threads.is_empty() {
                 "no comments".to_string()
             } else {
@@ -287,8 +308,14 @@ pub fn run(cwd: &Path, cmd: CommentCmd) -> anyhow::Result<(Value, String)> {
         CommentCmd::Reply {
             id,
             author: who,
+            as_agent,
             text,
         } => {
+            let who = if as_agent {
+                Some(comments::agent_here(cwd))
+            } else {
+                who
+            };
             let t = comments::reply(cwd, &id, &text.join(" "), &author(who))?;
             let text = format!(
                 "{}: {} comments, {}",
@@ -298,12 +325,30 @@ pub fn run(cwd: &Path, cmd: CommentCmd) -> anyhow::Result<(Value, String)> {
             );
             (json!({ "thread": t }), text)
         }
-        CommentCmd::Resolve { id, author: who } => {
+        CommentCmd::Resolve {
+            id,
+            author: who,
+            as_agent,
+        } => {
+            let who = if as_agent {
+                Some(comments::agent_here(cwd))
+            } else {
+                who
+            };
             let t = comments::resolve(cwd, &id, &author(who))?;
             let text = format!("{} {}", t.id, t.state.as_str());
             (json!({ "thread": t }), text)
         }
-        CommentCmd::Reopen { id, author: who } => {
+        CommentCmd::Reopen {
+            id,
+            author: who,
+            as_agent,
+        } => {
+            let who = if as_agent {
+                Some(comments::agent_here(cwd))
+            } else {
+                who
+            };
             let t = comments::reopen(cwd, &id, &author(who))?;
             let text = format!("{} {}", t.id, t.state.as_str());
             (json!({ "thread": t }), text)

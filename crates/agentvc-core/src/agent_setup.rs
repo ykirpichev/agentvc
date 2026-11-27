@@ -187,6 +187,21 @@ impl ClaudeSetup {
             .unwrap_or_default();
         pre.insert(0, guard);
         hooks.insert("PreToolUse".into(), Value::Array(pre));
+        // Review comments sent while the agent works reach it at its next
+        // tool call (#169).
+        let inbox = json!({
+            "hooks": [{
+                "type": "command",
+                "command": format!("{} comment inbox", shell_quote(&exe.to_string_lossy())),
+            }],
+        });
+        let mut post = hooks
+            .get("PostToolUse")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        post.push(inbox);
+        hooks.insert("PostToolUse".into(), Value::Array(post));
         s.insert("hooks".into(), Value::Object(hooks));
         if sandbox {
             let mut sb = s

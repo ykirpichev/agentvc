@@ -15,6 +15,7 @@ import { canMoveBranch } from '../core/graph'
 import { branchLink, selectionFromPath, taskLink, useGo } from '../core/links'
 import { agentLink, agentState, agentsOn } from '../core/agents'
 import { mainAhead, needsSync, stackGraph, trunkName, windowState } from '../core/stack'
+import { Icon } from './Icon'
 import { LANE, StackLines } from './StackLines'
 import { prWords, shortSha } from '../core/words'
 import { plural } from '../lib/format'
@@ -405,6 +406,11 @@ function BranchRow({
           </button>
         )}
         {b.conflicts > 0 && <span className="sp-chip sp-chip-bad">clash</span>}
+        {(b.comments ?? 0) > 0 && (
+          <span className="sp-chip sp-chip-warn" title={`${b.comments} open review comment${b.comments === 1 ? '' : 's'}`}>
+            <Icon name="comment" size={11} className="sp-chip-icon" /> {b.comments}
+          </span>
+        )}
         {b.parent_kind === 'other_window' && <span className="sp-chip sp-chip-mute">on {b.parent_workspace ?? 'another window'}</span>}
         {b.pr && (
           <span className={`sp-chip sp-chip-${pr?.tone === 'ok' || pr?.tone === 'win' ? 'ok' : pr?.tone === 'bad' ? 'bad' : 'pr'}`} title={`PR #${b.pr.number}${pr ? `: ${pr.label}` : ''}`}>
