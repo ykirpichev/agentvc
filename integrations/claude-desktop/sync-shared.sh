@@ -7,7 +7,7 @@ set -eu
 here=$(cd "$(dirname "$0")" && pwd)
 src="$here/../../ui/src"
 dst="$here/hooks/shared"
-files="api/types.ts core/graph.ts core/words.ts lib/format.ts"
+files="api/types.ts core/graph.ts core/next.ts core/stack.ts core/words.ts lib/format.ts"
 status=0
 for f in $files; do
   if [ "${1:-}" = "--check" ]; then

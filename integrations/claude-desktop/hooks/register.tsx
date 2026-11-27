@@ -1,9 +1,9 @@
-// agentvc panel: the review UI's branch tree in a pane beside the chat. main,
-// each window's stack of branches, and every agent version under the commit,
-// branch or version it is based on; press a row for its actions (each with a
-// line saying what it does), its conflicts and its diff. It is the same tree,
-// words and rules as the web, VS Code and Cursor UI (hooks/shared is copied from
-// ui/src). It talks to agentvcd through Claude Code (`$.http.fetch`, never a
+// agentvc panel: the review UI's stack view in a pane beside the chat. This
+// window's stack like `gt log` (newest branch on top, main at the bottom), the
+// other windows one line each, and agent work (each open task with its tries);
+// Sync, Submit stack and Undo on top; press a row for its actions, clashes and
+// diff. It is the same view, words and rules as the web, VS Code and Cursor UI
+// (hooks/shared is copied from ui/src). It talks to agentvcd through Claude Code (`$.http.fetch`, never a
 // browser), so the daemon's localhost guard holds.
 
 import { atom, read, update } from 'claude-code'
@@ -20,6 +20,7 @@ import {
   nameOf,
   paneRows,
   previewTitle,
+  shownWindow,
   toHunks,
   toPreview,
   unifiedDiff,
@@ -28,7 +29,8 @@ import {
 } from './model'
 import type { ConflictHunk, GraphAttempt, HunkTake, WorkspaceInfo, WsOp } from './shared/api/types'
 import { stackStale } from './shared/core/graph'
-import { HELP, WORDS, agentLine, shortSha, statusWords, testsWords, versionName } from './shared/core/words'
+import { mainAhead, needsSync } from './shared/core/stack'
+import { HELP, WORDS, agentLine, prWords, shortSha, statusWords, testsWords, tryName, versionName } from './shared/core/words'
 
 const PANE = 'agentvc'
 const TITLE = 'agentvc'
@@ -297,18 +299,31 @@ async function drop($: $, d: Drop): Promise<void> {
   if (w) await stackEdit($, w, { op: 'move', branch: d.branch, onto: d.onto }, `Moved ${d.branch} onto ${d.where}.`)
 }
 
-type WsOutcome = { outcome: 'applied' | 'queued'; reason?: string; result?: { conflict?: { branch: string } | null } }
+type WsOutcome = {
+  outcome: 'applied' | 'queued'
+  reason?: string
+  result?: {
+    conflict?: { branch: string } | null
+    restack?: { conflict?: { branch: string } | null }
+    pushed?: string[]
+    prs?: { number: number }[]
+  }
+}
 
 /** Change a window's stack; a clash stops there and opens it here. */
 async function stackEdit($: $, w: WorkspaceInfo, op: WsOp, done: string): Promise<void> {
-  const keep = op.op === 'move' || op.op === 'restack'
+  const keep = op.op === 'move' || op.op === 'restack' || op.op === 'sync' || op.op === 'delete'
   let said = done
   await act($, '', async () => {
     const r = (await postJson($, `/api/workspaces/${enc(w.id)}/stack`, keep ? { ...op, keep_conflicts: true } : op)) as WsOutcome
-    const stopped = r.result?.conflict?.branch
+    const stopped = r.result?.conflict?.branch ?? r.result?.restack?.conflict?.branch
     if (r.outcome === 'queued') said = `Queued for ${w.name}: ${r.reason ?? 'an agent is working there'}. It applies when the agent stops.`
-    else if (stopped) {
-      said = `${stopped} clashes with its parent. Pick what to keep below.`
+    else if (op.op === 'submit') {
+      const n = r.result?.pushed?.length ?? 0
+      const prs = r.result?.prs ?? []
+      said = !n && !prs.length ? 'Everything was already pushed.' : `Pushed ${n} branch${n === 1 ? '' : 'es'}${prs.length ? `; PRs ${prs.map(p => `#${p.number}`).join(', ')}` : ''}.`
+    } else if (stopped) {
+      said = `${stopped} clashes. Pick what each place should say below.`
       await update($, uiAtom, (u): AgentvcUi => ({ ...u, sel: { kind: 'branch', workspace: w.id, name: stopped } }))
     }
   })
@@ -332,10 +347,10 @@ async function finish($: $, w: WorkspaceInfo, abort: boolean): Promise<void> {
     }
     said =
       r.outcome === 'aborted'
-        ? 'Stopped. The stack is back where it was.'
+        ? 'Cancelled; every branch is back as it was.'
         : r.outcome === 'stopped'
           ? `${r.conflicts?.branch ?? 'The next branch'} clashes too. Pick what to keep below.`
-          : 'Restack finished.'
+          : 'Done; the branches above are updated too.'
     if (r.outcome === 'stopped' && r.conflicts?.branch) {
       const b = r.conflicts.branch
       await update($, uiAtom, (u): AgentvcUi => ({ ...u, sel: { kind: 'branch', workspace: w.id, name: b } }))
@@ -397,22 +412,19 @@ function Tree($: $, { el, rows, ui }: { el: El; rows: PaneRow[]; ui: AgentvcUi }
   )
 }
 
-/** One action: its button, and a line under it saying what it does. */
-function Action({ el, id, label, help, onPress, primary }: { el: El; id: string; label: string; help: string; onPress: () => unknown; primary?: boolean }) {
-  const { Box, Text, Button } = el
+/** One action button. `help` is kept for callers; the button's word says it. */
+function Action({ el, id, label, onPress, primary }: { el: El; id: string; label: string; help?: string; onPress: () => unknown; primary?: boolean }) {
+  const { Button } = el
   return (
-    <Box key={`act-${id}`} flexDirection="column">
-      <Button key={id} variant={primary ? 'primary' : 'secondary'} onPress={() => void onPress()}>
-        {label}
-      </Button>
-      <Text dimColor size="caption" wrap="wrap">
-        {help}
-      </Text>
-    </Box>
+    <Button key={id} variant={primary ? 'primary' : 'secondary'} onPress={() => void onPress()}>
+      {label}
+    </Button>
   )
 }
 
-function Conflicts($: $, { el, sel, detail, mine }: { el: El; sel: AgentvcSel; detail: AgentvcDetail; mine: string }) {
+type SideWords = { theirs: string; ours: string; useTheirs: string; useOurs: string }
+
+function Conflicts($: $, { el, sel, detail, mine, words }: { el: El; sel: AgentvcSel; detail: AgentvcDetail; mine: string; words?: SideWords }) {
   const { Box, Text, Button, Code } = el
   if (detail.conflicts.length === 0) return null
   return (
@@ -436,19 +448,19 @@ function Conflicts($: $, { el, sel, detail, mine }: { el: El; sel: AgentvcSel; d
           {f.hunks.map(hk => (
             <Box key={`h-${f.path}-${hk.index}`} flexDirection="column">
               <Text dimColor size="caption">
-                {hk.other}
+                {words?.theirs ?? hk.other}
               </Text>
               <Code source={hk.theirs || ' '} path={f.path} />
               <Text dimColor size="caption">
-                {mine}
+                {words?.ours ?? mine}
               </Text>
               <Code source={hk.ours || ' '} path={f.path} />
               <Box flexDirection="row" gap={1}>
                 <Button key={`keep-theirs-${f.path}-${hk.index}`} onPress={() => resolveHunk($, sel, f.path, hk.index, 'theirs')}>
-                  {hk.other === 'main' ? WORDS.keepMain : WORDS.keep(hk.other)}
+                  {words?.useTheirs ?? (hk.other === 'main' ? WORDS.keepMain : WORDS.keep(hk.other))}
                 </Button>
                 <Button key={`keep-ours-${f.path}-${hk.index}`} onPress={() => resolveHunk($, sel, f.path, hk.index, 'ours')}>
-                  {WORDS.keep(mine)}
+                  {words?.useOurs ?? WORDS.keep(mine)}
                 </Button>
                 <Button key={`keep-both-${f.path}-${hk.index}`} variant="primary" onPress={() => resolveHunk($, sel, f.path, hk.index, 'both')}>
                   {WORDS.keepBoth}
@@ -487,7 +499,7 @@ function Files({ el, detail, more }: { el: El; detail: AgentvcDetail; more: stri
 function VersionDetail($: $, { el, board, ui, detail, g }: { el: El; board: AgentvcBoard; ui: AgentvcUi; detail: AgentvcDetail; g: GraphAttempt }) {
   const { Box, Text, Button, Input, Link } = el
   const a = g.attempt
-  const name = versionName(a)
+  const name = tryName(a, g.agent?.notes.at(-1)?.text ?? a.prompt)
   const graph = board.graph!
   const st = statusWords(a.status)
   const task = board.tasks.find(t => t.id === a.task_id)
@@ -503,14 +515,14 @@ function VersionDetail($: $, { el, board, ui, detail, g }: { el: El; board: Agen
   return (
     <Box flexDirection="column" gap={1}>
       <Box flexDirection="column">
-        <Text bold>{name}</Text>
+        <Text bold wrap="wrap">{name}</Text>
         {task && (
           <Text dimColor wrap="wrap">
             {task.goal}
           </Text>
         )}
         <Text dimColor size="caption">
-          {st.label}
+          {versionName(a)} · {st.label}
           {parent ? ` · stacked on ${versionName(parent.attempt)}` : g.base_commit ? ` · on ${shortSha(g.base_commit)}` : ''}
           {g.pr ? ` · PR #${g.pr.number}${g.pr.state && g.pr.state !== 'open' ? ` (${g.pr.state})` : ''}` : ''}
         </Text>
@@ -537,14 +549,13 @@ function VersionDetail($: $, { el, board, ui, detail, g }: { el: El; board: Agen
         </Box>
       ) : (
         <Box flexDirection="column" gap={1}>
-          {open && Action({ el, id: "choose", primary: true, label: WORDS.choose, help: HELP.choose, onPress: () => act($, `Chose ${name}.`, () => postJson($, `/api/attempts/${a.id}/promote`)) })}
+          {open && Action({ el, id: "choose", primary: true, label: WORDS.choose, help: HELP.choose, onPress: () => act($, `Using ${name}. The other tries stay in history.`, () => postJson($, `/api/attempts/${a.id}/promote`)) })}
           {g.conflicts === 0 && stale && (
             Action({ el, id: "update-parent", label: WORDS.updateFromParent(versionName(stale.attempt)), help: HELP.updateFromParent(versionName(stale.attempt)), onPress: () => preview($, a.id, `a${stale.attempt.id}`, versionName(stale.attempt), { isStack: true, isUpdate: true }) })
           )}
           {g.conflicts === 0 && !g.stacked_on && !onBranch && behind > 0 && movable && (
             Action({ el, id: "update-main", label: WORDS.updateFromMain, help: HELP.updateFromMain(behind), onPress: () => preview($, a.id, graph.trunk[0]?.commit, 'main', { isStack: false, isUpdate: true }) })
           )}
-          {g.conflicts === 0 && movable && Action({ el, id: "rebase-onto", label: WORDS.rebaseOnto, help: HELP.rebaseOnto, onPress: () => startPick($, { kind: 'version', id: a.id }) })}
           {movable && g.conflicts === 0 && (
             Action({ el, id: "open-pr", label: g.pr ? 'Update PR' : WORDS.openPr, help: g.pr ? HELP.updatePr : parent ? HELP.openPrStacked(versionName(parent.attempt)) : HELP.openPr, onPress: () => act($, '', async () => { const r = (await postJson($, `/api/attempts/${a.id}/pr`, { draft: false })) as { pr: { number: number; updated: boolean } }; $.ui.toast(`${r.pr.updated ? 'Updated' : 'Opened'} PR #${r.pr.number}.`) })  })
           )}
@@ -591,23 +602,35 @@ function BranchDetail($: $, { el, ui, detail, w, name }: { el: El; ui: AgentvcUi
         <Text bold mono>
           {name}
         </Text>
-        <Text dimColor size="caption">
-          {b.commits} commit{b.commits === 1 ? '' : 's'} on {b.parent}
-          {b.current ? ' · checked out' : ''} · {w.name}
+        <Text dimColor size="caption" wrap="wrap">
+          on {b.parent.replace(/^origin\//, '')} · {b.commits} commit{b.commits === 1 ? '' : 's'}
+          {b.current ? " · you're here" : ''} · {w.name}
+          {b.pr ? ` · PR #${b.pr.number}${prWords(b.pr.state, b.pr.status) ? ` ${prWords(b.pr.state, b.pr.status)!.label}` : ''}` : ''}
         </Text>
       </Box>
       {stoppedHere && (
         <Box flexDirection="column" gap={1}>
           <Text color="error" wrap="wrap">
-            {name} clashes with {w.pending!.onto.replace(/^origin\//, '')}.
+            Stopped at {name}: a file changed on both sides.
           </Text>
-          {Conflicts($, { el, sel: { kind: 'branch', workspace: w.id, name }, detail, mine: name })}
+          {Conflicts($, {
+            el,
+            sel: { kind: 'branch', workspace: w.id, name },
+            detail,
+            mine: name,
+            words: {
+              theirs: `Now on ${w.pending!.onto.replace(/^origin\//, '')}`,
+              ours: detail.commits[0] ? `Your change · “${detail.commits[0].subject}”` : 'Your change',
+              useTheirs: `Use ${w.pending!.onto.replace(/^origin\//, '')}`,
+              useOurs: 'Use mine',
+            },
+          })}
           <Box flexDirection="row" gap={1}>
             <Button key="ws-continue" variant="primary" onPress={() => finish($, w, false)}>
               Continue
             </Button>
             <Button key="ws-abort" onPress={() => finish($, w, true)}>
-              Abort
+              Cancel
             </Button>
           </Box>
         </Box>
@@ -628,11 +651,10 @@ function BranchDetail($: $, { el, ui, detail, w, name }: { el: El; ui: AgentvcUi
         !readOnly &&
         !w.pending && (
           <Box flexDirection="column" gap={1}>
-            {b.needs_restack && b.conflicts === 0 && (
-              Action({ el, id: "restack", primary: true, label: WORDS.restack, help: HELP.restack, onPress: () => stackEdit($, w, { op: 'restack', branch: name }, `Restacked ${name}.`) })
-            )}
-            {!b.current && Action({ el, id: "checkout", label: WORDS.checkout, help: HELP.checkout, onPress: () => stackEdit($, w, { op: 'checkout', branch: name }, `Checked out ${name} in ${w.name}.`) })}
-            {Action({ el, id: "move-onto", label: WORDS.moveOnto, help: HELP.moveBranch, onPress: () => startPick($, { kind: 'branch', workspace: w.id, name }) })}
+            {!b.current && Action({ el, id: "checkout", primary: true, label: WORDS.checkout, onPress: () => stackEdit($, w, { op: 'checkout', branch: name }, `Checked out ${name}.`) })}
+            {b.pr && (b.pr.state === 'open' || b.pr.state === null) && b.pr.status?.checks !== 'fail' && b.pr.status?.review !== 'changes_requested' &&
+              Action({ el, id: "merge", label: WORDS.merge, onPress: () => stackEdit($, w, { op: 'merge', branch: name }, `Merged up to ${name}.`) })}
+            {Action({ el, id: "move-onto", label: WORDS.moveOnto, onPress: () => startPick($, { kind: 'branch', workspace: w.id, name }) })}
           </Box>
         )
       )}
@@ -769,6 +791,9 @@ export const register: Register = (on, options) => {
     if (board.fetchedAt === 0 || !board.graph) return <Text dimColor>Connecting to agentvcd…</Text>
 
     const rows = paneRows(board, ui)
+    const win = shownWindow(board)
+    const winStopped = !!win && (!!win.pending || win.branches.some(b => b.conflicts > 0))
+    const winEditable = !!win && win.kind !== 'remote' && win.branches.length > 0 && !winStopped
     const closed = closedCount(board)
     const sel = ui.sel
     const g = sel?.kind === 'version' ? findVersion(board, sel.id) : undefined
@@ -784,11 +809,27 @@ export const register: Register = (on, options) => {
           </Text>
         </Box>
 
+        {win && winEditable && !ui.pick && (
+          <Box flexDirection="row" gap={1}>
+            <Button key="sync" variant={needsSync(win) ? 'primary' : 'secondary'} onPress={() => stackEdit($, win, { op: 'sync' }, `Synced ${win.name}${mainAhead(win) ? ' with main' : ''}.`)}>
+              Sync
+            </Button>
+            {!win.branches.some(b => b.needs_restack) && (
+              <Button key="submit" onPress={() => stackEdit($, win, { op: 'submit' }, 'Submitted.')}>
+                Submit stack
+              </Button>
+            )}
+            <Button key="stack-undo" dimColor onPress={() => stackEdit($, win, { op: 'undo' }, 'Undone.')}>
+              {WORDS.undo}
+            </Button>
+          </Box>
+        )}
+
         {ui.pick && (
           <Box flexDirection="row" gap={1}>
             <Text color="claude" wrap="wrap">
               {anyTarget
-                ? `Moving ${ui.pick.kind === 'version' ? nameOf(board, ui.pick.id) : ui.pick.name}: press ← here.`
+                ? `Moving ${ui.pick.kind === 'version' ? nameOf(board, ui.pick.id) : ui.pick.name}: press ← here on a branch or main.`
                 : 'Nothing to move it onto.'}
             </Text>
             <Button key="cancel-pick-top" dimColor onPress={() => cancelPick($)}>
@@ -801,7 +842,7 @@ export const register: Register = (on, options) => {
         {Tree($, { el, rows, ui })}
         {board.graph.attempts.length <= 1 && board.workspaces.every(w => w.branches.length === 0) && (
           <Text dimColor wrap="wrap">
-            No versions or stacked branches yet. Agents add versions with `agentvc fork`; stack a branch with `agentvc stack create`.
+            No stacked branches yet. Stack one with `agentvc stack create`; agents add tries with `agentvc run`.
           </Text>
         )}
         {closed > 0 && (
@@ -819,9 +860,6 @@ export const register: Register = (on, options) => {
         )}
 
         <Box flexDirection="row" gap={1}>
-          <Button key="undo" dimColor onPress={() => act($, 'Undone.', () => postJson($, '/api/undo', {}))}>
-            {WORDS.undo}
-          </Button>
           <Button key="refresh" dimColor onPress={() => poll($)}>
             Refresh
           </Button>

@@ -15,7 +15,7 @@
     {
       "name": "agentvc-panel",
       "source": "./integrations/claude-desktop",
-      "description": "The review UI's branch tree in a pane beside the chat: main, each window's stack, agent versions, with move, restack, conflicts and diffs."
+      "description": "Your window's stack in a pane beside the chat, like gt log: Sync, Submit, Undo, clashes, diffs, and agent tries."
     }
   ]
 }
