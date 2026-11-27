@@ -52,7 +52,11 @@ export const hostFolder = initial.here
 export const hostBg = initial.bg
 
 /** Messages the page sends to its host. */
-export type ToHost = { type: 'agentvc.open'; path: string } | { type: 'agentvc.ready'; mode: EmbedMode }
+export type ToHost =
+  | { type: 'agentvc.open'; path: string }
+  | { type: 'agentvc.ready'; mode: EmbedMode }
+  /** Open a file of this machine in the editor, at a line (1-based). */
+  | { type: 'agentvc.openFile'; file: string; line?: number }
 
 /** Messages a host sends to the page. */
 export type FromHost = { type: 'agentvc.theme'; theme: 'light' | 'dark'; bg?: string } | { type: 'agentvc.navigate'; path: string }

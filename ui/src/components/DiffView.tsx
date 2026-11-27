@@ -1,4 +1,6 @@
 import { structuredPatch } from 'diff'
+import { Link } from 'react-router'
+import { codeLink } from '../core/links'
 import { api } from '../api/client'
 import type { ChangeKind, FileResponse, Ref } from '../api/types'
 import { useResource } from '../api/useResource'
@@ -69,11 +71,14 @@ export function DiffView({
   head,
   path,
   kind,
+  codeRef,
 }: {
   base: Ref
   head: Ref
   path: string
   kind: ChangeKind
+  /** A browse ref (`branch:w1/x`, `agent:ag3`) to offer "View file" in the Code tab. */
+  codeRef?: string
 }) {
   const key = `${base}..${head}:${path}`
   // Diff inside the loader so it runs once per fetch, not per render.
@@ -100,6 +105,11 @@ export function DiffView({
             <span className="add">+{result.added}</span>
             <span className="del">−{result.removed}</span>
           </span>
+        )}
+        {codeRef && kind !== 'removed' && (
+          <Link className="diff-view-file" to={codeLink(codeRef, path)} title="See the whole file in the Code tab">
+            View file
+          </Link>
         )}
       </header>
       {files.error && <ErrorNote error={files.error} />}

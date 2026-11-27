@@ -32,6 +32,15 @@ export const commitLink = (c: string) => `/review/c/${c}`
 export const branchLink = (workspace: string, name: string) =>
   `/review/b/${encodeURIComponent(workspace)}/${name.split('/').map(encodeURIComponent).join('/')}`
 
+/**
+ * The Code tab (#172) at a ref (`branch:w1/feat`, `agent:ag3`, `workspace:w1`,
+ * `main`, `aN`, `git:<sha>`) and path, optionally at lines (`#L10-L20`).
+ */
+export const codeLink = (r: string, path = '', lines?: [number, number?]) =>
+  `/review/code/${encodeURIComponent(r)}${path ? `/${path.split('/').map(encodeURIComponent).join('/')}` : ''}${
+    lines ? `#L${lines[0]}${lines[1] && lines[1] !== lines[0] ? `-L${lines[1]}` : ''}` : ''
+  }`
+
 /** "Rebase onto…" picks a target by click; this is the version being moved. */
 export function usePick() {
   const loc = useLocation()

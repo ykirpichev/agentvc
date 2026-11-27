@@ -65,6 +65,37 @@ shows it in its review tab; the host can send `agentvc.navigate` and
 `agentvc.theme`. See `src/core/embed.ts` and
 `integrations/vscode/src/reviewHtml.ts`.
 
+### Code tab (#171, #172)
+
+`/review/code/<ref>/<path>#L10-L20` shows every file of a ref, not just its
+diff. Branch, agent and version pages link to it (**Browse code**), and every
+diff on them has **View file**. Refs: `branch:<workspace>/<name>` (the tip),
+`agent:<id>` (the agent's worktree as it is now, uncommitted edits included),
+`workspace:<id>` (a checkout's working tree), `main`, `aN`, `sN` and
+`git:<sha>`. The ref switcher at the top moves between them (and a branch's
+older commits) keeping the path.
+
+- File tree on the left, folders loaded as they open, with what the ref
+  changed against its own base marked `A`/`M`/`D` (a folder shows how many
+  files changed under it). **Changed only** lists just those.
+- File view with highlighting (highlight.js, loaded on first use), wrap,
+  and **Code / Diff / Blame** for the same file. Click a line number to
+  select it, shift-click for a range; the URL keeps it.
+- `⌘P` / `Ctrl+P` (or `t`): go to file, fuzzy over every path.
+  `⌘⇧F` / `Ctrl+Shift+F`: search the ref's text files, plain or regex, case
+  sensitive or not, limited to paths (`src`, `*.rs`).
+- **Open in VS Code / Cursor** opens the file at the selected line: inside
+  the editor the host opens it (`{type: 'agentvc.openFile', file, line}`),
+  in a browser a `vscode://` or `cursor://` link does.
+
+The daemon serves `GET /api/tree?ref=R[&path=DIR][&changed=auto|BASE]`
+(`&recursive=1&paths_only=1` for every path), `GET /api/search?ref=R&q=TEXT
+[&regex=1][&case=1][&path=GLOBS][&limit=N]`, and `/api/file`,
+`/api/blame?ref=R&path=P` and `/api/diff`'s `a` accept the same refs (see
+`crates/agentvcd/src/code.rs`). Working trees are captured into the space's
+store with a stat index under `.agentvc/browse/`, so only files that changed
+since the last look are hashed again; a resolved ref is reused for 3 seconds.
+
 ## Layout
 
 | Path | What |
@@ -91,6 +122,8 @@ In Compare, `h` / `l` or `1`-`4` focus a column, `j` / `k` move between files,
 `o` folds a file and `i` shows files identical in all attempts. Anywhere an
 attempt is focused: `p` picks it as the winner, `x` abandons it with a reason,
 `m p` / `m f` mark it passed or failed.
+
+Code tab: `⌘P` (or `t`) goes to a file, `⌘⇧F` searches.
 
 Compare renders a 5,000-line file in four columns (about 30,000 diff lines) in
 roughly 40 to 50 ms from data to first paint: the first screen renders at

@@ -183,7 +183,13 @@ export interface FileResponse {
  * `aN` (latest state of an attempt), `sN` (one snapshot), or `git:<commit>`
  * (a commit an attempt was rebased onto).
  */
-export type Ref = `a${number}` | `s${number}` | `git:${string}`
+export type Ref = `a${number}` | `s${number}` | `git:${string}` | BrowseRef
+
+/**
+ * Refs for browsing (#171): the trunk, a branch tip, an agent's live
+ * worktree, a workspace's working tree.
+ */
+export type BrowseRef = 'main' | `branch:${string}` | `agent:${string}` | `workspace:${string}`
 
 export type DaemonEvent =
   | { type: 'hello'; workdir: string }
@@ -834,4 +840,55 @@ export interface PermissionsReport {
     sandbox: boolean
     worktree: string
   }[]
+}
+
+// ---- code browsing (crates/agentvcd/src/code.rs) ---------------------------
+
+/** A ref resolved to a tree, as `/api/tree` reports it. */
+export interface ResolvedRef {
+  ref: string
+  kind: 'snapshot' | 'commit' | 'worktree'
+  label: string
+  tree: string
+  commit: string | null
+  snapshot: number | null
+  attempt: number | null
+  /** The folder on the daemon's machine holding these files, for Open in editor. */
+  folder: string | null
+  /** The ref's own base, which `changed=auto` marks against. */
+  base: string | null
+}
+
+export interface TreeEntry {
+  name: string
+  path: string
+  kind: 'dir' | 'file' | 'executable' | 'symlink'
+  change?: ChangeKind
+  /** Changed files under a directory. */
+  changed?: number
+}
+
+export interface TreeResponse extends ResolvedRef {
+  changed_base: string | null
+  changes: FileChange[] | null
+  path: string
+  entries?: TreeEntry[]
+  paths?: string[]
+  truncated?: boolean
+}
+
+export interface SearchMatch {
+  path: string
+  line: number
+  text: string
+  ranges: [number, number][]
+}
+
+export interface SearchResponse {
+  ref: string
+  tree: string
+  matches: SearchMatch[]
+  files: number
+  searched: number
+  truncated: boolean
 }

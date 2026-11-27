@@ -47,8 +47,12 @@ pub(crate) async fn serve(uri: Uri) -> Response {
         if let Some(r) = file(path) {
             return r;
         }
-        // A missing asset is a real 404, not a client-side route.
-        if path.starts_with("assets/") || path.rsplit('/').next().is_some_and(|p| p.contains('.')) {
+        // A missing asset is a real 404, not a client-side route. Pages
+        // under `review/` can end in a file name (the Code tab, #172).
+        let page = path.starts_with("review/");
+        if path.starts_with("assets/")
+            || (!page && path.rsplit('/').next().is_some_and(|p| p.contains('.')))
+        {
             return (StatusCode::NOT_FOUND, "not found").into_response();
         }
     }

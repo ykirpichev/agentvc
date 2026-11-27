@@ -36,6 +36,13 @@ function colorSlot(o: BlameOrigin, current: number): string {
 }
 
 function Label({ origin: o, current }: { origin: BlameOrigin; current: number }) {
+  if (o.kind === 'git' && /^0+$/.test(o.commit)) {
+    return (
+      <span className="blame-label" title="Changed in the working tree, not committed yet">
+        <code>working</code> <span className="blame-who">not committed</span>
+      </span>
+    )
+  }
   if (o.kind === 'git') {
     return (
       <span className="blame-label" title={`${o.commit}\n${o.author} · ${fullDate(o.time)}\n${o.summary}`}>
@@ -93,9 +100,15 @@ const Chunk = memo(function Chunk({ runs, current }: { runs: Run[]; current: num
   )
 })
 
-/** Every line of `path` in attempt `attempt`, with the snapshot or commit that wrote it. */
-export function BlameView({ attempt, path }: { attempt: number; path: string }) {
-  const blame = useResource(`blame:a${attempt}:${path}`, () => api.blame(attempt, path))
+/**
+ * Every line of `path` in attempt `attempt`, with the snapshot or commit that
+ * wrote it. With `at` (a browse ref such as `branch:w1/x`), blames that ref
+ * instead; `attempt` then only picks which lines count as "this".
+ */
+export function BlameView({ attempt, path, at }: { attempt: number; path: string; at?: string }) {
+  const blame = useResource(at ? `blame:${at}:${path}` : `blame:a${attempt}:${path}`, () =>
+    at ? api.blameAt(at, path) : api.blame(attempt, path),
+  )
   const lines = blame.data?.lines
   // Runs of consecutive lines with one origin, packed into chunks of about
   // CHUNK rows (a run is split at a chunk edge and labelled again).
@@ -135,7 +148,7 @@ export function BlameView({ attempt, path }: { attempt: number; path: string }) 
         <span className="change">blame</span>
         {lines && (
           <span className="diff-stat blame-stat">
-            {lines.length} lines · {own} from this attempt
+            {lines.length} lines{at ? '' : ` · ${own} from this attempt`}
             {unsaved > 0 && ` · ${unsaved} unsaved`} · {authors.size} {authors.size === 1 ? 'source' : 'sources'}
           </span>
         )}

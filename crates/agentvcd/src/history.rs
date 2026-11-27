@@ -89,7 +89,10 @@ pub(crate) async fn query(
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct BlameParams {
-    attempt: String,
+    /// An attempt (`aN`), or with `ref` any browse ref (#171) instead.
+    attempt: Option<String>,
+    #[serde(rename = "ref")]
+    r#ref: Option<String>,
     path: String,
     /// Include the view's unsnapshotted work (default true).
     working: Option<bool>,
@@ -99,7 +102,20 @@ pub(crate) async fn blame(
     State(st): State<AppState>,
     Query(p): Query<BlameParams>,
 ) -> ApiResult<Blame> {
-    let id = parse_attempt_id(&p.attempt)?;
+    let Some(attempt) = p.attempt else {
+        let r = p.r#ref.ok_or_else(|| {
+            crate::api::ApiError::new(
+                axum::http::StatusCode::BAD_REQUEST,
+                "bad_ref",
+                "blame what? give attempt or ref".into(),
+            )
+        })?;
+        let b = st
+            .with_space(move |s| Ok(crate::code::blame(s, &r, &p.path)))
+            .await??;
+        return Ok(Json(b));
+    };
+    let id = parse_attempt_id(&attempt)?;
     let working = p.working.unwrap_or(true);
     let b = st
         .with_space(move |s| s.blame(id, &p.path, working))

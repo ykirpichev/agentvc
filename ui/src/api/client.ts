@@ -44,6 +44,8 @@ import type {
   AgentSettings,
   WorkspaceAgentSettings,
   PermissionsReport,
+  TreeResponse,
+  SearchResponse,
 } from './types'
 import { apiUrl } from '../core/base'
 
@@ -175,6 +177,22 @@ export const api = {
     post<WorkspaceAgentSettings>(`/workspaces/${encodeURIComponent(workspace)}/agent-settings`, s),
   mark: (id: number, status: 'passed' | 'failed' | 'exploring') =>
     post<ActionResponse>(`/attempts/${id}/mark`, { status }),
+  /** One directory of any ref, marked against `changed` (`auto`: the ref's own base). */
+  tree: (r: string, path = '', changed: string | undefined = 'auto') => get<TreeResponse>('/tree', { ref: r, path, changed }),
+  /** Every file path of a ref, for go-to-file. */
+  paths: (r: string, changed: string | undefined = 'auto') =>
+    get<TreeResponse>('/tree', { ref: r, recursive: '1', paths_only: '1', changed }),
+  search: (r: string, q: string, opts: { regex?: boolean; case?: boolean; path?: string; limit?: number } = {}) =>
+    get<SearchResponse>('/search', {
+      ref: r,
+      q,
+      regex: opts.regex ? '1' : undefined,
+      case: opts.case ? '1' : undefined,
+      path: opts.path || undefined,
+      limit: opts.limit === undefined ? undefined : String(opts.limit),
+    }),
+  /** Blame at any browse ref: git's for commits and working trees, the attempt's for versions. */
+  blameAt: (r: string, path: string) => get<Blame>('/blame', { ref: r, path }),
 }
 
 export const ref = {
