@@ -64,7 +64,15 @@ function Card({ w }: { w: WorkspaceInfo }) {
         </span>
       </div>
       {rows.length === 0 ? (
-        <p className="muted wo-none">No unmerged branches.</p>
+        <p className="muted wo-none">
+          No unmerged branches.
+          {w.kind !== 'remote' && (
+            <>
+              {' '}
+              <Link to={branchLink(w.id, w.trunk)}>Start work on {trunkName(w)}</Link>
+            </>
+          )}
+        </p>
       ) : (
         <ol className="wo-stack" style={{ ['--gutter' as string]: `${g.lanes * LANE}px` }}>
           <StackLines g={g} rowH={30} dot={(i) => `${rows[i]!.branch.current ? 'cur' : ''} ${rows[i]!.branch.conflicts > 0 ? 'bad' : ''}`} />

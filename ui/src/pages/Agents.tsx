@@ -211,7 +211,7 @@ export function NeedsYou({ list }: { list: AgentList | undefined }) {
       <section className="ag-home">
         <h1 className="rv-title">Needs you</h1>
         <p className="muted">
-          No agents yet. Open a branch in the sidebar and use <b>Start agent</b>: the agent works on top of it in its own copy, and shows up here when it needs you.
+          No agents yet. Open a branch (or <b>main</b>) in the sidebar and use <b>Start agent</b>: the agent works on top of it in its own copy, and shows up here when it needs you.
         </p>
       </section>
     )

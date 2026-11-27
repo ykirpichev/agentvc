@@ -175,9 +175,10 @@ function WindowStack({
   const ahead = mainAhead(w)
   const sync = needsSync(w)
   const st = windowState(w)
-  // An empty workspace is one line: nothing to show or do until it has a branch.
   const hasAgents = agents.some((a) => a.workspace === w.id && a.state !== 'landed' && a.state !== 'discarded')
-  const body = open && (rows.length > 0 || stopped || gone > 0 || hasAgents)
+  // An empty workspace shows just its trunk: the place to start an agent or a first branch.
+  const empty = rows.length === 0 && !stopped && gone === 0 && !hasAgents
+  const body = open && (!empty || (!readOnly && !!w.base))
   const trunk = trunkName(w)
   const agentsOf = (branch: string) => agentsOn(agents, w.id, branch)
   const extra = rows.map((r) => agentsOf(r.branch.name).length)
@@ -238,7 +239,7 @@ function WindowStack({
           </span>
         </button>
         {!open && st && <span className={`sp-chip sp-chip-${st.tone}`}>{st.label}</span>}
-        {body && !readOnly && (
+        {body && !readOnly && !empty && (
           <span className="sp-tools">
             <button type="button" className="sp-btn sp-btn-ghost" disabled={busy || stopped} onClick={doUndo} title="Undo the last stack change in this workspace" aria-label={`Undo in ${w.name}`}>
               ↶
@@ -297,10 +298,11 @@ function WindowStack({
             className={`sp-row sp-trunk ${over === w.trunk ? 'drop' : ''} ${sel?.kind === 'branch' && sel.workspace === w.id && sel.name === w.trunk ? 'sel' : ''}`}
             {...dropOn(w.trunk)}
             onClick={() => go(branchLink(w.id, w.trunk))}
-            title={`${w.base ? `${w.base_ref} · ${shortSha(w.base)}` : w.base_ref}\nStart an agent from ${trunk}`}
+            title={`${w.base ? `${w.base_ref} · ${shortSha(w.base)}` : w.base_ref}\nStart an agent or a new branch from ${trunk}`}
           >
             <span className="sp-gutter" aria-hidden />
             <span className="sp-name">{trunk}</span>
+            {empty && <span className="sp-start">+ Start work</span>}
           </div>
         )}
         {(rows.length > 0 || w.base) && fromTrunk.map(agentRow)}

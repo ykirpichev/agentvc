@@ -1,7 +1,7 @@
 // One stacked branch of a workspace (`/review/b/:workspace/:branch`): what it
 // changes, what you can do with it, and its conflicts when a restack stopped.
 
-import { useState } from 'react'
+import { useState, type FormEvent } from 'react'
 import { Link, useParams } from 'react-router'
 import { api, ref } from '../api/client'
 import { useLive } from '../api/live'
@@ -20,7 +20,7 @@ import { HELP, prWords, shortSha, WORDS } from '../core/words'
 import { plural, timeAgo } from '../lib/format'
 import { agentsOn, agentWorkingOn, settingsLine } from '../core/agents'
 import { AgentSettingsForm, AgentsFrom, StartAgent } from './Agents'
-import { branchLink, codeLink } from '../core/links'
+import { branchLink, codeLink, useGo } from '../core/links'
 import { useReview } from './reviewContext'
 
 export function BranchReview() {
@@ -87,7 +87,11 @@ export function BranchReview() {
             </p>
           </div>
         </div>
+        {w.kind !== 'remote' && w.branches.length === 0 && (
+          <p className="muted rv-empty-lead">Nothing stacked in {w.name} yet. Start an agent on {trunkName}, or start a branch yourself.</p>
+        )}
         {w.kind !== 'remote' && <StartAgent workspace={w.id} branch={w.trunk} label={trunkName} canRevise={false} settings={w.agent_settings} />}
+        {w.kind !== 'remote' && <NewBranch w={w} />}
         <AgentsFrom agents={agents.filter((a) => a.workspace === w.id && a.start.trunk)} workspace={w.id} branch={w.trunk} />
         {w.kind !== 'remote' ? (
           <AgentSettingsForm workspace={w.id} />
@@ -97,6 +101,8 @@ export function BranchReview() {
       </div>
     )
   }
+  // Just created: the workspace list can lag the branch by a refresh.
+  if (w && !b && detail.data) return <div className="page rv"><Skeleton rows={4} /></div>
   if (!w || !b)
     return (
       <div className="page rv">
@@ -431,5 +437,52 @@ function MoreMenu({
         </span>
       )}
     </span>
+  )
+}
+
+/** "Or start a branch yourself": a new branch on the trunk, checked out in that workspace. */
+function NewBranch({ w }: { w: WorkspaceInfo }) {
+  const [name, setName] = useState('')
+  const [busy, setBusy] = useState(false)
+  const toast = useToast()
+  const go = useGo()
+  const { refresh } = useLive()
+  const trunk = w.trunk.replace(/^origin\//, '')
+  const branch = name.trim().replace(/\s+/g, '-')
+  const create = async (e: FormEvent) => {
+    e.preventDefault()
+    if (!branch) return
+    setBusy(true)
+    try {
+      const r = await api.stackEdit(w.id, { op: 'create', branch, parent: w.trunk })
+      setName('')
+      if (r.outcome === 'queued') toast.ok(`Queued: ${r.reason ?? 'an agent is working there'}. ${branch} starts when it stops.`, { undo: false })
+      else {
+        toast.ok(`Started ${branch} on ${trunk}, checked out in ${w.name}.`, { undo: undoIn(w.id, `Started ${branch}.`) })
+        go(branchLink(w.id, branch))
+      }
+    } catch (err) {
+      toast.error(err)
+    } finally {
+      setBusy(false)
+      refresh()
+    }
+  }
+  return (
+    <form className="rv-newbranch" onSubmit={(e) => void create(e)}>
+      <label htmlFor={`newbranch-${w.id}`}>Or start a branch yourself</label>
+      <input
+        id={`newbranch-${w.id}`}
+        className="mono"
+        value={name}
+        onChange={(e) => setName(e.target.value)}
+        placeholder="branch-name"
+        spellCheck={false}
+        autoComplete="off"
+      />
+      <button type="submit" className="btn" disabled={busy || !branch} title={`Create ${branch || 'the branch'} on ${trunk} and check it out in ${w.folder ?? w.path}. Edits already there come along.`}>
+        New branch
+      </button>
+    </form>
   )
 }
