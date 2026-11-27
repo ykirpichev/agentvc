@@ -14,7 +14,20 @@ import { useToast } from '../components/Toaster'
 import { agentLink, agentState, agentsOn, needsYou, resultWords, working } from '../core/agents'
 import { branchLink } from '../core/links'
 import { duration, money, plural, timeAgo } from '../lib/format'
+import { useReview } from './reviewContext'
 import './agents.css'
+
+/** Whether this UI may start, answer and land agents: not the hosted UI of a machine that does not allow it. */
+const useCanSteer = () => useReview().agents?.can_steer !== false
+
+function WatchOnly({ machine }: { machine?: string }) {
+  return (
+    <p className="muted ag-hint">
+      You can watch these agents from here. To start, answer or land them, use the UI on {machine ?? 'that machine'}, or start its daemon with{' '}
+      <code>--allow-remote-agents</code>.
+    </p>
+  )
+}
 
 /** Run an agent action, toast the outcome and refetch. */
 function useAgentAction() {
@@ -157,6 +170,7 @@ function Actions({ a, compact = false }: { a: Agent; compact?: boolean }) {
 
 /** One card in "Needs you". */
 function NeedCard({ a }: { a: Agent }) {
+  const steer = useCanSteer()
   const st = agentState(a)
   const q = a.question
   return (
@@ -179,7 +193,7 @@ function NeedCard({ a }: { a: Agent }) {
         </p>
       )}
       {(a.state === 'ready' || a.state === 'stopped') && a.last_step && <p className="muted ag-last">{a.last_step}</p>}
-      {q?.kind === 'ask' ? <ReplyBox a={a} placeholder="Answer the agent…" /> : <Actions a={a} compact />}
+      {!steer ? null : q?.kind === 'ask' ? <ReplyBox a={a} placeholder="Answer the agent…" /> : <Actions a={a} compact />}
       <Meta a={a} />
     </article>
   )
@@ -204,6 +218,7 @@ export function NeedsYou({ list }: { list: AgentList | undefined }) {
       <h1 className="rv-title">
         Needs you <span className="ag-count">{needs.length}</span>
       </h1>
+      {!list.can_steer && <WatchOnly machine={list.machine} />}
       {needs.length === 0 ? <p className="muted">Nothing waits on you. The agents below keep working.</p> : <div className="ag-cards">{needs.map((a) => <NeedCard key={a.id} a={a} />)}</div>}
       {busy.length > 0 && (
         <>
@@ -231,6 +246,7 @@ export function NeedsYou({ list }: { list: AgentList | undefined }) {
 
 /** The prompt box on a branch page: start an agent on top of it. */
 export function StartAgent({ workspace, branch, label, canRevise }: { workspace: string; branch: string; label: string; canRevise: boolean }) {
+  const steer = useCanSteer()
   const [prompt, setPrompt] = useState('')
   const [mode, setMode] = useState<'new' | 'revise'>('new')
   const [opts, setOpts] = useState(false)
@@ -261,6 +277,13 @@ export function StartAgent({ workspace, branch, label, canRevise }: { workspace:
       refresh()
     }
   }
+  if (!steer)
+    return (
+      <section className="ag-start">
+        <h2 className="rv-h2">Start agent from {label}</h2>
+        <WatchOnly />
+      </section>
+    )
   return (
     <form className="ag-start" onSubmit={(e) => void start(e)}>
       <h2 className="rv-h2">Start agent from {label}</h2>
@@ -336,6 +359,7 @@ export function AgentsFrom({ agents, workspace, branch }: { agents: Agent[]; wor
 /** `/review/a/:id`: one agent. */
 export function AgentPage() {
   const { id = '' } = useParams()
+  const steer = useCanSteer()
   const data = useResource(`agent:${id}`, () => api.agent(id))
   const [open, setOpen] = useState<string | null>(null)
   if (data.error) return <div className="page rv"><ErrorNote error={data.error} /></div>
@@ -371,11 +395,12 @@ export function AgentPage() {
       {q && (
         <div className="ag-card ag-card-ask">
           {q.kind === 'ask' ? <p className="ag-q">{q.text}</p> : <pre className="ag-cmd">{q.text}</pre>}
-          {q.kind === 'approve' && <Actions a={a} />}
+          {steer && q.kind === 'approve' && <Actions a={a} />}
         </div>
       )}
-      {!q && <Actions a={a} />}
-      {canReply && <ReplyBox a={a} placeholder={q?.kind === 'ask' ? 'Answer the agent…' : 'Reply: what should it do next?'} />}
+      {!steer && <WatchOnly machine={a.machine} />}
+      {steer && !q && <Actions a={a} />}
+      {steer && canReply && <ReplyBox a={a} placeholder={q?.kind === 'ask' ? 'Answer the agent…' : 'Reply: what should it do next?'} />}
       {a.error && <p className="ag-err">{a.error}</p>}
 
       <section>

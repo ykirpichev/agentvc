@@ -9,6 +9,7 @@ Status: early. Milestone M1 (core model and views) is in progress.
 
 - Design: [docs/design.md](docs/design.md)
 - One stack per editor window (instead of Graphite's shared tree), and every workspace visible and editable from anywhere: [docs/stacks.md](docs/stacks.md). Moving a project off Graphite: [docs/switch-from-graphite.md](docs/switch-from-graphite.md) (`scripts/install.sh` installs everything)
+- Run 10-20 coding agents on top of any branch of any workspace and see which need you: [docs/agents.md](docs/agents.md)
 - Core library: [crates/agentvc-core](crates/agentvc-core)
 - CLI: [crates/agentvc-cli](crates/agentvc-cli)
 - MCP server: [crates/agentvc-mcp](crates/agentvc-mcp)

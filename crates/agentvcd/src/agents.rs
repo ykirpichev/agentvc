@@ -97,10 +97,16 @@ struct ListQuery {
     all: Option<String>,
 }
 
-async fn list(State(st): State<AppState>, Query(q): Query<ListQuery>) -> ApiResult<AgentList> {
+async fn list(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<ListQuery>,
+) -> ApiResult<AgentList> {
     let all = q.all.is_some_and(|a| a != "0" && a != "false");
     let dir = st.workdir().to_path_buf();
-    Ok(Json(blocking(move || agent::list(&dir, all)).await?))
+    let mut l = blocking(move || agent::list(&dir, all)).await?;
+    l.can_steer = local_or_allowed(&headers).is_ok();
+    Ok(Json(l))
 }
 
 #[derive(Deserialize)]

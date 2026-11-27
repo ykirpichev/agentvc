@@ -137,6 +137,10 @@ async fn start_follow_and_land_an_agent() {
     assert_eq!(v["needs_you"], 1);
     assert_eq!(v["agents"][0]["state"], "ready");
     assert_eq!(v["agents"][0]["urgency"], 4);
+    // The hosted UI may watch them, and is told it can't steer them.
+    assert_eq!(v["can_steer"], false);
+    let (_, v) = send(&app, "GET", "/api/agents", None, false).await;
+    assert_eq!(v["can_steer"], true);
 
     let (s, v) = send(&app, "GET", &format!("/api/agents/{id}"), None, false).await;
     assert_eq!(s, StatusCode::OK, "{v}");

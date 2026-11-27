@@ -703,6 +703,8 @@ export interface AgentList {
   working: number
   limit: number
   machine: string
+  /** False in the hosted UI when that machine's daemon runs without --allow-remote-agents: agents can be watched, not started or answered. */
+  can_steer: boolean
 }
 
 export interface AgentStep {
