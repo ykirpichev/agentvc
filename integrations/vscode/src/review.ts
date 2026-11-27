@@ -8,7 +8,7 @@ import { WEBVIEW_COMMANDS, frameHtml, nonce, offlineHtml, type Surface } from '.
 
 export const BRANCHES_VIEW = 'agentvc.branches'
 
-type FromWebview = { type?: unknown; path?: unknown; command?: unknown }
+type FromWebview = { type?: unknown; path?: unknown; command?: unknown; file?: unknown; line?: unknown }
 
 export class ReviewHost implements vscode.WebviewViewProvider, vscode.Disposable {
   private view: vscode.WebviewView | undefined
@@ -64,6 +64,7 @@ export class ReviewHost implements vscode.WebviewViewProvider, vscode.Disposable
 
   private onMessage(m: FromWebview) {
     if (m.type === 'agentvc.open' && typeof m.path === 'string') void this.openPanel(m.path)
+    else if (m.type === 'agentvc.openFile' && typeof m.file === 'string') void openFile(m.file, typeof m.line === 'number' ? m.line : undefined)
     else if (m.type === 'agentvc.command' && typeof m.command === 'string' && (WEBVIEW_COMMANDS as readonly string[]).includes(m.command))
       void vscode.commands.executeCommand(m.command)
   }
@@ -97,4 +98,24 @@ export class ReviewHost implements vscode.WebviewViewProvider, vscode.Disposable
     this.subs.length = 0
     this.panel?.dispose()
   }
+}
+
+/**
+ * Open a file the review UI points at (Code tab, diffs) in an editor, at a
+ * 1-based line. Only absolute paths of existing files: the page is a frame
+ * of the daemon and is not trusted with anything else.
+ */
+export async function openFile(file: string, line?: number): Promise<boolean> {
+  if (!/^(\/|[A-Za-z]:[\\/])/.test(file)) return false
+  const uri = vscode.Uri.file(file)
+  try {
+    const stat = await vscode.workspace.fs.stat(uri)
+    if (stat.type !== vscode.FileType.File) return false
+  } catch {
+    void vscode.window.showWarningMessage(`agentvc: ${file} is not on this machine.`)
+    return false
+  }
+  const at = line && line > 0 ? new vscode.Position(line - 1, 0) : undefined
+  await vscode.window.showTextDocument(uri, { preview: false, selection: at ? new vscode.Range(at, at) : undefined })
+  return true
 }

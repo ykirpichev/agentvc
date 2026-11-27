@@ -26,6 +26,7 @@ mod agents;
 mod api;
 mod assets;
 pub mod cloud;
+mod code;
 mod comments;
 mod conflicts;
 mod events;

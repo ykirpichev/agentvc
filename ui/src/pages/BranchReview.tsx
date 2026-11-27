@@ -2,7 +2,7 @@
 // changes, what you can do with it, and its conflicts when a restack stopped.
 
 import { useState } from 'react'
-import { useParams } from 'react-router'
+import { Link, useParams } from 'react-router'
 import { api, ref } from '../api/client'
 import { useLive } from '../api/live'
 import type { ConflictHunk, HunkTake, PrBrief, WorkspaceInfo, WsConflicts, WsOp } from '../api/types'
@@ -17,7 +17,7 @@ import { HELP, prWords, shortSha, WORDS } from '../core/words'
 import { plural, timeAgo } from '../lib/format'
 import { agentsOn, settingsLine } from '../core/agents'
 import { AgentSettingsForm, AgentsFrom, StartAgent } from './Agents'
-import { branchLink } from '../core/links'
+import { branchLink, codeLink } from '../core/links'
 import { useReview } from './reviewContext'
 
 export function BranchReview() {
@@ -67,6 +67,16 @@ export function BranchReview() {
             <p className="muted">
               the trunk of {w.name}
               {w.base ? ` · at ${shortSha(w.base)}` : ''}
+              {' · '}
+              <Link className="rv-code-link" to={codeLink(`branch:${w.id}/${w.trunk}`)}>Browse code</Link>
+              {w.kind !== 'remote' && w.this_machine && (
+                <>
+                  {' · '}
+                  <Link className="rv-code-link" to={codeLink(`workspace:${w.id}`)} title={`Every file in ${w.folder} as it is now, edits included`}>
+                    Working tree
+                  </Link>
+                </>
+              )}
             </p>
           </div>
         </div>
@@ -109,6 +119,14 @@ export function BranchReview() {
             {b.current ? " · you're here" : ''}
             {w.kind === 'remote' ? ` · ${w.name} on ${w.machine}` : ''}
             {b.pr ? ` · PR #${b.pr.number} ${prLine(b.pr.state, b.pr.status)}` : ''}
+            {w.kind !== 'remote' && (
+              <>
+                {' · '}
+                <Link className="rv-code-link" to={codeLink(`branch:${w.id}/${b.name}`)} title="Browse every file of this branch, its changes marked">
+                  Browse code
+                </Link>
+              </>
+            )}
           </p>
         </div>
         {b.conflicts > 0 && <span className="tone tone-conf">{`${b.conflicts} clash${b.conflicts === 1 ? '' : 'es'}`}</span>}
@@ -178,7 +196,7 @@ export function BranchReview() {
                   <span className="mono">{f.path}</span>
                   <span className="muted">{open === f.path ? '▾' : '▸'}</span>
                 </button>
-                {open === f.path && <DiffView base={ref.git(d.base)} head={ref.git(d.tip)} path={f.path} kind={f.kind} />}
+                {open === f.path && <DiffView base={ref.git(d.base)} head={ref.git(d.tip)} path={f.path} kind={f.kind} codeRef={readOnly ? undefined : `branch:${w.id}/${b.name}`} />}
               </div>
             ))}
           </div>

@@ -10,6 +10,7 @@ license.workspace = true
 [dependencies]
 flate2 = "1.1.11"
 globset = "0.4.22"
+regex = "1"
 hex = "0.4.3"
 ignore = "0.4.30"
 libc = "0.2.191"

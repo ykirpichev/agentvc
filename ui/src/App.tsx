@@ -8,6 +8,7 @@ import { Find } from './pages/Find'
 import { CommitReview, ReviewHome, TaskReview, VersionReview } from './pages/Review'
 import { AgentPage } from './pages/Agents'
 import { PermissionsPage } from './pages/Permissions'
+import { CodePage } from './pages/Code'
 
 export function App() {
   return (
@@ -20,6 +21,7 @@ export function App() {
         <Route path="review/c/:sha" element={<CommitReview />} />
         <Route path="review/b/:workspace/*" element={<BranchReview />} />
         <Route path="review/a/:id" element={<AgentPage />} />
+        <Route path="review/code/:ref/*" element={<CodePage />} />
         <Route path="settings/agents" element={<PermissionsPage />} />
         {/* Old addresses: the tree and the review pages cover them now. */}
         <Route path="inbox" element={<Navigate to="/review" replace />} />

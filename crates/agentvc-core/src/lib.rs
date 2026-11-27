@@ -6,6 +6,7 @@ pub mod agent_setup;
 pub mod annotate;
 pub mod blame;
 pub mod bridge;
+pub mod browse;
 pub mod bundle;
 pub mod check;
 pub mod checkouts;

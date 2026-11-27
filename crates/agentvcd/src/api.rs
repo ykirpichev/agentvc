@@ -46,6 +46,7 @@ pub(crate) fn routes() -> Router<AppState> {
         .merge(crate::agents::routes())
         .merge(crate::comments::routes())
         .merge(graph::routes())
+        .merge(crate::code::routes())
         .fallback(|| async {
             ApiError::new(
                 StatusCode::NOT_FOUND,
@@ -430,7 +431,15 @@ struct DiffResponse {
 pub(crate) enum Side {
     Snap(Snapshot),
     Git(GitBase),
-    Commit { commit: String, tree: String },
+    Commit {
+        commit: String,
+        tree: String,
+    },
+    /// A browse ref (#171): `main`, `branch:..`, `agent:..`, `workspace:..`.
+    Tree {
+        label: String,
+        tree: String,
+    },
 }
 
 impl Side {
@@ -439,6 +448,7 @@ impl Side {
             Side::Snap(s) => &s.tree,
             Side::Git(g) => &g.tree,
             Side::Commit { tree, .. } => tree,
+            Side::Tree { tree, .. } => tree,
         }
     }
 
@@ -447,6 +457,7 @@ impl Side {
             Side::Snap(s) => format!("s{}", s.id),
             Side::Git(g) => format!("git:{}", g.commit),
             Side::Commit { commit, .. } => format!("git:{commit}"),
+            Side::Tree { label, .. } => label.clone(),
         }
     }
 }
@@ -454,6 +465,13 @@ impl Side {
 /// Resolve `aN`, `sN` or `git:<commit>` (a recorded rebase base, else any
 /// commit of the host repo).
 fn resolve_side(s: &Space, r: &str) -> Result<Side, ApiError> {
+    if crate::code::is_browse_ref(r) {
+        let at = crate::code::resolve(s, r)?;
+        return Ok(Side::Tree {
+            label: at.r#ref,
+            tree: at.tree,
+        });
+    }
     if let Some(commit) = r.strip_prefix("git:") {
         if let Some(g) = s.git_base_by_commit(commit)? {
             return Ok(Side::Git(g));
@@ -527,7 +545,7 @@ async fn diff(State(st): State<AppState>, Query(q): Query<DiffQuery>) -> ApiResu
                 b_ref: format!("s{}", sb.id),
                 a: match sa {
                     Side::Snap(x) => Some(x),
-                    Side::Git(_) | Side::Commit { .. } => None,
+                    Side::Git(_) | Side::Commit { .. } | Side::Tree { .. } => None,
                 },
                 b: sb,
                 changes,
@@ -627,7 +645,7 @@ async fn file(State(st): State<AppState>, Query(q): Query<FileQuery>) -> ApiResu
                 r#ref: q.r#ref,
                 snapshot: match side {
                     Side::Snap(x) => Some(x.id),
-                    Side::Git(_) | Side::Commit { .. } => None,
+                    Side::Git(_) | Side::Commit { .. } | Side::Tree { .. } => None,
                 },
                 path: q.path,
                 mode: mode_name(mode),

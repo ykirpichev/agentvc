@@ -12,7 +12,7 @@ import { ErrorNote, Skeleton } from '../components/bits'
 import { DiffView } from '../components/DiffView'
 import { useToast } from '../components/Toaster'
 import { agentLink, agentState, agentsOn, DEFAULT_PERMISSIONS, needsYou, PERMISSION_WORDS, PERMISSIONS_LINK, resultWords, RUNNER_WORDS, settingsLine, working } from '../core/agents'
-import { branchLink } from '../core/links'
+import { branchLink, codeLink } from '../core/links'
 import { duration, money, plural, timeAgo } from '../lib/format'
 import { useReview } from './reviewContext'
 import './agents.css'
@@ -538,6 +538,14 @@ export function AgentPage() {
             </>
           ) : null}
           {a.landed ? ` · landed on ${a.landed.branch}${a.landed.outcome === 'queued' ? ' (waiting for that workspace)' : ''}` : ''}
+          {(a.state !== 'discarded' || a.result?.commit) && (
+            <>
+              {' · '}
+              <Link className="rv-code-link" to={codeLink(`agent:${a.id}`)} title="Browse every file of the agent's worktree, as it is now">
+                Browse code
+              </Link>
+            </>
+          )}
         </p>
       </div>
 
@@ -602,7 +610,7 @@ export function AgentPage() {
                   <span className="mono">{f.path}</span>
                   <span className="muted">{open === f.path ? '▾' : '▸'}</span>
                 </button>
-                {open === f.path && <DiffView base={ref.git(a.start.commit)} head={ref.git(a.result!.commit!)} path={f.path} kind={f.kind} />}
+                {open === f.path && <DiffView base={ref.git(a.start.commit)} head={ref.git(a.result!.commit!)} path={f.path} kind={f.kind} codeRef={`agent:${a.id}`} />}
               </div>
             ))}
           </div>

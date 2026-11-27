@@ -9,6 +9,7 @@
 //! fall through to `git blame` of that commit.
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::process::{Command, Stdio};
 
 use serde::Serialize;
@@ -161,10 +162,19 @@ fn map_to_commit(repo: &HostRepo, commit: &str, path: &str, text: &[String]) -> 
 
 /// `git blame --line-porcelain` of `path` at `commit`: per line, its origin.
 fn git_blame(repo: &HostRepo, commit: &str, path: &str) -> Vec<Origin> {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(&repo.workdir)
-        .args(["blame", "--line-porcelain", commit, "--", path])
+    git_blame_in(&repo.workdir, Some(commit), path)
+}
+
+/// [`git_blame`] in any git checkout; without a commit, of the file as it
+/// is in the working tree (lines not committed yet carry the zero commit).
+fn git_blame_in(dir: &Path, commit: Option<&str>, path: &str) -> Vec<Origin> {
+    let mut cmd = Command::new("git");
+    cmd.arg("-C").arg(dir).args(["blame", "--line-porcelain"]);
+    if let Some(c) = commit {
+        cmd.arg(c);
+    }
+    let out = cmd
+        .args(["--", path])
         .stdin(Stdio::null())
         .stderr(Stdio::null())
         .output();
@@ -197,6 +207,62 @@ fn git_blame(repo: &HostRepo, commit: &str, path: &str) -> Vec<Origin> {
         }
     }
     lines
+}
+
+/// Blame of `path` by git alone, for refs that are git commits or git
+/// checkouts (a branch tip, main, an agent's worktree): `commit` in the
+/// checkout at `dir`, or its working tree when `None`. Lines are read from
+/// the blamed file itself.
+pub fn blame_git(dir: &Path, commit: Option<&str>, path: &str) -> Result<Blame> {
+    let path = crate::objects::tree_path(path);
+    let text = match commit {
+        Some(c) => {
+            let out = Command::new("git")
+                .arg("-C")
+                .arg(dir)
+                .args(["show", &format!("{c}:{path}")])
+                .stdin(Stdio::null())
+                .stderr(Stdio::null())
+                .output()
+                .map_err(|e| Error::Spawn {
+                    program: "git".into(),
+                    source: e,
+                })?;
+            if !out.status.success() {
+                return Err(Error::NotFound {
+                    kind: "file",
+                    id: format!("{c}:{path}"),
+                });
+            }
+            String::from_utf8_lossy(&out.stdout).into_owned()
+        }
+        None => std::fs::read_to_string(dir.join(&path)).map_err(|_| Error::NotFound {
+            kind: "file",
+            id: path.clone(),
+        })?,
+    };
+    let origins = git_blame_in(dir, commit, &path);
+    let lines = text
+        .lines()
+        .enumerate()
+        .map(|(i, t)| BlameLine {
+            line: i + 1,
+            text: t.to_string(),
+            origin: origins.get(i).cloned().unwrap_or(Origin::Git {
+                commit: "0".repeat(40),
+                author: "Not Committed Yet".into(),
+                time: 0,
+                summary: String::new(),
+            }),
+        })
+        .collect();
+    Ok(Blame {
+        attempt: 0,
+        path,
+        snapshot: None,
+        working: commit.is_none(),
+        lines,
+    })
 }
 
 impl Space {

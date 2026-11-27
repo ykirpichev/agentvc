@@ -10,7 +10,7 @@ import { useLive } from '../api/live'
 import type { Graph, GraphAttempt } from '../api/types'
 import { useResource } from '../api/useResource'
 import { Empty, ErrorNote, Skeleton } from '../components/bits'
-import { commitLink, taskLink, versionLink } from '../core/links'
+import { codeLink, commitLink, taskLink, versionLink } from '../core/links'
 import { useReview } from './reviewContext'
 import { ConflictResolver } from '../components/ConflictResolver'
 import { DiffView } from '../components/DiffView'
@@ -224,7 +224,10 @@ export function VersionReview() {
         <div>
           {task && <Link to={taskLink(task.id)} className="back">← {task.goal}</Link>}
           <h1 className="rv-title">
-            {versionName(a)} <span className="muted mono rv-id" title="agentvc attempt id">a{a.id}</span>
+            {versionName(a)} <span className="muted mono rv-id" title="agentvc attempt id">a{a.id}</span>{' '}
+            <Link className="rv-code-link" to={codeLink(`a${a.id}`)} title="Browse every file of this version">
+              Browse code
+            </Link>
           </h1>
           <p className="muted">
             {below ? (
