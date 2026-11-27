@@ -23,6 +23,35 @@ pub enum WorkspaceCmd {
     /// Name this workspace (names are unique in the repo and work wherever
     /// a workspace id does).
     Name { name: String },
+    /// Show or set how agents started in a workspace run: runner, model,
+    /// check command, permissions and how many may work at once. With no
+    /// setting flags it shows them. Agents started there inherit these.
+    Agents {
+        /// Workspace id, name or directory. Defaults to this one.
+        #[arg(long)]
+        workspace: Option<String>,
+        /// claude (Claude Code), codex, cursor or command.
+        #[arg(long)]
+        runner: Option<String>,
+        /// Shell command for the `command` runner (prompt in $AGENTVC_AGENT_PROMPT).
+        #[arg(long)]
+        command: Option<String>,
+        #[arg(long)]
+        model: Option<String>,
+        /// Check command run when an agent stops.
+        #[arg(long)]
+        check: Option<String>,
+        /// Claude Code: edits (default: edit files, ask before commands),
+        /// ask (ask before edits too) or auto (never ask).
+        #[arg(long)]
+        permissions: Option<String>,
+        /// Agents working at once in this workspace.
+        #[arg(long)]
+        max: Option<usize>,
+        /// Clear every setting first (then apply any given here).
+        #[arg(long)]
+        clear: bool,
+    },
     /// Say whether an agent is working here. Edits from other workspaces
     /// wait while one is; going idle applies them. The agent hooks do this
     /// for Claude Code and Cursor.
@@ -209,6 +238,55 @@ pub fn run(cwd: &Path, cmd: WorkspaceCmd) -> anyhow::Result<(Value, String)> {
             let r = workspace::set_name(cwd, &name)?;
             let text = format!("this workspace is {} ({})", r.name, r.id);
             (json!({ "workspace": r }), text)
+        }
+        WorkspaceCmd::Agents {
+            workspace,
+            runner,
+            command,
+            model,
+            check,
+            permissions,
+            max,
+            clear,
+        } => {
+            use agentvc_core::agent::{self, AgentSettings};
+            let given = AgentSettings {
+                runner,
+                command,
+                model,
+                check,
+                permissions,
+                max,
+            };
+            let r = if clear || !given.is_empty() {
+                let base = if clear {
+                    AgentSettings::default()
+                } else {
+                    agent::settings(cwd, workspace.as_deref())?.settings
+                };
+                agent::set_settings(cwd, workspace.as_deref(), given.over(&base))?
+            } else {
+                agent::settings(cwd, workspace.as_deref())?
+            };
+            let eff = r.settings.over(&r.defaults);
+            let or = |v: &Option<String>, d: &str| v.clone().unwrap_or_else(|| d.to_string());
+            let mut text = format!(
+                "agents in {}:\n  runner       {}\n",
+                r.workspace_name,
+                or(&eff.runner, "claude")
+            );
+            if let Some(c) = &eff.command {
+                text.push_str(&format!("  command      {c}\n"));
+            }
+            text.push_str(&format!(
+                "  model        {}\n  check        {}\n  permissions  {}\n  at once      {} (machine cap {})",
+                or(&eff.model, "default"),
+                or(&eff.check, "none"),
+                or(&eff.permissions, "edits"),
+                eff.max.map(|m| m.to_string()).unwrap_or_else(|| "no limit".into()),
+                r.machine_limit
+            ));
+            (json!(r), text)
         }
         WorkspaceCmd::State { state, by } => {
             let a = match state {

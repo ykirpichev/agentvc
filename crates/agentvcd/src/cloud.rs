@@ -33,6 +33,9 @@ pub struct CloudConfig {
     pub url: String,
     /// A machine token made on the service's home page.
     pub token: String,
+    /// Where the token came from; read again after the service refuses
+    /// it, so replacing the file is enough to rotate a token.
+    pub token_file: Option<std::path::PathBuf>,
     /// Refuse every relayed request that is not a GET.
     pub read_only: bool,
     /// Let the hosted page start, answer and land agents on this machine.
@@ -40,7 +43,7 @@ pub struct CloudConfig {
 }
 
 /// Keep a connection to the service open until the process exits.
-pub fn spawn(state: AppState, cfg: CloudConfig) -> tokio::task::JoinHandle<()> {
+pub fn spawn(state: AppState, mut cfg: CloudConfig) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let app = crate::router(state.clone());
         let mut backoff = Duration::from_secs(1);
@@ -51,9 +54,16 @@ pub fn spawn(state: AppState, cfg: CloudConfig) -> tokio::task::JoinHandle<()> {
                     backoff = Duration::from_secs(1);
                 }
                 Err(Failure::Rejected(msg)) => {
-                    // A wrong or revoked token will not fix itself quickly.
+                    // A wrong or revoked token will not fix itself quickly,
+                    // but a new one may be written to the token file.
                     eprintln!("agentvcd: cloud refused this daemon: {msg}");
-                    backoff = Duration::from_secs(300);
+                    if wait_for_new_token(&mut cfg, Duration::from_secs(300)).await {
+                        eprintln!("agentvcd: the token file changed; reconnecting");
+                        backoff = Duration::from_secs(1);
+                        continue;
+                    }
+                    backoff = Duration::from_secs(1);
+                    continue;
                 }
                 Err(Failure::Network(msg)) => {
                     eprintln!(
@@ -67,6 +77,27 @@ pub fn spawn(state: AppState, cfg: CloudConfig) -> tokio::task::JoinHandle<()> {
             backoff = (backoff * 2).min(Duration::from_secs(60));
         }
     })
+}
+
+/// Wait up to `max` for the token file to hold a different token; true if
+/// it did (and `cfg` now has it).
+async fn wait_for_new_token(cfg: &mut CloudConfig, max: Duration) -> bool {
+    let step = Duration::from_secs(5);
+    let mut waited = Duration::ZERO;
+    while waited < max {
+        tokio::time::sleep(step).await;
+        waited += step;
+        let Some(p) = &cfg.token_file else { continue };
+        let Ok(t) = std::fs::read_to_string(p) else {
+            continue;
+        };
+        let t = t.trim();
+        if !t.is_empty() && t != cfg.token {
+            cfg.token = t.to_string();
+            return true;
+        }
+    }
+    false
 }
 
 enum Failure {

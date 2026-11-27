@@ -49,8 +49,46 @@ use crate::stack::{canon, slug, Window};
 use crate::workspace::{self, EditOutcome, Op, RequestStatus};
 
 /// Agents that may work at once on one machine, unless
-/// `git config agentvc.agents-max` says otherwise.
-pub const DEFAULT_LIMIT: usize = 4;
+/// `git config agentvc.agents-max` says otherwise. A safety cap across all
+/// workspaces; each workspace can set a lower `max` of its own.
+pub const DEFAULT_LIMIT: usize = 8;
+
+/// Runners an agent can use.
+pub const RUNNERS: &[&str] = &["claude", "codex", "cursor", "command"];
+/// Permission levels for Claude Code agents.
+pub const PERMISSIONS: &[&str] = &["edits", "ask", "auto"];
+
+/// How agents started in one workspace run. Kept in the workspace's
+/// `stack.json` (so it is published with the workspace); every field is
+/// optional and falls back to repo `git config agentvc.agent-*`, then to
+/// the defaults.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentSettings {
+    /// `claude` (Claude Code, default), `codex`, `cursor` or `command`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runner: Option<String>,
+    /// The shell command of the `command` runner.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Check command run when an agent stops.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub check: Option<String>,
+    /// Claude Code: `edits` (edit files, ask before commands; default),
+    /// `ask` (ask before edits too) or `auto` (never ask).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permissions: Option<String>,
+    /// Agents working at once in this workspace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max: Option<usize>,
+}
+
+impl AgentSettings {
+    pub fn is_empty(&self) -> bool {
+        *self == AgentSettings::default()
+    }
+}
 /// Environment variable that points the MCP tools at their agent.
 pub const ENV_DIR: &str = "AGENTVC_AGENT_DIR";
 /// Environment variable naming the Claude Code program (default `claude`).
@@ -265,8 +303,11 @@ pub struct Agent {
     /// The agent's own branch, checked out in `worktree`.
     pub branch: String,
     pub worktree: PathBuf,
-    /// `claude` or `command`.
+    /// `claude`, `codex`, `cursor` or `command`.
     pub runner: String,
+    /// Claude Code permission level (`edits`, `ask` or `auto`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permissions: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -639,8 +680,147 @@ pub struct StartRequest {
     pub check: Option<String>,
     /// A shell command to run instead of Claude Code.
     pub command: Option<String>,
+    /// `claude`, `codex`, `cursor` or `command`; defaults to the workspace's.
+    pub runner: Option<String>,
+    /// Claude Code permission level; defaults to the workspace's.
+    pub permissions: Option<String>,
     /// The `agentvc` program, for the worker and the MCP server.
     pub exe: PathBuf,
+}
+
+fn check_choice(what: &str, v: &str, allowed: &[&str]) -> Result<()> {
+    if allowed.contains(&v) {
+        Ok(())
+    } else {
+        Err(agent_err_with(
+            "bad_setting",
+            format!("{what} must be one of {}, not {v}", allowed.join(", ")),
+            json!({ "setting": what, "allowed": allowed }),
+        ))
+    }
+}
+
+impl AgentSettings {
+    /// Refuse values no agent could run with.
+    pub fn validate(&self) -> Result<()> {
+        if let Some(r) = &self.runner {
+            check_choice("runner", r, RUNNERS)?;
+        }
+        if let Some(p) = &self.permissions {
+            check_choice("permissions", p, PERMISSIONS)?;
+        }
+        if self.max == Some(0) {
+            return Err(agent_err("bad_setting", "max must be at least 1"));
+        }
+        Ok(())
+    }
+
+    /// Fields set here win over `under`'s.
+    pub fn over(&self, under: &AgentSettings) -> AgentSettings {
+        AgentSettings {
+            runner: self.runner.clone().or_else(|| under.runner.clone()),
+            command: self.command.clone().or_else(|| under.command.clone()),
+            model: self.model.clone().or_else(|| under.model.clone()),
+            check: self.check.clone().or_else(|| under.check.clone()),
+            permissions: self
+                .permissions
+                .clone()
+                .or_else(|| under.permissions.clone()),
+            max: self.max.or(under.max),
+        }
+    }
+}
+
+/// The repo-wide defaults from `git config agentvc.agent-*`.
+fn repo_defaults(w: &Window) -> AgentSettings {
+    AgentSettings {
+        runner: config(w, "agentvc.agent-runner"),
+        command: config(w, "agentvc.agent-command"),
+        model: config(w, "agentvc.agent-model"),
+        check: config(w, "agentvc.agent-check"),
+        permissions: config(w, "agentvc.agent-permissions"),
+        max: None,
+    }
+}
+
+/// One workspace's agent settings, what applies when they are not set, and
+/// the machine's cap.
+#[derive(Clone, Debug, Serialize)]
+pub struct WorkspaceAgentSettings {
+    pub workspace: String,
+    pub workspace_name: String,
+    /// What the workspace sets.
+    pub settings: AgentSettings,
+    /// Repo defaults (`git config agentvc.agent-*`) under them.
+    pub defaults: AgentSettings,
+    /// Agents working at once on this machine, across all workspaces.
+    pub machine_limit: usize,
+}
+
+/// The agent settings of `workspace` (id, name or directory; default: the
+/// one containing `cwd`).
+pub fn settings(cwd: &Path, workspace: Option<&str>) -> Result<WorkspaceAgentSettings> {
+    let here = Window::open(cwd)?;
+    let target = workspace
+        .map(str::to_string)
+        .unwrap_or_else(|| here.path().to_string_lossy().into_owned());
+    let ws = workspace::find_local(&here, &target)?;
+    let w = Window::open(&ws.path)?;
+    Ok(WorkspaceAgentSettings {
+        workspace: ws.record.id.clone(),
+        workspace_name: ws.record.name.clone(),
+        settings: w.state.agents.clone(),
+        defaults: repo_defaults(&w),
+        machine_limit: limit(&w),
+    })
+}
+
+/// Replace the agent settings of `workspace`. Empty strings clear a field.
+pub fn set_settings(
+    cwd: &Path,
+    workspace: Option<&str>,
+    new: AgentSettings,
+) -> Result<WorkspaceAgentSettings> {
+    let blank = |v: Option<String>| v.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    let new = AgentSettings {
+        runner: blank(new.runner),
+        command: blank(new.command),
+        model: blank(new.model),
+        check: blank(new.check),
+        permissions: blank(new.permissions),
+        max: new.max,
+    };
+    new.validate()?;
+    if new.runner.as_deref() == Some("command") && new.command.is_none() {
+        return Err(agent_err(
+            "command_required",
+            "the command runner needs a command",
+        ));
+    }
+    let here = Window::open(cwd)?;
+    let target = workspace
+        .map(str::to_string)
+        .unwrap_or_else(|| here.path().to_string_lossy().into_owned());
+    let ws = workspace::find_local(&here, &target)?;
+    {
+        let mut w = Window::open(&ws.path)?;
+        let _lock = workspace::lock(&w.git_dir)?;
+        // Re-read under the lock so a stack edit in between is kept.
+        w = Window::open(&ws.path)?;
+        w.state.agents = new;
+        w.save()?;
+    }
+    settings(cwd, Some(&ws.record.id))
+}
+
+/// The settings of the workspace `id` of the repo containing `w`, if it is
+/// on this machine.
+fn workspace_settings(w: &Window, id: &str) -> AgentSettings {
+    workspace::find_local(w, id)
+        .ok()
+        .and_then(|ws| Window::open(&ws.path).ok())
+        .map(|ws| ws.state.agents)
+        .unwrap_or_default()
 }
 
 /// Start an agent: make its worktree and branch, record it and launch its
@@ -658,6 +838,26 @@ pub fn start(cwd: &Path, req: &StartRequest) -> Result<Agent> {
     };
     let ws = workspace::find_local(&here, &target)?;
     let w = Window::open(&ws.path)?;
+    let asked = AgentSettings {
+        runner: req
+            .runner
+            .clone()
+            .or_else(|| req.command.as_ref().map(|_| "command".to_string())),
+        command: req.command.clone(),
+        model: req.model.clone(),
+        check: req.check.clone(),
+        permissions: req.permissions.clone(),
+        max: None,
+    };
+    asked.validate()?;
+    let eff = asked.over(&w.state.agents).over(&repo_defaults(&w));
+    let runner = eff.runner.clone().unwrap_or_else(|| "claude".into());
+    if runner == "command" && eff.command.is_none() {
+        return Err(agent_err(
+            "command_required",
+            "the command runner needs a command (--command, or the workspace's settings)",
+        ));
+    }
     let trunk = w.state.trunk.clone();
     let from = req
         .from
@@ -766,18 +966,15 @@ pub fn start(cwd: &Path, req: &StartRequest) -> Result<Agent> {
         mode: req.mode,
         branch,
         worktree: canon(&wt),
-        runner: if req.command.is_some() {
-            "command"
+        command: if runner == "command" {
+            eff.command.clone()
         } else {
-            "claude"
-        }
-        .into(),
-        command: req.command.clone(),
-        model: req.model.clone(),
-        check: req
-            .check
-            .clone()
-            .or_else(|| config(&w, "agentvc.agent-check")),
+            None
+        },
+        runner,
+        permissions: eff.permissions.clone(),
+        model: eff.model.clone(),
+        check: eff.check.clone(),
         machine: workspace::machine(),
         state: AgentState::Queued,
         worker_pid: None,
@@ -1478,13 +1675,24 @@ fn on_stream_line(dir: &Path, line: &str) {
     }
 }
 
+/// The Codex CLI, non-interactive. `AGENTVC_CODEX` names another program.
+const CODEX: &str = r#"exec "${AGENTVC_CODEX:-codex}" exec --full-auto ${AGENTVC_AGENT_MODEL:+-m "$AGENTVC_AGENT_MODEL"} "$AGENTVC_AGENT_PROMPT""#;
+/// The Cursor CLI in print mode. `AGENTVC_CURSOR` names another program.
+const CURSOR: &str = r#"exec "${AGENTVC_CURSOR:-cursor-agent}" -p --force --output-format text ${AGENTVC_AGENT_MODEL:+--model "$AGENTVC_AGENT_MODEL"} "$AGENTVC_AGENT_PROMPT""#;
+
 /// The command line for one turn of the agent.
 fn turn_command(a: &Agent, dir: &Path, exe: &Path, prompt: &str) -> Command {
     let mut cmd = match a.runner.as_str() {
-        "command" => {
+        "command" | "codex" | "cursor" => {
+            let script = match a.runner.as_str() {
+                "codex" => CODEX,
+                "cursor" => CURSOR,
+                _ => a.command.as_deref().unwrap_or("true"),
+            };
             let mut c = Command::new("sh");
-            c.arg("-c").arg(a.command.as_deref().unwrap_or("true"));
+            c.arg("-c").arg(script);
             c.env("AGENTVC_AGENT_PROMPT", prompt)
+                .env("AGENTVC_AGENT_MODEL", a.model.as_deref().unwrap_or(""))
                 .env("AGENTVC_BIN", exe);
             c
         }
@@ -1500,7 +1708,14 @@ fn turn_command(a: &Agent, dir: &Path, exe: &Path, prompt: &str) -> Command {
             c.arg("-p")
                 .arg(prompt)
                 .args(["--output-format", "stream-json", "--verbose"])
-                .args(["--permission-mode", "acceptEdits"])
+                .args([
+                    "--permission-mode",
+                    match a.permissions.as_deref() {
+                        Some("ask") => "default",
+                        Some("auto") => "bypassPermissions",
+                        _ => "acceptEdits",
+                    },
+                ])
                 .arg("--mcp-config")
                 .arg(mcp.to_string())
                 .args(["--permission-prompt-tool", "mcp__agentvc__approve"])
@@ -1647,9 +1862,8 @@ pub fn work(dir: &Path, exe: &Path) -> Result<Agent> {
     // happen under one lock on the agents directory, so two workers that
     // start together can't both take the last slot.
     let common = dir.parent().map(Path::to_path_buf).unwrap_or_default();
-    let max = Window::open(&a.worktree)
-        .map(|w| limit(&w))
-        .unwrap_or(DEFAULT_LIMIT);
+    let wt = Window::open(&a.worktree).ok();
+    let max = wt.as_ref().map(limit).unwrap_or(DEFAULT_LIMIT);
     let (a, began) = loop {
         let cur = read_agent(dir)?;
         if cur.stop_requested {
@@ -1662,7 +1876,7 @@ pub fn work(dir: &Path, exe: &Path) -> Result<Agent> {
         }
         let slots = lock_record(&common)?;
         let here = workspace::machine();
-        let working = fs::read_dir(&common)
+        let busy: Vec<Agent> = fs::read_dir(&common)
             .map(|rd| {
                 rd.flatten()
                     .filter_map(|e| read_agent(&e.path()).ok())
@@ -1672,10 +1886,16 @@ pub fn work(dir: &Path, exe: &Path) -> Result<Agent> {
                             && o.state.is_working()
                             && o.worker_pid.is_some_and(pid_alive)
                     })
-                    .count()
+                    .collect()
             })
-            .unwrap_or(0);
-        if working < max {
+            .unwrap_or_default();
+        // The workspace's own cap, read each time so a change applies to
+        // agents already waiting.
+        let ws_max = wt
+            .as_ref()
+            .and_then(|w| workspace_settings(w, &cur.workspace).max);
+        let in_ws = busy.iter().filter(|o| o.workspace == cur.workspace).count();
+        if busy.len() < max && ws_max.is_none_or(|m| in_ws < m) {
             let began = now();
             let a = update(dir, |a| {
                 a.state = AgentState::Running;
@@ -1920,8 +2140,90 @@ mod tests {
             model: None,
             check: None,
             command: Some(command.into()),
+            runner: None,
+            permissions: None,
             exe: PathBuf::new(),
         }
+    }
+
+    #[test]
+    fn agents_inherit_their_workspaces_settings() {
+        let (_t, work) = repo();
+        // Nothing set: Claude Code, repo check from git config.
+        git(&work, &["config", "agentvc.agent-check", "true"]);
+        let s = settings(&work, None).unwrap();
+        assert!(s.settings.is_empty());
+        assert_eq!(s.defaults.check.as_deref(), Some("true"));
+        assert_eq!(s.machine_limit, DEFAULT_LIMIT);
+
+        // Bad values are refused.
+        let bad = |x: AgentSettings| set_settings(&work, None, x).unwrap_err().code();
+        assert_eq!(
+            bad(AgentSettings {
+                runner: Some("vim".into()),
+                ..Default::default()
+            }),
+            "bad_setting"
+        );
+        assert_eq!(
+            bad(AgentSettings {
+                max: Some(0),
+                ..Default::default()
+            }),
+            "bad_setting"
+        );
+        assert_eq!(
+            bad(AgentSettings {
+                runner: Some("command".into()),
+                ..Default::default()
+            }),
+            "command_required"
+        );
+
+        let s = set_settings(
+            &work,
+            None,
+            AgentSettings {
+                runner: Some("command".into()),
+                command: Some("printf 'ws\\n' > ws.txt".into()),
+                check: Some("grep -q ws ws.txt".into()),
+                model: Some("  ".into()),
+                permissions: Some("auto".into()),
+                max: Some(2),
+            },
+        )
+        .unwrap();
+        assert_eq!(s.settings.model, None, "blank clears");
+        // It survives stack edits and is part of the workspace's info.
+        let mut w = Window::open(&work).unwrap();
+        fs::write(work.join("d.txt"), "d\n").unwrap();
+        git(&work, &["add", "."]);
+        w.create(Some("more"), Some("more"), false).unwrap();
+        let w = Window::open(&work).unwrap();
+        assert_eq!(w.state.agents.max, Some(2));
+
+        // An agent started without its own settings uses the workspace's.
+        let a = start_inline(
+            &work,
+            StartRequest {
+                command: None,
+                ..req("Write ws", "unused")
+            },
+        );
+        assert_eq!(a.runner, "command");
+        assert_eq!(a.permissions.as_deref(), Some("auto"));
+        assert_eq!(a.check.as_deref(), Some("grep -q ws ws.txt"));
+        assert_eq!(a.state, AgentState::Ready, "{a:?}");
+
+        // The request wins over the workspace.
+        let a = start_inline(
+            &work,
+            StartRequest {
+                check: Some("false".into()),
+                ..req("Own check", "true")
+            },
+        );
+        assert_eq!(a.state, AgentState::TestsFailing, "{a:?}");
     }
 
     #[test]
@@ -2039,6 +2341,8 @@ mod tests {
         let a = start(
             &work,
             &StartRequest {
+                runner: None,
+                permissions: None,
                 exe: PathBuf::from("true"),
                 ..req("Ask", "true")
             },
@@ -2096,6 +2400,8 @@ echo '{"type":"result","total_cost_usd":0.25,"num_turns":3,"is_error":false,"res
         let a = start(
             &work,
             &StartRequest {
+                runner: None,
+                permissions: None,
                 exe: PathBuf::from("true"),
                 ..req("Stream", "true")
             },

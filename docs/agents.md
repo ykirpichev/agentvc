@@ -88,10 +88,45 @@ A revision of a branch that moved is refused with `branch_moved`.
 
 ## Settings
 
+Agent settings belong to the **workspace**: each workspace says how agents
+started in it run, and every agent started there inherits that. Set them on
+the workspace's main page in the review UI (click main under the workspace),
+or:
+
+```sh
+agentvc workspace agents                                   # show
+agentvc workspace agents --runner claude --model opus --check "cargo test" --permissions edits --max 3
+agentvc workspace agents --workspace dates --runner codex  # another workspace
+agentvc workspace agents --clear                           # back to the defaults
+```
+
+| Setting | Values | Meaning |
+| --- | --- | --- |
+| `runner` | `claude` (default), `codex`, `cursor`, `command` | what runs the agent |
+| `command` | shell | for `command`: the prompt is in `$AGENTVC_AGENT_PROMPT` |
+| `model` | any | passed to the runner |
+| `check` | shell | run when an agent stops; failing makes it "Tests failing" |
+| `permissions` | `edits` (default), `ask`, `auto` | Claude Code: edit files and ask before commands; ask before every change; never ask |
+| `max` | number | agents working at once in this workspace; the rest wait |
+
+They are kept in the workspace's `stack.json`, so `stack submit` publishes
+them with the workspace and other machines see them. A start can override
+any of them (`agent start --runner/--model/--check/--permissions`, or "Just
+for this agent" in the UI). Unset fields fall back to the repo's
+`git config` below, then the defaults. Through the hosted service nobody can
+set `command` or `check` (`remote_shell_off`), even with
+`--allow-remote-agents`.
+
+Codex runs as `codex exec --full-auto` and Cursor as `cursor-agent -p
+--force`; `AGENTVC_CODEX` and `AGENTVC_CURSOR` name other programs.
+
+Repo-wide defaults and the machine's cap:
+
 | `git config` | Default | Meaning |
 | --- | --- | --- |
 | `agentvc.agent-check` | none | check command run when an agent stops, e.g. `cargo test --workspace` |
-| `agentvc.agents-max` | 4 | agents working at once on this machine; the rest wait as `queued` |
+| `agentvc.agent-runner`, `-model`, `-permissions`, `-command` | | defaults for the workspace settings above |
+| `agentvc.agents-max` | 8 | safety cap: agents working at once on this machine across all workspaces; the rest wait as `queued` |
 | `agentvc.agent-worktrees` | `~/.agentvc/worktrees/<repo>-<hash>` | where agent worktrees go (never under `.git`: Claude Code refuses to edit there) |
 
 ## Where things live
@@ -106,7 +141,8 @@ in their git directory, so they never show up as workspaces.
 
 - `GET /api/agents[?all=1]`: agents newest first, plus `needs_you`,
   `working`, `limit`, `machine` and `can_steer`.
-- `POST /api/agents` with `{workspace, from, at?, prompt, mode: "new"|"revise", model?, check?, command?}`.
+- `POST /api/agents` with `{workspace, from, at?, prompt, mode: "new"|"revise", runner?, model?, check?, permissions?, command?}`.
+- `GET /api/workspaces/{id}/agent-settings`: `{settings, defaults, machine_limit}`; `PUT` (or `POST`) the settings to replace them. `/api/workspaces` also carries each workspace's `agent_settings`.
 - `GET /api/agents/{id}`: `{agent, steps}`.
 - `POST /api/agents/{id}/reply {text}`, `/approve`, `/deny {reason?}`,
   `/stop`, `/land`, `/discard`.
@@ -124,4 +160,5 @@ says how to allow it.
 `prompt_required`, `no_branch`, `bad_ref`, `bad_mode`, `not_in_stack`,
 `agent_busy`, `needs_approval`, `no_question`, `reply_required`,
 `allow_required`, `not_running`, `not_ready`, `nothing_to_land`,
-`branch_moved`, `agent_closed`, `not_an_agent`, `remote_agents_off`.
+`branch_moved`, `agent_closed`, `not_an_agent`, `remote_agents_off`,
+`bad_setting`, `command_required`, `remote_shell_off`.

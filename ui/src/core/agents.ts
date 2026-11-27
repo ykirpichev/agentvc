@@ -1,7 +1,7 @@
 // Agents in plain words: one state each, shown as one dot and a few words,
 // and the order of the "Needs you" list. Shared by every surface.
 
-import type { Agent, AgentState } from '../api/types'
+import type { Agent, AgentPermissions, AgentRunner, AgentSettings, AgentState } from '../api/types'
 
 export type AgentTone = 'ask' | 'bad' | 'ok' | 'run' | 'mute'
 
@@ -43,3 +43,26 @@ export const agentLink = (id: string) => `/review/a/${encodeURIComponent(id)}`
 
 /** Where its work goes, in words. */
 export const resultWords = (a: Agent) => (a.mode === 'revise' ? `new version of ${a.start.branch}` : `new branch on ${a.start.branch}`)
+
+export const RUNNER_WORDS: Record<AgentRunner, string> = {
+  claude: 'Claude Code',
+  codex: 'Codex',
+  cursor: 'Cursor',
+  command: 'Custom command',
+}
+export const PERMISSION_WORDS: Record<AgentPermissions, string> = {
+  edits: 'Edit files, ask before commands',
+  ask: 'Ask before every change',
+  auto: 'Never ask',
+}
+
+/** One line saying how agents run in a workspace. */
+export function settingsLine(s: AgentSettings | undefined): string {
+  const runner = s?.runner ?? 'claude'
+  const parts = [RUNNER_WORDS[runner]]
+  if (s?.model) parts.push(s.model)
+  if (s?.check) parts.push(`checks: ${s.check}`)
+  if (runner === 'claude' && s?.permissions && s.permissions !== 'edits') parts.push(PERMISSION_WORDS[s.permissions].toLowerCase())
+  if (s?.max) parts.push(`up to ${s.max} at once`)
+  return parts.join(' · ')
+}

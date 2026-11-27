@@ -123,6 +123,7 @@ async fn main() -> ExitCode {
             Ok(token) => Some(agentvcd::cloud::CloudConfig {
                 url: url.clone(),
                 token,
+                token_file: cli.cloud_token_file.clone(),
                 read_only: cli.cloud_read_only,
                 allow_agents: cli.allow_remote_agents,
             }),

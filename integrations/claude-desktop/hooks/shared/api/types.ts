@@ -594,6 +594,8 @@ export interface WorkspaceInfo {
   checkout: string
   /** In another checkout (folder) of this space on this machine. */
   other_checkout: boolean
+  /** How agents started here run; empty fields fall back to the repo's defaults. */
+  agent_settings?: AgentSettings
 }
 
 export interface WorkspaceList {
@@ -679,6 +681,7 @@ export interface Agent {
   branch: string
   worktree: string
   runner: string
+  permissions?: AgentPermissions
   model?: string
   check?: string
   machine: string
@@ -727,4 +730,28 @@ export interface StartAgent {
   mode: 'new' | 'revise'
   model?: string
   check?: string
+  runner?: AgentRunner
+  permissions?: AgentPermissions
+}
+
+export type AgentRunner = 'claude' | 'codex' | 'cursor' | 'command'
+export type AgentPermissions = 'edits' | 'ask' | 'auto'
+
+/** `agentvc workspace agents`: how agents started in a workspace run. */
+export interface AgentSettings {
+  runner?: AgentRunner
+  command?: string
+  model?: string
+  check?: string
+  permissions?: AgentPermissions
+  max?: number
+}
+
+export interface WorkspaceAgentSettings {
+  workspace: string
+  workspace_name: string
+  settings: AgentSettings
+  /** Repo defaults (git config agentvc.agent-*) under the workspace's. */
+  defaults: AgentSettings
+  machine_limit: number
 }

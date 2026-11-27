@@ -1041,6 +1041,8 @@ pub struct WorkspaceInfo {
     /// It belongs to another checkout of this space on this machine.
     #[serde(default)]
     pub other_checkout: bool,
+    /// How agents started here run (`agentvc workspace agents`).
+    pub agent_settings: crate::agent::AgentSettings,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -1228,6 +1230,7 @@ fn list_group(
             requests: requests(&l.git_dir),
             checkout: l.checkout.clone(),
             other_checkout: l.other_checkout,
+            agent_settings: w.state.agents.clone(),
         });
     }
     Ok(())
@@ -1471,6 +1474,7 @@ fn remote_workspaces(w: &Window, locals: &[Local]) -> Result<Vec<WorkspaceInfo>>
             requests: Vec::new(),
             checkout: rec.path.clone(),
             other_checkout: false,
+            agent_settings: state.map(|s| s.agents).unwrap_or_default(),
         });
     }
     Ok(out)
