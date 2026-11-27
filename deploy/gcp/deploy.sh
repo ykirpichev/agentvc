@@ -20,7 +20,11 @@ set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../.." && pwd)
 state="$here/.state"
+# Settings given on the command line win over the saved state, so
+# `DOMAIN=new.name deploy.sh up` moves the service to a new name.
+given_domain=${DOMAIN:-}
 [ -f "$state" ] && . "$state"
+DOMAIN=${given_domain:-${DOMAIN:-}}
 # GITHUB_CLIENT_ID / GITHUB_CLIENT_SECRET can live here (chmod 600, not
 # committed) instead of the command line.
 secrets="$here/.secrets"
@@ -174,6 +178,7 @@ ENV
       --service-account="$sa" --scopes=cloud-platform \
       --metadata=enable-oslogin=TRUE --metadata-from-file="$files"
   fi
+  save
   echo "started; the first boot installs Docker and gets a certificate (a few minutes)."
   echo "check with: $0 status"
 }
