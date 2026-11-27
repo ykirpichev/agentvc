@@ -49,10 +49,22 @@ pub(crate) fn routes() -> Router<AppState> {
         .route("/agents/{id}/stop", post(stop))
         .route("/agents/{id}/land", post(land))
         .route("/agents/{id}/discard", post(discard))
+        .route("/agent-permissions", get(permissions))
         .route(
             "/workspaces/{id}/agent-settings",
             get(get_settings).put(put_settings).post(put_settings),
         )
+}
+
+/// What agents may do, per workspace and per open agent.
+async fn permissions(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+) -> ApiResult<agent::PermissionsReport> {
+    // It names files on this machine; not for the hosted service.
+    local_or_allowed(&headers)?;
+    let dir = st.workdir().to_path_buf();
+    Ok(Json(blocking(move || agent::permissions(&dir)).await?))
 }
 
 async fn get_settings(
@@ -77,6 +89,9 @@ async fn put_settings(
     if relayed(&headers) && (b.command.is_some() || b.check.is_some()) {
         return Err(remote_shell_off());
     }
+    if relayed(&headers) && b.permissions.as_deref() == Some("bypass") {
+        return Err(remote_bypass_off());
+    }
     let dir = st.workdir().to_path_buf();
     let r = blocking(move || agent::set_settings(&dir, Some(&id), b)).await?;
     st.poke_workspaces();
@@ -92,6 +107,15 @@ fn remote_shell_off() -> ApiError {
         StatusCode::FORBIDDEN,
         "remote_shell_off",
         "commands and check commands can only be set on this machine, not through the hosted service".into(),
+    )
+}
+
+fn remote_bypass_off() -> ApiError {
+    ApiError::new(
+        StatusCode::FORBIDDEN,
+        "remote_bypass_off",
+        "agents can only be set to never ask on this machine, not through the hosted service"
+            .into(),
     )
 }
 
@@ -187,6 +211,9 @@ async fn start(
     // runner and check; it never brings shell commands of its own.
     if relayed(&headers) && (b.command.is_some() || b.check.is_some()) {
         return Err(remote_shell_off());
+    }
+    if relayed(&headers) && b.permissions.as_deref() == Some("bypass") {
+        return Err(remote_bypass_off());
     }
     let dir = st.workdir().to_path_buf();
     let req = StartRequest {

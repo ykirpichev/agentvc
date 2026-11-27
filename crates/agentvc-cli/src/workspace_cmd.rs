@@ -41,10 +41,15 @@ pub enum WorkspaceCmd {
         /// Check command run when an agent stops.
         #[arg(long)]
         check: Option<String>,
-        /// Claude Code: edits (default: edit files, ask before commands),
-        /// ask (ask before edits too) or auto (never ask).
+        /// Claude Code: auto (default: Claude Code's auto mode, risky steps
+        /// come to you), edits (edit files, ask before commands), ask (ask
+        /// before edits too) or bypass (never ask, no checks).
         #[arg(long)]
         permissions: Option<String>,
+        /// Claude Code: run agents' commands in its sandbox (writes only
+        /// inside the agent's worktree): true or false.
+        #[arg(long)]
+        sandbox: Option<bool>,
         /// Agents working at once in this workspace.
         #[arg(long)]
         max: Option<usize>,
@@ -246,6 +251,7 @@ pub fn run(cwd: &Path, cmd: WorkspaceCmd) -> anyhow::Result<(Value, String)> {
             model,
             check,
             permissions,
+            sandbox,
             max,
             clear,
         } => {
@@ -256,6 +262,7 @@ pub fn run(cwd: &Path, cmd: WorkspaceCmd) -> anyhow::Result<(Value, String)> {
                 model,
                 check,
                 permissions,
+                sandbox,
                 max,
             };
             let r = if clear || !given.is_empty() {
@@ -279,10 +286,11 @@ pub fn run(cwd: &Path, cmd: WorkspaceCmd) -> anyhow::Result<(Value, String)> {
                 text.push_str(&format!("  command      {c}\n"));
             }
             text.push_str(&format!(
-                "  model        {}\n  check        {}\n  permissions  {}\n  at once      {} (machine cap {})",
+                "  model        {}\n  check        {}\n  permissions  {}\n  sandbox      {}\n  at once      {} (machine cap {})",
                 or(&eff.model, "default"),
                 or(&eff.check, "none"),
-                or(&eff.permissions, "edits"),
+                or(&eff.permissions, agent::DEFAULT_PERMISSIONS),
+                if eff.sandbox.unwrap_or(false) { "on" } else { "off" },
                 eff.max.map(|m| m.to_string()).unwrap_or_else(|| "no limit".into()),
                 r.machine_limit
             ));

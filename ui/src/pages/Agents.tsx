@@ -11,7 +11,7 @@ import { useResource } from '../api/useResource'
 import { ErrorNote, Skeleton } from '../components/bits'
 import { DiffView } from '../components/DiffView'
 import { useToast } from '../components/Toaster'
-import { agentLink, agentState, agentsOn, needsYou, PERMISSION_WORDS, resultWords, RUNNER_WORDS, settingsLine, working } from '../core/agents'
+import { agentLink, agentState, agentsOn, DEFAULT_PERMISSIONS, needsYou, PERMISSION_WORDS, PERMISSIONS_LINK, resultWords, RUNNER_WORDS, settingsLine, working } from '../core/agents'
 import { branchLink } from '../core/links'
 import { duration, money, plural, timeAgo } from '../lib/format'
 import { useReview } from './reviewContext'
@@ -408,7 +408,10 @@ export function AgentSettingsForm({ workspace }: { workspace: string }) {
   return (
     <form className="ag-start ag-settings" id="agent-settings" onSubmit={(e) => void save(e)}>
       <h2 className="rv-h2">Agent settings</h2>
-      <p className="muted ag-hint">Every agent started in this workspace uses these, unless you change them when you start it.</p>
+      <p className="muted ag-hint">
+        Every agent started in this workspace uses these, unless you change them when you start it. Agents reuse your own Claude Code settings and MCP
+        servers · <Link to={PERMISSIONS_LINK}>What agents may do</Link>
+      </p>
       <div className="ag-opts">
         <label>
           Runner
@@ -436,12 +439,26 @@ export function AgentSettingsForm({ workspace }: { workspace: string }) {
           <label>
             Permissions
             <select value={s.permissions ?? ''} disabled={!steer} onChange={(e) => set({ permissions: (e.target.value || undefined) as AgentPermissions | undefined })}>
-              <option value="">Default ({PERMISSION_WORDS[defaults.permissions ?? 'edits']})</option>
+              <option value="">Default ({PERMISSION_WORDS[defaults.permissions ?? DEFAULT_PERMISSIONS]})</option>
               {(Object.keys(PERMISSION_WORDS) as AgentPermissions[]).map((p) => (
                 <option key={p} value={p}>
                   {PERMISSION_WORDS[p]}
                 </option>
               ))}
+            </select>
+          </label>
+        )}
+        {runner === 'claude' && (
+          <label>
+            Sandbox commands
+            <select
+              value={s.sandbox === undefined ? '' : s.sandbox ? 'on' : 'off'}
+              disabled={!steer}
+              onChange={(e) => set({ sandbox: e.target.value === '' ? undefined : e.target.value === 'on' })}
+            >
+              <option value="">Default ({defaults.sandbox ? 'on' : 'off'})</option>
+              <option value="on">On: commands write only in the agent's copy</option>
+              <option value="off">Off</option>
             </select>
           </label>
         )}
@@ -529,6 +546,15 @@ export function AgentPage() {
         <div><span>Cost</span>{a.cost_usd > 0 ? money(a.cost_usd) : '—'}</div>
         <div><span>Changes</span>{a.result ? `${plural(a.result.files, 'file')}, +${a.result.insertions} −${a.result.deletions}` : '—'}</div>
         <div><span>Checks</span>{a.tests ? (a.tests.passed ? 'pass' : 'fail') : 'none'}</div>
+        {a.runner === 'claude' && (
+          <div>
+            <span>Permissions</span>
+            <Link to={PERMISSIONS_LINK} title={a.claude_mode ? `Claude Code mode: ${a.claude_mode}` : undefined}>
+              {PERMISSION_WORDS[a.permissions ?? 'edits'].split(':')[0]}
+              {a.sandbox ? ', sandboxed' : ''}
+            </Link>
+          </div>
+        )}
       </div>
 
       {q && (

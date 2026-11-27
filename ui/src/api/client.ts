@@ -43,6 +43,7 @@ import type {
   StartAgent,
   AgentSettings,
   WorkspaceAgentSettings,
+  PermissionsReport,
 } from './types'
 import { apiUrl } from '../core/base'
 
@@ -167,6 +168,8 @@ export const api = {
   agentStop: (id: string) => post<{ agent: Agent }>(`/agents/${encodeURIComponent(id)}/stop`),
   agentLand: (id: string) => post<{ agent: Agent; edit: WsEditOutcome }>(`/agents/${encodeURIComponent(id)}/land`),
   agentDiscard: (id: string) => post<{ agent: Agent }>(`/agents/${encodeURIComponent(id)}/discard`),
+  /** What agents may do: per workspace, per open agent, and agentvc's guard rails. */
+  agentPermissions: () => get<PermissionsReport>('/agent-permissions'),
   agentSettings: (workspace: string) => get<WorkspaceAgentSettings>(`/workspaces/${encodeURIComponent(workspace)}/agent-settings`),
   setAgentSettings: (workspace: string, s: AgentSettings) =>
     post<WorkspaceAgentSettings>(`/workspaces/${encodeURIComponent(workspace)}/agent-settings`, s),

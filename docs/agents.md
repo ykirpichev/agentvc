@@ -95,7 +95,7 @@ or:
 
 ```sh
 agentvc workspace agents                                   # show
-agentvc workspace agents --runner claude --model opus --check "cargo test" --permissions edits --max 3
+agentvc workspace agents --runner claude --model opus --check "cargo test" --permissions auto --sandbox true --max 3
 agentvc workspace agents --workspace dates --runner codex  # another workspace
 agentvc workspace agents --clear                           # back to the defaults
 ```
@@ -106,7 +106,8 @@ agentvc workspace agents --clear                           # back to the default
 | `command` | shell | for `command`: the prompt is in `$AGENTVC_AGENT_PROMPT` |
 | `model` | any | passed to the runner |
 | `check` | shell | run when an agent stops; failing makes it "Tests failing" |
-| `permissions` | `edits` (default), `ask`, `auto` | Claude Code: edit files and ask before commands; ask before every change; never ask |
+| `permissions` | `auto` (default), `edits`, `ask`, `bypass` | Claude Code: auto mode (a safety check approves routine steps, risky ones come to you); edit files and ask before commands; ask before every change; never ask (no checks) |
+| `sandbox` | `true`, `false` (default) | Claude Code: run commands in its sandbox, so they write only inside the agent's worktree |
 | `max` | number | agents working at once in this workspace; the rest wait |
 
 They are kept in the workspace's `stack.json`, so `stack submit` publishes
@@ -114,8 +115,33 @@ them with the workspace and other machines see them. A start can override
 any of them (`agent start --runner/--model/--check/--permissions`, or "Just
 for this agent" in the UI). Unset fields fall back to the repo's
 `git config` below, then the defaults. Through the hosted service nobody can
-set `command` or `check` (`remote_shell_off`), even with
-`--allow-remote-agents`.
+set `command` or `check` (`remote_shell_off`) or choose `bypass`
+(`remote_bypass_off`), even with `--allow-remote-agents`.
+
+### Your setup and what agents may do
+
+Claude Code agents reuse your own setup, so they ask as rarely as your
+interactive sessions do. Claude Code reads your user settings
+(`~/.claude/settings.json`), your user MCP servers and the repo's checked-in
+`.claude/settings.json` and `.mcp.json` itself. Because the agent's worktree
+is at another path, agentvc passes on what is keyed by the workspace's
+checkout: its `.claude/settings.local.json` (allow rules, hooks, env) and its
+entry in `~/.claude.json` (local MCP servers, approved `.mcp.json` servers,
+`allowedTools`). `CLAUDE_CONFIG_DIR` is honoured.
+
+Guard rails on every Claude Code agent, whatever the level:
+
+- a `PreToolUse` hook (`agentvc agent guard`) refuses file edits outside the
+  agent's worktree or inside `.git`;
+- `git push` is denied; agentvc commits and lands the work after review;
+- `permissions.additionalDirectories` and `permissions.defaultMode` from your
+  local settings are not passed on.
+
+`agentvc agent permissions` (and *What agents may do* in the UI, at
+`/settings/agents`, linked from each workspace's agent settings and each
+agent's page) shows, per workspace, the level and where it comes from, the
+files and rules agents inherit, their MCP servers, and each open agent's
+mode as Claude Code reported it.
 
 Codex runs as `codex exec --full-auto` and Cursor as `cursor-agent -p
 --force`; `AGENTVC_CODEX` and `AGENTVC_CURSOR` name other programs.
@@ -125,7 +151,7 @@ Repo-wide defaults and the machine's cap:
 | `git config` | Default | Meaning |
 | --- | --- | --- |
 | `agentvc.agent-check` | none | check command run when an agent stops, e.g. `cargo test --workspace` |
-| `agentvc.agent-runner`, `-model`, `-permissions`, `-command` | | defaults for the workspace settings above |
+| `agentvc.agent-runner`, `-model`, `-permissions`, `-sandbox`, `-command` | | defaults for the workspace settings above |
 | `agentvc.agents-max` | 8 | safety cap: agents working at once on this machine across all workspaces; the rest wait as `queued` |
 | `agentvc.agent-worktrees` | `~/.agentvc/worktrees/<repo>-<hash>` | where agent worktrees go (never under `.git`: Claude Code refuses to edit there) |
 
