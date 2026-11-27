@@ -177,6 +177,7 @@ export type DaemonEvent =
   | { type: 'attempt_created'; attempt: Attempt }
   | { type: 'attempt_updated'; attempt: Attempt; previous_status: Status }
   | { type: 'snapshot_created'; snapshot: Snapshot }
+  | { type: 'agent_changed'; agent: string; state: AgentState }
   | { type: 'resync' }
 
 export interface ApiErrorBody {
@@ -636,4 +637,86 @@ export interface BranchDetail {
   current: boolean
   commits: { commit: string; subject: string; author: string; time: number }[]
   files: { path: string; kind: ChangeKind }[]
+}
+
+// ---- agents (crates/agentvcd/src/agents.rs) ---------------------------------
+
+export type AgentState =
+  | 'queued'
+  | 'running'
+  | 'asking'
+  | 'needs_approval'
+  | 'ready'
+  | 'tests_failing'
+  | 'failed'
+  | 'stopped'
+  | 'landed'
+  | 'discarded'
+
+export interface AgentQuestion {
+  id: string
+  kind: 'ask' | 'approve'
+  text: string
+  tool?: string
+  input?: unknown
+  asked_at: number
+}
+
+export interface Agent {
+  id: string
+  title: string
+  prompt: string
+  workspace: string
+  workspace_name: string
+  start: { branch: string; commit: string; trunk: boolean }
+  mode: 'new' | 'revise'
+  branch: string
+  worktree: string
+  runner: string
+  model?: string
+  check?: string
+  machine: string
+  state: AgentState
+  created_at: number
+  updated_at: number
+  started_at: number | null
+  finished_at: number | null
+  seconds: number
+  cost_usd: number
+  turns: number
+  last_step: string | null
+  question: AgentQuestion | null
+  tests: { command: string; exit_code: number | null; passed: boolean; tail: string[]; duration_ms: number } | null
+  result: { commit: string | null; files: number; insertions: number; deletions: number; paths: string[]; changes?: { path: string; kind: ChangeKind }[] } | null
+  error: string | null
+  landed: { outcome: 'applied' | 'queued'; request_id: string; branch: string; at: number } | null
+  messages: { from: 'you' | 'agent'; text: string; at: number }[]
+  stale: boolean
+  /** Rank in Needs you, 1 most urgent; null when it does not need you. */
+  urgency: number | null
+  waiting_since: number | null
+}
+
+export interface AgentList {
+  agents: Agent[]
+  needs_you: number
+  working: number
+  limit: number
+  machine: string
+}
+
+export interface AgentStep {
+  at: number
+  kind: 'text' | 'tool' | 'you' | 'question' | 'result' | 'check' | 'line'
+  text: string
+}
+
+export interface StartAgent {
+  workspace: string
+  from: string
+  at?: string
+  prompt: string
+  mode: 'new' | 'revise'
+  model?: string
+  check?: string
 }

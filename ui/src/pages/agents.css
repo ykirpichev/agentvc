@@ -1,0 +1,319 @@
+/* Agents: the Needs you home, the Start agent box and the agent page. */
+
+.ag-home {
+  margin-bottom: 28px;
+}
+.ag-count {
+  display: inline-block;
+  min-width: 22px;
+  padding: 0 7px;
+  margin-left: 6px;
+  border-radius: 11px;
+  background: var(--promoted);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 600;
+  text-align: center;
+  vertical-align: middle;
+}
+.ag-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 12px;
+}
+.ag-card {
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--faint);
+  border-radius: var(--radius);
+  background: var(--surface);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.ag-card-ask { border-left-color: var(--promoted); }
+.ag-card-bad { border-left-color: var(--failed); }
+.ag-card-ok { border-left-color: var(--passed); }
+.ag-card-run { border-left-color: var(--exploring); }
+.ag-title {
+  font-weight: 600;
+  color: var(--text);
+  text-decoration: none;
+}
+.ag-title:hover {
+  text-decoration: underline;
+}
+.ag-where {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  color: var(--text-2);
+}
+.ag-chip {
+  padding: 1px 8px;
+  border-radius: 10px;
+  font-size: 11.5px;
+  font-weight: 500;
+  background: var(--surface-2);
+  color: var(--muted);
+}
+.ag-chip-ask { background: var(--promoted-bg); color: var(--promoted); }
+.ag-chip-bad { background: var(--failed-bg); color: var(--failed); }
+.ag-chip-ok { background: var(--passed-bg); color: var(--passed); }
+.ag-chip-run { background: var(--exploring-bg); color: var(--exploring); }
+.ag-meta {
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.ag-q {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+}
+.ag-cmd {
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 240px;
+  overflow: auto;
+}
+.ag-err {
+  margin: 0;
+  color: var(--failed);
+  font-size: 13px;
+  white-space: pre-wrap;
+}
+.ag-last {
+  margin: 0;
+  font-size: 12.5px;
+}
+.ag-reply {
+  display: flex;
+  gap: 8px;
+}
+.ag-reply input,
+.ag-start textarea,
+.ag-opts input {
+  flex: 1;
+  min-width: 0;
+  padding: 6px 9px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+}
+.ag-reply input:focus,
+.ag-start textarea:focus,
+.ag-opts input:focus {
+  outline: 2px solid var(--accent-soft);
+  border-color: var(--accent);
+}
+.ag-acts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+/* Working agents, one line each. */
+.ag-lines {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  overflow: hidden;
+}
+.ag-line {
+  display: grid;
+  grid-template-columns: 8px minmax(0, 1fr) auto;
+  grid-template-areas:
+    'dot title meta'
+    '. step step';
+  column-gap: 10px;
+  row-gap: 2px;
+  align-items: center;
+  padding: 8px 12px;
+  color: inherit;
+  text-decoration: none;
+  border-top: 1px solid var(--border);
+}
+.ag-line:first-child {
+  border-top: 0;
+}
+.ag-line:hover {
+  background: var(--hover);
+}
+.ag-line > .ag-dot { grid-area: dot; }
+.ag-line-title {
+  grid-area: title;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+}
+.ag-line > .ag-meta { grid-area: meta; }
+.ag-line-step {
+  grid-area: step;
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Start agent. */
+.ag-start {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 18px 0;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+.ag-start .rv-h2 {
+  margin: 0;
+}
+.ag-start textarea {
+  min-height: 64px;
+  resize: vertical;
+  line-height: 1.4;
+}
+.ag-start-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+.ag-spacer {
+  flex: 1;
+}
+.ag-seg {
+  display: inline-flex;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+.ag-seg button {
+  padding: 4px 10px;
+  border: 0;
+  background: transparent;
+  color: var(--text-2);
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+.ag-seg button + button {
+  border-left: 1px solid var(--border-strong);
+}
+.ag-seg button.on {
+  background: var(--accent-soft);
+  color: var(--accent-text);
+  font-weight: 500;
+}
+.ag-opts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+.ag-opts label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1 1 220px;
+  font-size: 12.5px;
+  color: var(--text-2);
+}
+.ag-hint {
+  margin: 0;
+  font-size: 12px;
+}
+
+/* The agent page. */
+.ag-page section {
+  margin-top: 22px;
+}
+.ag-kv {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 24px;
+  margin: 14px 0;
+  font-size: 13px;
+}
+.ag-kv > div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.ag-kv span {
+  font-size: 11.5px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.ag-msgs {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.ag-msg {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 12px;
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  max-width: 760px;
+}
+.ag-msg-you {
+  align-self: flex-end;
+  background: var(--accent-soft);
+}
+.ag-msg-who {
+  font-size: 11.5px;
+  color: var(--muted);
+}
+.ag-msg-text {
+  white-space: pre-wrap;
+  font-size: 13.5px;
+  line-height: 1.45;
+}
+.ag-steps {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  font-size: 12.5px;
+  font-family: var(--font-mono);
+}
+.ag-steps li {
+  display: grid;
+  grid-template-columns: 76px minmax(0, 1fr);
+  gap: 8px;
+  padding: 3px 0;
+  border-top: 1px solid var(--border);
+}
+.ag-steps li:first-child {
+  border-top: 0;
+}
+.ag-step {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ag-step-tool { color: var(--text-2); }
+.ag-step-error { color: var(--failed); }

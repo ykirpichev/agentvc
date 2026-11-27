@@ -1,17 +1,19 @@
-// The sidebar: one window's stack, Graphite style (newest branch on top, main
-// at the bottom), with Sync and Undo; the other windows fold into one line
-// each, and agent work into a short list below. Click a branch to open it,
-// double-click to check it out, drag it onto another branch or main to move it.
+// The sidebar: "Needs you" on top, then every workspace's stack, Graphite
+// style (newest branch on top, main at the bottom), with Sync and Undo. Each
+// agent shows as one line under the branch it started from. Click a branch to
+// open it, double-click to check it out, drag it onto another branch or main
+// to move it.
 
 import { useMemo, useState, type DragEvent } from 'react'
 import { useLocation } from 'react-router'
 import { api } from '../api/client'
 import { useLive } from '../api/live'
-import type { TaskSummary, WorkspaceInfo, WsBranch } from '../api/types'
+import type { Agent, TaskSummary, WorkspaceInfo, WsBranch } from '../api/types'
 import { useResource } from '../api/useResource'
 import { thisWorkspace } from '../core/embed'
 import { canMoveBranch } from '../core/graph'
 import { branchLink, selectionFromPath, taskLink, useGo } from '../core/links'
+import { agentLink, agentState, agentsOn } from '../core/agents'
 import { mainAhead, needsSync, stackGraph, trunkName, windowState } from '../core/stack'
 import { LANE, StackLines } from './StackLines'
 import { prWords, shortSha } from '../core/words'
@@ -33,8 +35,11 @@ function savedFolds(): Set<string> {
 /** A branch whose pull request merged: Sync drops it, so the stack leaves it out. */
 const merged = (b: WsBranch) => b.pr?.state === 'merged'
 
-export function StackPanel({ tasks }: { tasks: TaskSummary[] | undefined }) {
+export function StackPanel({ tasks, agents }: { tasks: TaskSummary[] | undefined; agents: Agent[] }) {
   const ws = useResource('workspaces', api.workspaces)
+  const go = useGo()
+  const path = useLocation().pathname
+  const needs = agents.filter((a) => a.urgency !== null).length
   const [folded, setFolded] = useState<Set<string>>(savedFolds)
   const sel = selectionFromPath(useLocation().pathname)
   const toggle = (id: string) =>
@@ -55,16 +60,23 @@ export function StackPanel({ tasks }: { tasks: TaskSummary[] | undefined }) {
   // This editor window first, then windows with a stack, then the empty ones.
   const live = (w: WorkspaceInfo) => w.branches.some((b) => !merged(b)) || w.pending !== null || w.state === 'agent_running'
   const ordered = [...list].sort((a, b) => Number(b === here) - Number(a === here) || Number(live(b)) - Number(live(a)))
-  // Tasks whose tries belong to a branch show on that branch; the rest are listed below.
-  const onBranch = new Set(list.flatMap((w) => w.branches.map((b) => b.task).filter((t): t is number => t !== null)))
+  // Agent tries of the task a branch was made from (the "N tries" chip).
   const tries = new Map((tasks ?? []).map((t) => [t.id, t.attempts.total - t.attempts.abandoned]))
-  const work = (tasks ?? []).filter((t) => !onBranch.has(t.id) && t.attempts.total - t.attempts.abandoned > 0 && t.attempts.promoted === 0)
 
-  if (ws.error && !work.length) return <div className="sp sp-empty muted">No workspaces here: {ws.error.message}</div>
-  if (!ws.data && !ws.error) return <div className="sp sp-empty muted">Loading…</div>
+  if (ws.error) return <div className="sp sp-empty muted">No workspaces here: {ws.error.message}</div>
+  if (!ws.data) return <div className="sp sp-empty muted">Loading…</div>
 
   return (
     <div className="sp">
+      <button
+        type="button"
+        className={`sp-needs ${needs > 0 ? 'on' : ''} ${path === '/review' ? 'sel' : ''}`}
+        onClick={() => go('/review')}
+        title="Agents waiting on you: questions, approvals, results to review"
+      >
+        <span>Needs you</span>
+        <span className="sp-needs-n">{needs}</span>
+      </button>
       <h3 className="sp-h sp-h-top">
         Workspaces <span className="sp-count">{list.length}</span>
       </h3>
@@ -79,36 +91,33 @@ export function StackPanel({ tasks }: { tasks: TaskSummary[] | undefined }) {
           w={w}
           mine={w === here}
           tries={tries}
+          agents={agents}
           open={!folded.has(w.id) || (sel?.kind === 'branch' && sel.workspace === w.id)}
           onToggle={() => toggle(w.id)}
         />
       ))}
-
-      {work.length > 0 && (
-        <section className="sp-sec" aria-label="Agent work">
-          <h3 className="sp-h">Agent work</h3>
-          {work.map((t) => (
-            <AgentLine key={t.id} t={t} />
-          ))}
-        </section>
-      )}
     </div>
   )
 }
 
-function AgentLine({ t }: { t: TaskSummary }) {
-  const go = useGo()
-  const sel = selectionFromPath(useLocation().pathname)
-  const open = t.attempts.total - t.attempts.abandoned
+/** One agent under the branch it started from: its state dot and a few words. */
+function AgentRow({ a, selected, onOpen }: { a: Agent; selected: boolean; onOpen: () => void }) {
+  const st = agentState(a)
   return (
-    <button type="button" className={`sp-line ${sel?.kind === 'task' && sel.id === t.id ? 'sel' : ''}`} onClick={() => go(taskLink(t.id))}>
-      <span className="sp-line-name">{t.goal}</span>
-      {t.attempts.exploring > 0 ? (
-        <span className="sp-chip sp-chip-run">working</span>
-      ) : (
-        <span className="sp-chip sp-chip-mute">{`${open} ${open === 1 ? 'try' : 'tries'}`}</span>
-      )}
-    </button>
+    <div
+      role="treeitem"
+      aria-selected={selected}
+      className={`sp-row sp-agent ${selected ? 'sel' : ''}`}
+      onClick={onOpen}
+      title={`${a.title}\n${st.label}${a.last_step ? ` · ${a.last_step}` : ''}\n${a.mode === 'revise' ? 'Revises' : 'New branch on'} ${a.start.branch}`}
+    >
+      <span className="sp-gutter" aria-hidden />
+      <span className="sp-agent-body">
+        <span className={`ag-dot ag-${st.tone}`} aria-hidden />
+        <span className="sp-agent-title">{a.title}</span>
+        <span className={`sp-agent-state ag-text-${st.tone}`}>{st.label}</span>
+      </span>
+    </div>
   )
 }
 
@@ -116,11 +125,13 @@ function WindowStack({
   w,
   mine,
   tries,
+  agents,
   open,
   onToggle,
 }: {
   w: WorkspaceInfo
   mine: boolean
+  agents: Agent[]
   /** Open tries per task, for the "N tries" chip on a branch made from one. */
   tries: Map<number, number>
   open: boolean
@@ -143,8 +154,15 @@ function WindowStack({
   const sync = needsSync(w)
   const st = windowState(w)
   // An empty workspace is one line: nothing to show or do until it has a branch.
-  const body = open && (rows.length > 0 || stopped || gone > 0)
+  const hasAgents = agents.some((a) => a.workspace === w.id && a.state !== 'landed' && a.state !== 'discarded')
+  const body = open && (rows.length > 0 || stopped || gone > 0 || hasAgents)
   const trunk = trunkName(w)
+  const agentsOf = (branch: string) => agentsOn(agents, w.id, branch)
+  const extra = rows.map((r) => agentsOf(r.branch.name).length)
+  const fromTrunk = agents.filter((a) => a.workspace === w.id && a.start.trunk && a.state !== 'landed' && a.state !== 'discarded')
+  const agentRow = (a: Agent) => (
+    <AgentRow key={a.id} a={a} selected={sel?.kind === 'agent' && sel.id === a.id} onOpen={() => go(agentLink(a.id))} />
+  )
   const queued = w.requests.filter((r) => r.status === 'queued')
   const lastOk = Math.max(0, ...w.requests.filter((r) => r.status === 'applied').map((r) => r.created_at))
   const failed = w.requests.filter((r) => r.status === 'failed' && r.op !== 'submit' && r.created_at > lastOk).slice(0, 1)
@@ -223,7 +241,7 @@ function WindowStack({
 
       <div className="sp-rows" role="tree" aria-label={`${w.name} branches`} style={{ ['--gutter' as string]: `${g.lanes * LANE}px` }}>
 
-        {rows.map(({ branch: b }) => (
+        {rows.map(({ branch: b }) => [
           <BranchRow
             key={b.name}
             b={b}
@@ -246,15 +264,22 @@ function WindowStack({
             }}
             onOpen={() => go(branchLink(w.id, b.name))}
             onCheckout={() => !b.current && !readOnly && void run(w, { op: 'checkout', branch: b.name }, `Checked out ${b.name}.`)}
-          />
-        ))}
+          />,
+          ...agentsOf(b.name).map(agentRow),
+        ])}
         {(rows.length > 0 || w.base) && (
-          <div className={`sp-row sp-trunk ${over === w.trunk ? 'drop' : ''}`} {...dropOn(w.trunk)} title={w.base ? `${w.base_ref} · ${shortSha(w.base)}` : w.base_ref}>
+          <div
+            className={`sp-row sp-trunk ${over === w.trunk ? 'drop' : ''} ${sel?.kind === 'branch' && sel.workspace === w.id && sel.name === w.trunk ? 'sel' : ''}`}
+            {...dropOn(w.trunk)}
+            onClick={() => go(branchLink(w.id, w.trunk))}
+            title={`${w.base ? `${w.base_ref} · ${shortSha(w.base)}` : w.base_ref}\nStart an agent from ${trunk}`}
+          >
             <span className="sp-gutter" aria-hidden />
             <span className="sp-name">{trunk}</span>
           </div>
         )}
-        {(rows.length > 0 || w.base) && <StackLines g={g} rowH={28} dot={(i) => `${rows[i]!.branch.current ? 'cur' : ''} ${rows[i]!.branch.conflicts > 0 ? 'bad' : ''}`} />}
+        {(rows.length > 0 || w.base) && fromTrunk.map(agentRow)}
+        {(rows.length > 0 || w.base) && <StackLines g={g} rowH={28} extra={extra} dot={(i) => `${rows[i]!.branch.current ? 'cur' : ''} ${rows[i]!.branch.conflicts > 0 ? 'bad' : ''}`} />}
       </div>
 
       {gone > 0 && <div className="sp-note">{`${gone} merged branch${gone === 1 ? '' : 'es'} hidden. Sync drops ${gone === 1 ? 'it' : 'them'}.`}</div>}

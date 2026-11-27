@@ -185,7 +185,7 @@
   border-color: var(--trunk);
 }
 .sp-trunk {
-  cursor: default;
+  cursor: pointer;
 }
 .sp-trunk .sp-name {
   color: var(--muted);
@@ -629,4 +629,94 @@
 }
 .wo-stack {
   gap: 0;
+}
+
+/* Needs you: the agents waiting on a person, at the top of the sidebar. */
+.sp-needs {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: calc(100% - 8px);
+  margin: 6px 4px 2px;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text-2);
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 500;
+  cursor: pointer;
+}
+.sp-needs:hover {
+  background: var(--hover);
+}
+.sp-needs.sel {
+  border-color: var(--selected-edge);
+}
+.sp-needs-n {
+  min-width: 20px;
+  padding: 0 6px;
+  border-radius: 10px;
+  background: var(--surface-2);
+  color: var(--muted);
+  font-size: 11.5px;
+  text-align: center;
+}
+.sp-needs.on .sp-needs-n {
+  background: var(--promoted);
+  color: #fff;
+}
+
+/* An agent working on top of the branch above it. */
+.sp-agent {
+  min-height: 24px;
+}
+.sp-agent .sp-gutter::before {
+  opacity: 0.35;
+}
+.sp-agent-body {
+  grid-column: 2 / -1;
+  display: grid;
+  grid-template-columns: 8px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 6px;
+  padding-left: 8px;
+  font-size: 12px;
+}
+.sp-agent-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-2);
+}
+.sp-agent-state {
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+/* Agent tones, shared by the sidebar and the agent pages. */
+.ag-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--faint);
+  flex: none;
+}
+.ag-ask { background: var(--promoted); }
+.ag-bad { background: var(--failed); }
+.ag-ok { background: var(--passed); }
+.ag-run { background: var(--exploring); animation: ag-pulse 1.6s ease-in-out infinite; }
+.ag-mute { background: var(--faint); }
+.ag-text-ask { color: var(--promoted); }
+.ag-text-bad { color: var(--failed); }
+.ag-text-ok { color: var(--passed); }
+.ag-text-run { color: var(--exploring); }
+.ag-text-mute { color: var(--muted); }
+@keyframes ag-pulse {
+  50% { opacity: 0.4; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ag-run { animation: none; }
 }

@@ -6,10 +6,20 @@ import type { StackGraph } from '../core/stack'
 
 export const LANE = 14
 
-export function StackLines({ g, rowH, dot }: { g: StackGraph; rowH: number; dot: (row: number) => string }) {
+/**
+ * `extra[i]` is how many lines of the same height sit under branch row `i`
+ * (its agents); rows below move down and the lanes run straight through.
+ */
+export function StackLines({ g, rowH, dot, extra = [] }: { g: StackGraph; rowH: number; dot: (row: number) => string; extra?: number[] }) {
   const x = (lane: number) => LANE / 2 + lane * LANE
-  const y = (row: number) => row * rowH + rowH / 2
-  const h = (g.rows.length + 1) * rowH
+  const tops: number[] = []
+  let top = 0
+  for (let i = 0; i <= g.rows.length; i++) {
+    tops.push(top)
+    top += rowH * (1 + (i < g.rows.length ? (extra[i] ?? 0) : 0))
+  }
+  const y = (row: number) => tops[row]! + rowH / 2
+  const h = tops[g.rows.length]! + rowH
   return (
     <svg className="sl" width={g.lanes * LANE} height={h} aria-hidden>
       {g.edges.map((e, i) => {

@@ -6,6 +6,7 @@ import { AttemptPage } from './pages/AttemptPage'
 import { Compare } from './pages/Compare'
 import { Find } from './pages/Find'
 import { CommitReview, ReviewHome, TaskReview, VersionReview } from './pages/Review'
+import { AgentPage } from './pages/Agents'
 
 export function App() {
   return (
@@ -17,6 +18,7 @@ export function App() {
         <Route path="review/v/:id" element={<VersionReview />} />
         <Route path="review/c/:sha" element={<CommitReview />} />
         <Route path="review/b/:workspace/*" element={<BranchReview />} />
+        <Route path="review/a/:id" element={<AgentPage />} />
         {/* Old addresses: the tree and the review pages cover them now. */}
         <Route path="inbox" element={<Navigate to="/review" replace />} />
         <Route path="tasks" element={<Navigate to="/review" replace />} />

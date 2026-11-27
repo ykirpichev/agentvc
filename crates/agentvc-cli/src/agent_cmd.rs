@@ -106,7 +106,7 @@ pub fn state_word(s: AgentState) -> &'static str {
 
 fn line(a: &Agent) -> String {
     let mut t = format!(
-        "{:<5} {:<16} {}  [{} > {}{}]",
+        "{:<5} {:<18} {}  [{} > {}{}]",
         a.id,
         state_word(a.state),
         a.title,

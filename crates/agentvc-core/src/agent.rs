@@ -29,8 +29,8 @@
 //! Runners: Claude Code headless (`claude -p --output-format stream-json`)
 //! with agentvc's MCP server attached, so `ask_human` and the permission
 //! prompt tool `approve` reach the person in the UI; or any shell command
-//! (`AGENTVC_AGENT_PROMPT` holds the prompt), which only reports running,
-//! done or failed.
+//! (`AGENTVC_AGENT_PROMPT` holds the prompt, and `"$AGENTVC_BIN" agent
+//! ask` asks the person a question).
 
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
@@ -217,6 +217,16 @@ pub struct AgentResult {
     pub insertions: usize,
     pub deletions: usize,
     pub paths: Vec<String>,
+    /// Each changed path with `added`, `modified` or `removed`.
+    #[serde(default)]
+    pub changes: Vec<FileKind>,
+}
+
+/// One changed path of an agent's result.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FileKind {
+    pub path: String,
+    pub kind: String,
 }
 
 /// How the result went onto the stack.
@@ -1418,7 +1428,8 @@ fn turn_command(a: &Agent, dir: &Path, exe: &Path, prompt: &str) -> Command {
         "command" => {
             let mut c = Command::new("sh");
             c.arg("-c").arg(a.command.as_deref().unwrap_or("true"));
-            c.env("AGENTVC_AGENT_PROMPT", prompt);
+            c.env("AGENTVC_AGENT_PROMPT", prompt)
+                .env("AGENTVC_BIN", exe);
             c
         }
         _ => {
@@ -1513,6 +1524,30 @@ fn result_of(a: &Agent) -> AgentResult {
             }
         }
     }
+    if let Ok(out) = g.git(
+        &[
+            "diff",
+            "--name-status",
+            "--no-renames",
+            &a.start.commit,
+            "HEAD",
+        ],
+        None,
+    ) {
+        for l in out.lines() {
+            if let Some((st, p)) = l.split_once('\t') {
+                let kind = match st {
+                    "A" => "added",
+                    "D" => "removed",
+                    _ => "modified",
+                };
+                r.changes.push(FileKind {
+                    path: p.to_string(),
+                    kind: kind.into(),
+                });
+            }
+        }
+    }
     r
 }
 
@@ -1552,17 +1587,14 @@ pub fn work(dir: &Path, exe: &Path) -> Result<Agent> {
         a.worker_pid = Some(me);
         Ok(())
     })?;
-    // Wait for a free slot on this machine.
-    let common = a
-        .worktree
-        .parent()
-        .and_then(Path::parent)
-        .map(Path::to_path_buf)
-        .unwrap_or_default();
+    // Wait for a free slot on this machine. Counting and taking the slot
+    // happen under one lock on the agents directory, so two workers that
+    // start together can't both take the last slot.
+    let common = dir.parent().map(Path::to_path_buf).unwrap_or_default();
     let max = Window::open(&a.worktree)
         .map(|w| limit(&w))
         .unwrap_or(DEFAULT_LIMIT);
-    loop {
+    let (a, began) = loop {
         let cur = read_agent(dir)?;
         if cur.stop_requested {
             return update(dir, |a| {
@@ -1572,6 +1604,7 @@ pub fn work(dir: &Path, exe: &Path) -> Result<Agent> {
                 Ok(())
             });
         }
+        let slots = lock_record(&common)?;
         let here = workspace::machine();
         let working = fs::read_dir(&common)
             .map(|rd| {
@@ -1587,19 +1620,20 @@ pub fn work(dir: &Path, exe: &Path) -> Result<Agent> {
             })
             .unwrap_or(0);
         if working < max {
-            break;
+            let began = now();
+            let a = update(dir, |a| {
+                a.state = AgentState::Running;
+                a.started_at.get_or_insert(began);
+                a.finished_at = None;
+                a.error = None;
+                Ok(())
+            })?;
+            drop(slots);
+            break (a, began);
         }
+        drop(slots);
         std::thread::sleep(Duration::from_secs(1));
-    }
-
-    let began = now();
-    let a = update(dir, |a| {
-        a.state = AgentState::Running;
-        a.started_at.get_or_insert(began);
-        a.finished_at = None;
-        a.error = None;
-        Ok(())
-    })?;
+    };
     let prompt = match (&a.pending_reply, &a.session_id, a.runner.as_str()) {
         (Some(r), Some(_), _) | (Some(r), _, "command") => r.clone(),
         // No session to resume: give the whole conversation again.
@@ -1850,6 +1884,7 @@ mod tests {
         assert_eq!(a.state, AgentState::Ready, "{a:?}");
         assert_eq!(a.branch, "add-a-greeting-file");
         assert_eq!(a.result.as_ref().unwrap().paths, vec!["c.txt"]);
+        assert_eq!(a.result.as_ref().unwrap().changes[0].kind, "added");
         assert!(a.tests.as_ref().unwrap().passed);
         assert_eq!(a.last_step.as_deref(), Some("Checks passed"));
         let dir = agent_dir(&work, &a.id).unwrap();

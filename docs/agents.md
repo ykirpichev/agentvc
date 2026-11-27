@@ -62,8 +62,9 @@ A revision of a branch that moved is refused with `branch_moved`.
   stopped resumes the same Claude Code session. `AGENTVC_CLAUDE` names
   another `claude` program.
 - **Any command**: `--command "<shell>"` runs that instead. The prompt is in
-  `$AGENTVC_AGENT_PROMPT` and each output line becomes a step. Such agents
-  can't ask questions.
+  `$AGENTVC_AGENT_PROMPT` and each output line becomes a step. It can ask
+  you a question with `"$AGENTVC_BIN" agent ask "..."`, which prints your
+  answer.
 
 ## Settings
 

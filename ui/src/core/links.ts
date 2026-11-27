@@ -8,6 +8,7 @@ export type Selection =
   | { kind: 'task'; id: number }
   | { kind: 'commit'; commit: string }
   | { kind: 'branch'; workspace: string; name: string }
+  | { kind: 'agent'; id: string }
   | null
 
 export function selectionFromPath(path: string): Selection {
@@ -17,6 +18,8 @@ export function selectionFromPath(path: string): Selection {
   if (m) return { kind: 'task', id: Number(m[1]) }
   m = /^\/review\/c\/([0-9a-f]+)/.exec(path)
   if (m) return { kind: 'commit', commit: m[1]! }
+  m = /^\/review\/a\/([^/]+)/.exec(path)
+  if (m) return { kind: 'agent', id: decodeURIComponent(m[1]!) }
   m = /^\/review\/b\/([^/]+)\/(.+)$/.exec(path)
   if (m) return { kind: 'branch', workspace: decodeURIComponent(m[1]!), name: decodeURIComponent(m[2]!) }
   return null

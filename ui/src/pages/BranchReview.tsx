@@ -15,6 +15,9 @@ import { useToast } from '../components/Toaster'
 import { canMoveBranch } from '../core/graph'
 import { HELP, prWords, shortSha, WORDS } from '../core/words'
 import { plural, timeAgo } from '../lib/format'
+import { agentsOn } from '../core/agents'
+import { AgentsFrom, StartAgent } from './Agents'
+import { useReview } from './reviewContext'
 
 export function BranchReview() {
   const { workspace = '', '*': rest = '' } = useParams()
@@ -28,6 +31,7 @@ export function BranchReview() {
   const stopped = !!w && (w.pending !== null || w.branches.some((x) => x.conflicts > 0))
   const [busy, setBusy] = useState(false)
   const [open, setOpen] = useState<string | null>(null)
+  const agents = useReview().agents?.agents ?? []
 
   const run = async (op: WsOp, done: string, keep = false) => {
     setBusy(true)
@@ -52,6 +56,24 @@ export function BranchReview() {
 
   if (list.error) return <div className="page rv"><ErrorNote error={list.error} /></div>
   if (!list.data) return <div className="page rv"><Skeleton rows={4} /></div>
+  if (w && name === w.trunk) {
+    const trunkName = w.trunk.replace(/^origin\//, '')
+    return (
+      <div className="page rv">
+        <div className="rv-head">
+          <div>
+            <h1 className="rv-title mono">{trunkName}</h1>
+            <p className="muted">
+              the trunk of {w.name}
+              {w.base ? ` · at ${shortSha(w.base)}` : ''}
+            </p>
+          </div>
+        </div>
+        {w.kind !== 'remote' && <StartAgent workspace={w.id} branch={w.trunk} label={trunkName} canRevise={false} />}
+        <AgentsFrom agents={agents.filter((a) => a.workspace === w.id && a.start.trunk)} workspace={w.id} branch={w.trunk} />
+      </div>
+    )
+  }
   if (!w || !b)
     return (
       <div className="page rv">
@@ -117,6 +139,9 @@ export function BranchReview() {
           />
         </div>
       )}
+
+      {!readOnly && !stopped && <StartAgent workspace={w.id} branch={b.name} label={b.name} canRevise />}
+      <AgentsFrom agents={agentsOn(agents, w.id, b.name)} workspace={w.id} branch={b.name} />
 
       <section>
         <h2 className="rv-h2">Commits</h2>
