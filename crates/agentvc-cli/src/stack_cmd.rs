@@ -7,6 +7,7 @@ use std::path::Path;
 use agentvc_core::stack::{
     BranchInfo, LogResult, ParentKind, RestackResult, SubmitOptions, Window,
 };
+use agentvc_core::stackundo;
 use agentvc_core::workspace::{self, Op, RequestStatus};
 use clap::Subcommand;
 use serde_json::{json, Value};
@@ -39,6 +40,12 @@ pub enum StackCmd {
         /// Stage all changes first (`git add -A`).
         #[arg(short, long)]
         all: bool,
+        /// Put the new branch between the current branch and the branches
+        /// stacked on it; they are restacked onto it.
+        #[arg(short, long)]
+        insert: bool,
+        #[arg(long, requires = "insert")]
+        keep_conflicts: bool,
     },
     /// Amend the current branch's last commit with the staged changes and
     /// restack the branches above it.
@@ -199,6 +206,48 @@ pub enum StackCmd {
     /// Stop tracking a branch; branches above it keep its commits. The git
     /// branch stays.
     Untrack { branch: String },
+    /// Fold the current branch into its parent branch: the parent takes its
+    /// commits, branches on it move to the parent, and it is deleted.
+    Fold {
+        #[arg(long)]
+        keep_conflicts: bool,
+    },
+    /// Split the current branch by commit: every commit but the last gets its
+    /// own branch below it. No commit changes.
+    Split {
+        /// Split at every commit (the only mode; accepted for gt muscle
+        /// memory).
+        #[arg(long)]
+        by_commit: bool,
+        /// Names for the new branches, bottom first (default:
+        /// <branch>-1, <branch>-2, ...).
+        #[arg(long, value_delimiter = ',')]
+        names: Vec<String>,
+    },
+    /// Amend each staged file into the branch of this stack whose commits
+    /// last changed it, then restack. Files no branch changed stay staged.
+    Absorb {
+        /// Stage all changes first.
+        #[arg(short, long)]
+        all: bool,
+        #[arg(long)]
+        keep_conflicts: bool,
+    },
+    /// Check out a branch of this window by name (or the trunk, detached).
+    Checkout { branch: String },
+    /// After resolving a restack conflict: `git rebase --continue`, then
+    /// restack the branches above.
+    Continue,
+    /// Give up a stopped restack: `git rebase --abort`; a stopped move goes
+    /// back to its old parent.
+    Abort,
+    /// Undo this window's latest stack command (repeat to walk back), or
+    /// command ID; undoing an undo redoes it. `--list` shows the log.
+    Undo {
+        id: Option<u64>,
+        #[arg(long)]
+        list: bool,
+    },
     /// Check out the branch stacked on the current one.
     Up,
     /// Check out the parent branch.
@@ -401,7 +450,11 @@ pub fn run(cwd: &Path, cmd: StackCmd) -> anyhow::Result<(Value, String)> {
     // One changing stack command at a time per workspace, and edits other
     // workspaces queued here are applied first. `log` (which editors poll)
     // reads only, so queued edits keep waiting for the agent to stop.
-    let _lock = if matches!(cmd, StackCmd::Log { .. }) {
+    // `continue`/`abort` take the lock themselves (workspace::finish).
+    let _lock = if matches!(
+        cmd,
+        StackCmd::Log { .. } | StackCmd::Continue | StackCmd::Abort
+    ) {
         None
     } else {
         let w = Window::open(cwd)?;
@@ -409,6 +462,36 @@ pub fn run(cwd: &Path, cmd: StackCmd) -> anyhow::Result<(Value, String)> {
         workspace::drain_locked(cwd)?;
         Some(l)
     };
+    // Changing commands are recorded for `stack undo`.
+    let undoable = !matches!(
+        cmd,
+        StackCmd::Init { .. }
+            | StackCmd::Log { .. }
+            | StackCmd::Submit { .. }
+            | StackCmd::Give { .. }
+            | StackCmd::Undo { .. }
+            | StackCmd::Continue
+            | StackCmd::Abort
+            | StackCmd::Checkout { .. }
+            | StackCmd::Up
+            | StackCmd::Down
+            | StackCmd::Top
+            | StackCmd::Bottom
+    );
+    let begun = undoable.then(|| stackundo::begin(cwd)).flatten();
+    let out = dispatch(cwd, cmd);
+    if undoable {
+        let label: Vec<String> = std::env::args()
+            .skip_while(|a| a != "stack")
+            .skip(1)
+            .filter(|a| a != "--json")
+            .collect();
+        stackundo::finish(cwd, &label.join(" "), begun);
+    }
+    out
+}
+
+fn dispatch(cwd: &Path, cmd: StackCmd) -> anyhow::Result<(Value, String)> {
     let mut w = Window::open(cwd)?;
     Ok(match cmd {
         StackCmd::Init { trunk, remote } => {
@@ -423,7 +506,30 @@ pub fn run(cwd: &Path, cmd: StackCmd) -> anyhow::Result<(Value, String)> {
             let text = log_text(&l);
             (json!(l), text)
         }
-        StackCmd::Create { name, message, all } => {
+        StackCmd::Create {
+            name,
+            message,
+            all,
+            insert: true,
+            keep_conflicts,
+        } => {
+            let (t, commit, r) =
+                w.insert(name.as_deref(), message.as_deref(), all, keep_conflicts)?;
+            let text = format!(
+                "created {} on {}{}\n{}",
+                t.name,
+                t.parent,
+                match &commit {
+                    Some(c) => format!(" with commit {}", short(c)),
+                    None => " (nothing staged, no commit)".into(),
+                },
+                restack_text(&r)
+            );
+            (json!({ "branch": t, "commit": commit, "restack": r }), text)
+        }
+        StackCmd::Create {
+            name, message, all, ..
+        } => {
             let (t, commit) = w.create(name.as_deref(), message.as_deref(), all)?;
             let text = format!(
                 "created {} on {}{}",
@@ -627,6 +733,114 @@ pub fn run(cwd: &Path, cmd: StackCmd) -> anyhow::Result<(Value, String)> {
                 json!({ "untracked": t }),
                 format!("stopped tracking {}", t.name),
             )
+        }
+        StackCmd::Fold { keep_conflicts } => {
+            let r = w.fold(keep_conflicts)?;
+            let mut text = format!("folded {} into {}\n", r.folded, r.into);
+            if let Some(pr) = r.closed_pr {
+                text += &format!(
+                    "PR #{pr} of {} is superseded by {}'s: close it on GitHub\n",
+                    r.folded, r.into
+                );
+            }
+            text += &restack_text(&r.restack);
+            (json!(r), text)
+        }
+        StackCmd::Split { names, .. } => {
+            let added = w.split_by_commit(&names)?;
+            let cur = w.current_branch().unwrap_or_default();
+            let mut text = String::new();
+            for t in &added {
+                text += &format!(
+                    "created {} on {} at {}\n",
+                    t.name,
+                    t.parent,
+                    short(&w.branch_tip(&t.name).unwrap_or_default())
+                );
+            }
+            text += &format!(
+                "{cur} now sits on {}",
+                added.last().map(|t| t.name.as_str()).unwrap_or("")
+            );
+            (json!({ "branch": cur, "created": added }), text)
+        }
+        StackCmd::Absorb {
+            all,
+            keep_conflicts,
+        } => {
+            let r = w.absorb(all, keep_conflicts)?;
+            let mut text = String::new();
+            for a in &r.absorbed {
+                text += &format!("absorbed {} into {}\n", a.paths.join(", "), a.branch);
+            }
+            if !r.left.is_empty() {
+                text += &format!(
+                    "left staged (no branch below changed them): {}\n",
+                    r.left.join(", ")
+                );
+            }
+            text += &restack_text(&r.restack);
+            (json!(r), text)
+        }
+        StackCmd::Checkout { branch } => {
+            w.settle()?;
+            let b = w.checkout(&branch)?;
+            (json!({ "branch": b }), format!("switched to {b}"))
+        }
+        StackCmd::Continue | StackCmd::Abort => {
+            let abort = matches!(cmd, StackCmd::Abort);
+            drop(w);
+            let f = workspace::finish(cwd, &cwd.to_string_lossy(), abort)?;
+            let text = match f.outcome {
+                "aborted" => "restack aborted; nothing more changed".to_string(),
+                "stopped" => {
+                    let paths: Vec<String> = f
+                        .conflicts
+                        .as_ref()
+                        .map(|c| c.files.iter().map(|x| x.path.clone()).collect())
+                        .unwrap_or_default();
+                    format!("stopped on another conflict in {}: resolve, `git add`, then `agentvc stack continue`", paths.join(", "))
+                }
+                _ => "restack continued; the stack is up to date".to_string(),
+            };
+            (json!(f), text)
+        }
+        StackCmd::Undo { id, list } => {
+            if list {
+                let rows = stackundo::list(&w);
+                let mut text = String::new();
+                if rows.is_empty() {
+                    text += "no stack commands recorded in this window yet\n";
+                }
+                for r in &rows {
+                    text += &format!(
+                        "{:>4}  {}{}{}\n",
+                        r.id,
+                        r.command,
+                        if r.branches.is_empty() {
+                            String::new()
+                        } else {
+                            format!("  ({})", r.branches.join(", "))
+                        },
+                        if r.undone { "  [undone]" } else { "" }
+                    );
+                }
+                (json!({ "entries": rows }), text)
+            } else {
+                let u = stackundo::undo(&mut w, id)?;
+                let text = format!(
+                    "undid {} `{}`{}; `agentvc stack undo {}` redoes it",
+                    u.undid,
+                    u.command,
+                    if u.branches.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" ({})", u.branches.join(", "))
+                    },
+                    u.entry
+                );
+                (json!(u), text)
+            }
         }
         StackCmd::Up | StackCmd::Down | StackCmd::Top | StackCmd::Bottom => {
             let b = match cmd {

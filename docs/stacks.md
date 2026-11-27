@@ -66,7 +66,7 @@ agentvc stack restack                    # carries on with the branches above
 | --- | --- |
 | `stack init [--trunk B] [--remote R]` | Set the trunk (detected from `origin/HEAD`) |
 | `stack log [--all]` | This window's branches with commits, PRs, `needs restack`; `--all` adds other windows read-only |
-| `stack create [name] [-m msg] [-a]` | Branch on the current one (or the trunk), commit staged work; name from the message if omitted |
+| `stack create [name] [-m msg] [-a] [-i]` | Branch on the current one (or the trunk), commit staged work; name from the message if omitted. `--insert` puts it between the current branch and its children |
 | `stack modify [-a] [-m msg] [-c]` | Amend (or `-c` add a commit), restack the branches above |
 | `stack restack [--branch B] [--keep-conflicts]` | Replay branches onto their parents' tips |
 | `stack sync [--no-fetch] [--keep-merged]` | Fetch trunk, drop merged branches, restack |
@@ -78,13 +78,22 @@ agentvc stack restack                    # carries on with the branches above
 | `stack squash [-m msg]` | Squash the current branch into one commit, restack above |
 | `stack give B --to DIR` | Hand B and the branches above it to the window at DIR |
 | `stack untrack B` | Stop tracking B; branches above keep its commits |
+| `stack fold` | Fold the current branch into its parent; branches on it move to the parent |
+| `stack split [--by-commit] [--names a,b]` | Give every commit of the current branch but the last its own branch below it (`<branch>-1`, ... by default) |
+| `stack absorb [-a]` | Amend each staged file into the branch of this stack whose commits last changed it, restack; other files stay staged |
+| `stack checkout B` | Check out a branch of this window (the trunk: detached at `origin/main`) |
+| `stack continue` / `stack abort` | After `--keep-conflicts`: finish the rebase and restack the rest, or give up |
+| `stack undo [ID] [--list]` | Reverse the latest stack command (repeat to walk back); undoing an undo redoes it |
 | `stack up / down / top / bottom` | Move along this window's stack |
 
 Every command takes `--json`. Error codes: `needs_restack`, `push_rejected`,
 `parent_not_pushed`, `no_remote`, `same_window`, `other_repository`, `not_in_stack`,
 `owned_by_other_window`, `checked_out_elsewhere`, `conflict`,
 `rebase_in_progress`, `merge_commit`, `at_top`, `at_bottom`, `ambiguous`,
-`no_trunk`, `parent_missing`, `branch_missing`, `message_required`. Workspace codes are listed under
+`no_trunk`, `parent_missing`, `branch_missing`, `message_required`,
+`nothing_to_split`, `bad_names`, `nothing_staged`, `nothing_to_absorb`,
+`dirty_worktree`, `no_conflicts`, `unresolved_conflicts`, `no_undo`,
+`already_undone`, `undo_conflict`. Workspace codes are listed under
 [Workspaces](#workspaces-every-window-from-anywhere).
 
 ## Coming from Graphite
@@ -95,6 +104,35 @@ history). Stop running `gt` in that worktree: it would still write the shared
 tree. `agentvc stack submit` then finds the existing PRs by branch and keeps
 them (bases and the stack list in the body), so Graphite's web review keeps
 showing them as a stack.
+
+### `gt` to `agentvc stack`
+
+| Graphite | agentvc |
+| --- | --- |
+| `gt create -am msg` | `agentvc stack create -am msg` |
+| `gt create --insert` | `agentvc stack create -i` |
+| `gt modify -a` / `-c` | `agentvc stack modify -a` / `-c` |
+| `gt absorb` | `agentvc stack absorb` (by file, not hunk) |
+| `gt fold` | `agentvc stack fold` |
+| `gt split --by-commit` | `agentvc stack split` |
+| `gt squash` | `agentvc stack squash` |
+| `gt move --onto B` | `agentvc stack move <branch> --onto B` |
+| `gt rename` / `gt delete` | `agentvc stack rename` / `delete` |
+| `gt restack` | `agentvc stack restack` |
+| `gt continue` / `gt abort` | `agentvc stack continue` / `abort` |
+| `gt sync` | `agentvc stack sync` (never moves local `main`) |
+| `gt submit --stack` | `agentvc stack submit` |
+| `gt log` / `gt ls` | `agentvc stack log` (`--all` for every window) |
+| `gt checkout B` | `agentvc stack checkout B` |
+| `gt up` / `down` / `top` / `bottom` | same names |
+| `gt track` / `untrack` | `agentvc stack adopt` / `untrack` |
+| `gt undo` | `agentvc stack undo` |
+
+`stack undo` keeps the last 50 changing commands per worktree
+(`<git-dir>/agentvc/stack-undo.json`), including edits made from the review
+UI or another window (`--workspace`); the UI's toasts offer Undo for them.
+It refuses with `undo_conflict` when a branch the command touched has moved
+since. Checkouts, `submit` and `give` are not recorded.
 
 ## Pull requests
 

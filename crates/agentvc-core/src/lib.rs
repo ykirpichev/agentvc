@@ -35,6 +35,7 @@ pub mod run;
 pub mod snapshot;
 pub mod space;
 pub mod stack;
+pub mod stackundo;
 pub mod status;
 pub mod story;
 pub mod sync;
