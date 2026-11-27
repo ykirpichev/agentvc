@@ -1416,25 +1416,40 @@ pub fn create(cwd: &Path, dir: &Path, o: &NewOptions) -> Result<Created> {
         }
     }
     let seeded = seed(&w, w.path(), &dir, o);
-    let all = space_locals(&nw)?;
-    let mut rec = all
+    // Name it before anything lists the space: listing settles clashing
+    // names by age, and records made in the same second would tie.
+    let own = locals(&nw)?;
+    let mut rec = own
         .iter()
         .find(|l| l.git_dir == nw.git_dir)
         .map(|l| l.record.clone())
         .expect("the new workspace is listed");
-    let taken: Vec<&str> = all
+    let (sp, _) = crate::checkouts::space_of(&nw);
+    let sib = crate::checkouts::siblings(&nw, sp.as_deref());
+    let mut taken: Vec<String> = own
         .iter()
         .filter(|l| l.git_dir != nw.git_dir)
-        .map(|l| l.record.name.as_str())
+        .map(|l| l.record.name.clone())
         .collect();
+    for (_, ls) in sibling_locals(&sib) {
+        taken.extend(ls.into_iter().map(|l| l.record.name));
+    }
+    let taken: Vec<&str> = taken.iter().map(String::as_str).collect();
+    let base = dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("workspace")
+        .to_string();
     let want = match o.name.as_deref() {
         Some(n) => n.to_string(),
-        None => unique_name(&rec.name, &taken),
+        None => unique_name(&base, &taken),
     };
     if want != rec.name {
         rec.name = want;
         write_record(&nw.git_dir, &rec)?;
     }
+    // Now join the registry, so the space lists it.
+    crate::checkouts::register(&nw);
     let from = locals(&w)?
         .into_iter()
         .find(|l| l.git_dir == w.git_dir)
