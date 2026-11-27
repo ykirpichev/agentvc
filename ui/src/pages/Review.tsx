@@ -292,14 +292,6 @@ export function VersionReview() {
             <span className="act-help">{HELP.updateFromParent(versionName(stale.attempt))}</span>
           </div>
         )}
-        {(isOpen || a.status === 'promoted') && (
-          <div className="act">
-            <button type="button" className="btn btn-ghost" disabled={busy} onClick={() => navigate(`${versionLink(a.id)}?pick=${a.id}`)}>
-              ⤴ {WORDS.rebaseOnto}
-            </button>
-            <span className="act-help">{HELP.rebaseOnto}</span>
-          </div>
-        )}
         {a.status === 'promoted' && behind === 0 && g.conflicts === 0 && (
           <div className="act">
             <button type="button" className="btn btn-primary" disabled={busy} onClick={() => void act(() => api.openPr(a.id), g.pr ? 'PR updated' : 'PR opened', false)}>
