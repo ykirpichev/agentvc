@@ -172,6 +172,42 @@ button {
   padding: 14px 10px 10px;
   gap: 10px;
   min-height: 0;
+  min-width: 0;
+  position: relative;
+}
+
+/* Drag the sidebar's right edge to resize it. */
+.sidebar-resizer {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  right: -4px;
+  width: 8px;
+  cursor: col-resize;
+  z-index: 5;
+  touch-action: none;
+}
+.sidebar-resizer::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 3px;
+  width: 2px;
+  background: transparent;
+  transition: background 0.12s;
+}
+.sidebar-resizer:hover::after,
+.sidebar-resizer:focus-visible::after,
+.sidebar-resizer.active::after {
+  background: var(--accent);
+}
+.sidebar-resizer:focus-visible {
+  outline: none;
+}
+body.sidebar-resizing {
+  cursor: col-resize;
+  user-select: none;
 }
 
 .brand {
@@ -1458,6 +1494,9 @@ button {
     padding: 8px 12px;
     border-right: 0;
     border-bottom: 1px solid var(--border);
+  }
+  .sidebar-resizer {
+    display: none;
   }
   .brand-text,
   .search-trigger,

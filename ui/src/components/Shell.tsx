@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, type CSSProperties } from 'react'
 import { Outlet, useNavigate } from 'react-router'
 import { api } from '../api/client'
 import { useLive } from '../api/live'
@@ -9,6 +9,8 @@ import { Kbd } from './bits'
 import { CommandPalette } from './CommandPalette'
 import { Icon, type IconName } from './Icon'
 import { ShortcutHelp } from './ShortcutHelp'
+import { SidebarResizer } from './SidebarResizer'
+import { useSidebarWidth } from './useSidebarWidth'
 import { StackPanel } from './StackPanel'
 import { ToastProvider } from './Toaster'
 import { embedMode, onHost, toHost } from '../core/embed'
@@ -26,6 +28,7 @@ export function Shell() {
   const theme = useTheme()
   const { setHelpOpen } = useShortcutHelp()
   const [paletteOpen, setPaletteOpen] = useState(false)
+  const sidebar = useSidebarWidth()
   const { connection } = useLive()
   const space = useResource('space', api.space)
   const graph = useResource('graph', api.graph)
@@ -109,7 +112,7 @@ export function Shell() {
 
   return (
     <ToastProvider>
-    <div className="shell">
+    <div className="shell" style={{ '--sidebar-w': `${sidebar.width}px` } as CSSProperties}>
       <aside className="sidebar">
         <div className="brand">
           <span className="brand-mark">
@@ -164,6 +167,7 @@ export function Shell() {
             </button>
           </span>
         </div>
+        <SidebarResizer width={sidebar.width} setWidth={sidebar.setWidth} />
       </aside>
 
       <main className="main">
