@@ -233,7 +233,8 @@ attempt's status) for branches exported from attempts.
 
 The daemon serves the same: `GET /api/workspaces[?remote=1]`,
 `POST /api/workspaces/{id}/stack` with `{"op": "move", "branch", "onto"}`
-(or `restack`, `rename` + `new_name`, `delete`, `sync`; `"queue": true` to
+(or `restack`, `rename` + `new_name`, `delete`, `sync`, `submit` (the whole
+stack, like `stack submit --all`; not undoable); `"queue": true` to
 always queue) answering `{"outcome": "applied"|"queued", "request_id"}`, and
 `POST /api/requests/{id}/cancel`. `/api/events` adds `stack_changed
 {workspace}`, `workspaces_changed`, and `request_queued`, `request_applied`,

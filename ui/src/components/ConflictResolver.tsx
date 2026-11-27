@@ -54,11 +54,14 @@ export function HunkList({
   path,
   hunks,
   mine,
+  labels,
   onChoose,
 }: {
   path: string
   hunks: ConflictHunk[]
   mine: string
+  /** Side titles and button words, when "Keep <name>" would not say where a side came from. */
+  labels?: { theirs: string; ours: string; useTheirs: string; useOurs: string }
   onChoose: (h: ConflictHunk, take: HunkTake, custom?: string) => Promise<void>
 }) {
   const [busy, setBusy] = useState(false)
@@ -81,15 +84,17 @@ export function HunkList({
       {hunks.length === 0 && <p className="muted">No conflict markers in this file (deleted on one side, or binary). Resolve it in your editor.</p>}
       {hunks.map((h) => {
         const other = theirsName(h)
+        const theirsTitle = labels?.theirs ?? other
+        const oursTitle = labels?.ours ?? mine
         return (
           <div key={h.index} className="conf-hunk">
             <div className="conf-sides">
               <div>
-                <div className="conf-label">{other}</div>
+                <div className="conf-label">{theirsTitle}</div>
                 <pre className="conf-code">{h.theirs || ' '}</pre>
               </div>
               <div>
-                <div className="conf-label">{mine}</div>
+                <div className="conf-label">{oursTitle}</div>
                 <pre className="conf-code">{h.ours || ' '}</pre>
               </div>
             </div>
@@ -114,10 +119,10 @@ export function HunkList({
             ) : (
               <div className="conf-opts">
                 <button type="button" className="btn btn-ghost" disabled={busy} onClick={() => void choose(h, 'theirs')}>
-                  {other === 'main' ? WORDS.keepMain : WORDS.keep(other)}
+                  {labels?.useTheirs ?? (other === 'main' ? WORDS.keepMain : WORDS.keep(other))}
                 </button>
                 <button type="button" className="btn btn-ghost" disabled={busy} onClick={() => void choose(h, 'ours')}>
-                  {WORDS.keep(mine)}
+                  {labels?.useOurs ?? WORDS.keep(mine)}
                 </button>
                 <button type="button" className="btn btn-primary" disabled={busy} onClick={() => void choose(h, 'both')}>
                   {WORDS.keepBoth}
