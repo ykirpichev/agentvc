@@ -4,7 +4,7 @@
 //!
 //! - `GET /api/workspaces[?remote=1]`: `agentvc workspace ls --json`.
 //! - `POST /api/workspaces/{id}/stack` with `{"op": "move"|"restack"|
-//!   "rename"|"delete"|"sync", "branch", "onto", "new_name", "queue"}`:
+//!   "rename"|"delete"|"sync"|"submit", "branch", "onto", "new_name", "queue"}`:
 //!   `{"outcome": "applied"|"queued", "request_id", "result"}`.
 //! - `POST /api/requests/{id}/cancel`: cancel a queued edit.
 //! - `GET /api/workspaces/{id}/branches/{name}`: a branch's own commits and

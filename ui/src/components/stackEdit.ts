@@ -52,5 +52,23 @@ export function useStackEdit() {
       refresh()
     }
   }
-  return { run, busy }
+  /** Push the window's stack and open its PRs; says what happened, or null after an error toast. */
+  const submit = async (w: WorkspaceInfo): Promise<string | null> => {
+    setBusy(true)
+    try {
+      const r = await api.stackEdit(w.id, { op: 'submit' })
+      if (r.outcome === 'queued') return `Queued for ${w.name}: ${r.reason ?? 'an agent is working there'}.`
+      const pushed = r.result?.pushed?.length ?? 0
+      const prs = r.result?.prs ?? []
+      if (!pushed && !prs.length) return 'Everything was already pushed.'
+      return `Pushed ${pushed} branch${pushed === 1 ? '' : 'es'}${prs.length ? `; PRs ${prs.map((p) => `#${p.number}`).join(', ')}` : ''}.`
+    } catch (e) {
+      toast.error(e)
+      return null
+    } finally {
+      setBusy(false)
+      refresh()
+    }
+  }
+  return { run, busy, submit }
 }

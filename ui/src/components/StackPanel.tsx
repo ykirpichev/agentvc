@@ -124,7 +124,7 @@ function WindowStack({
   const go = useGo()
   const toast = useToast()
   const { refresh } = useLive()
-  const { run, busy } = useStackEdit()
+  const { run, busy, submit } = useStackEdit()
   const [drag, setDrag] = useState<string | null>(null)
   const [over, setOver] = useState<string | null>(null)
   const sel = selectionFromPath(useLocation().pathname)
@@ -136,10 +136,15 @@ function WindowStack({
   const trunk = trunkName(w)
   const queued = w.requests.filter((r) => r.status === 'queued')
   const lastOk = Math.max(0, ...w.requests.filter((r) => r.status === 'applied').map((r) => r.created_at))
-  const failed = w.requests.filter((r) => r.status === 'failed' && r.created_at > lastOk).slice(0, 1)
+  const failed = w.requests.filter((r) => r.status === 'failed' && r.op !== 'submit' && r.created_at > lastOk).slice(0, 1)
   const stoppedAt = w.pending?.branch ?? w.branches.find((b) => b.conflicts > 0)?.name
 
   const doSync = () => void run(w, { op: 'sync' }, `Synced ${w.name} with ${trunk}.`, true)
+  const restackFirst = w.branches.some((b) => b.needs_restack)
+  const doSubmit = async () => {
+    const r = await submit(w)
+    if (r) toast.ok(r, { undo: false })
+  }
   const doUndo = () => void run(w, { op: 'undo' }, 'Undone.')
 
   const dropOn = (onto: string) => ({
@@ -243,6 +248,20 @@ function WindowStack({
           </div>
         )}
       </div>
+
+      {!readOnly && rows.length > 0 && (
+        <div className="sp-foot">
+          <button
+            type="button"
+            className="sp-btn sp-btn-pri"
+            disabled={busy || stopped || restackFirst}
+            onClick={() => void doSubmit()}
+            title={restackFirst ? 'Sync first: some branches are not on their parent yet' : 'Push every branch and open or update one pull request per branch'}
+          >
+            Submit stack
+          </button>
+        </div>
+      )}
 
       {queued.map((r) => (
         <div key={r.id} className="sp-note">

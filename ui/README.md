@@ -29,7 +29,10 @@ opens on the editor window you are in (`?here=`) or the window of the open
 branch; the name at the top switches windows. **Sync** fetches main, drops
 merged branches and rebases the stack (`POST /api/workspaces/{id}/stack`
 `{"op": "sync"}`); a banner says when main moved, and a clash stops the sync
-on the branch page with the file's two sides. **↶** undoes the window's last
+on the branch page with both sides of each clash, titled *Now on <parent>*
+and *Your change*; Continue carries on, Cancel puts every branch back.
+**Submit stack** pushes every branch and opens or updates one PR per branch
+(`{"op": "submit"}`). **↶** undoes the window's last
 stack change, and every change's toast has Undo too. Click a branch to open
 it, double-click to check it out, drag it onto another branch or onto main to
 move it. Under the stack, **Other windows** lists each other window in one
