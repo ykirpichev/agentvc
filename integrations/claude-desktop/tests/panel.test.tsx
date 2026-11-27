@@ -73,7 +73,7 @@ const rowKey = {
   branch: (ws: string, name: string) => `row-w${ws}-b-${name}`,
 }
 
-test('the pane draws one tree: main, each window\'s stack, versions under what they are on', async ($, on) => {
+test('the pane draws this window\'s stack like gt log, other windows in a line, then agent work', async ($, on) => {
   const clock = mock.clock(on)
   engine(on)
   const calls = daemon(on)
@@ -84,27 +84,24 @@ test('the pane draws one tree: main, each window\'s stack, versions under what t
   for (const surface of SURFACES) {
     const ui = await $.ui.mount({ ...PANE, surface })
     expect(await ui.find({ type: 'Text', text: /^demo9$/ })).toBeDefined()
-    // main's newest commit leads, named by its subject.
-    expect(await ui.find({ type: 'Text', text: 'trunk: sub' })).toBeDefined()
-    // Two windows with stacks: each is named, this one first and marked.
-    const heads = await ui.findAll({ type: 'Text', text: /^(main-window|docs)$/ })
-    expect([...new Set(heads.map(h => h.text))]).toEqual(['main-window', 'docs'])
     expect(await ui.find({ type: 'Text', text: /this window/ })).toBeDefined()
-    for (const name of ['mul', 'div', 'cli-ops']) expect(await ui.find({ key: rowKey.branch(MAIN_WS, name) })).toBeDefined()
-    expect(await ui.find({ key: rowKey.branch(DOCS_WS, 'usage-docs') })).toBeDefined()
-    expect((await ui.find({ key: rowKey.branch(MAIN_WS, 'mul') }))?.text).toContain('needs restack')
-    // Versions: claude's on an older main commit (one behind), codex's on div.
-    expect((await ui.find({ key: rowKey.version(2) }))?.text).toContain('↓1')
+    // This window's branches, newest on top: cli-ops and div above mul, main last.
+    const order = ['cli-ops', 'div', 'mul'].map(async n => (await ui.find({ key: rowKey.branch(MAIN_WS, n) })) !== undefined)
+    expect(await Promise.all(order)).toEqual([true, true, true])
+    // Main's commit list is gone; the other window is one line.
+    expect(await ui.find({ type: 'Text', text: 'trunk: sub' })).toBeUndefined()
+    expect(await ui.find({ key: rowKey.branch(DOCS_WS, 'usage-docs') })).toBeUndefined()
+    expect(await ui.find({ key: `row-win-${DOCS_WS}` })).toBeDefined()
+    // Agent work: the task's tries, with their status.
+    expect(await ui.find({ type: 'Text', text: 'AGENT WORK' })).toBeDefined()
     expect((await ui.find({ key: rowKey.version(3) }))?.text).toContain('Tests fail')
-    // A version on a branch tip is not "behind main".
-    expect((await ui.find({ key: rowKey.version(3) }))?.text).not.toContain('↓')
-    // The old sections are gone: one tree, no separate lists.
-    expect(await ui.find({ type: 'Text', text: /RUNNING|TASKS ·/ })).toBeUndefined()
+    // The stack's own buttons.
+    for (const key of ['sync', 'stack-undo']) expect(await ui.find({ key })).toBeDefined()
     await ui.unmount()
   }
 })
 
-test('pressing a version shows its actions, each with what it does, and its diff', async ($, on) => {
+test('pressing a try shows its actions and its diff', async ($, on) => {
   const clock = mock.clock(on)
   engine(on)
   const calls = daemon(on)
@@ -115,14 +112,13 @@ test('pressing a version shows its actions, each with what it does, and its diff
   await ui.press({ key: rowKey.version(2) })
   await clock.settle()
   expect(calls.map(c => c.path)).toContain('/api/diff?b=a2')
-  for (const key of ['choose', 'update-main', 'rebase-onto', 'open-pr', 'discard']) expect(await ui.find({ key })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /Pick this as the version to ship/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /Main has 1 new commit/ })).toBeDefined()
+  for (const key of ['choose', 'update-main', 'open-pr', 'discard']) expect(await ui.find({ key })).toBeDefined()
+  expect((await ui.find({ key: 'choose' }))?.text).toBe('Use this')
+  expect(await ui.find({ key: 'rebase-onto' })).toBeUndefined()
   const diff = await ui.find({ type: 'Code', text: /@@ / })
   expect(diff).toBeDefined()
   expect(await ui.find({ type: 'Link', text: 'Open in the browser' })).toBeDefined()
 
-  // Choose posts to the daemon.
   await ui.press({ key: 'choose' })
   expect(calls.some(c => c.method === 'POST' && c.path === '/api/attempts/2/promote')).toBe(true)
   await ui.unmount()
@@ -155,42 +151,30 @@ test('a version shows its recorded tests, cost and notes', async ($, on) => {
   await ui.unmount()
 })
 
-test('Rebase onto… picks a target by press, previews, then rebases', async ($, on) => {
+test('Sync and Submit stack act on this window', async ($, on) => {
   const clock = mock.clock(on)
   const toasts = engine(on)
   const calls = daemon(on, {
     posts: {
-      '/api/attempts/2/rebase': body =>
-        (body as { preview?: boolean }).preview
-          ? { rebase: { changes: [{ path: 'calc/fmt.py', kind: 'added' }], conflict_files: [], rebased: true, preview: true, resolved: [] } }
-          : { rebase: { changes: [], conflicts: [], rebased: true }, attempt: {} },
+      [`/api/workspaces/${MAIN_WS}/stack`]: body =>
+        (body as { op: string }).op === 'submit'
+          ? { outcome: 'applied', request_id: 'r2', workspace: MAIN_WS, result: { pushed: ['mul', 'div'], prs: [{ branch: 'mul', number: 7, url: 'u' }] } }
+          : { outcome: 'applied', request_id: 'r1', workspace: MAIN_WS, result: { restack: { conflict: null } } },
     },
   })
   await $.session.start({ cwd: HERE, surface: 'desktop', isInteractive: true })
   await clock.settle()
 
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
-  await ui.press({ key: rowKey.version(2) })
-  await ui.press({ key: 'rebase-onto' })
-  // The newest main commit is a target; the one it is already on is not.
-  const head = (FIXTURE['/api/graph'] as { trunk: { commit: string }[] }).trunk[0]!.commit
-  expect(await ui.find({ key: `drop-c${head}` })).toBeDefined()
-  // Stacking on codex's version is allowed too.
-  expect(await ui.find({ key: 'drop-v3' })).toBeDefined()
-  await ui.press({ key: `drop-c${head}` })
-  const preview = calls.find(c => c.method === 'POST' && c.path === '/api/attempts/2/rebase')
-  expect(preview?.body).toEqual({ onto: head, preview: true })
-  expect(await ui.find({ type: 'Text', text: /Rebase claude onto trunk: sub\?/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /Merges cleanly/ })).toBeDefined()
-
-  await ui.press({ key: 'apply-move' })
-  const applied = calls.filter(c => c.method === 'POST' && c.path === '/api/attempts/2/rebase').at(-1)
-  expect(applied?.body).toEqual({ onto: head, no_fetch: true, keep_conflicts: false })
-  expect(toasts).toContain('Rebased claude onto trunk: sub.')
+  await ui.press({ key: 'sync' })
+  expect(calls.find(c => c.method === 'POST')?.body).toEqual({ op: 'sync', keep_conflicts: true })
+  // mul needs a restack in the fixture, so Submit waits for a Sync.
+  expect(await ui.find({ key: 'submit' })).toBeUndefined()
+  expect(toasts.some(t => t.startsWith('Synced main-window'))).toBe(true)
   await ui.unmount()
 })
 
-test('a branch restacks, and moves onto another branch by press', async ($, on) => {
+test('a branch checks out, and moves onto another branch by press', async ($, on) => {
   const clock = mock.clock(on)
   engine(on)
   const calls = daemon(on, {
@@ -202,15 +186,14 @@ test('a branch restacks, and moves onto another branch by press', async ($, on) 
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
   await ui.press({ key: rowKey.branch(MAIN_WS, 'mul') })
   await clock.settle()
-  expect(await ui.find({ type: 'Text', text: /Replays this branch, and the branches above it/ })).toBeDefined()
-  await ui.press({ key: 'restack' })
-  expect(calls.find(c => c.method === 'POST')?.body).toEqual({ op: 'restack', branch: 'mul', keep_conflicts: true })
+  expect(await ui.find({ key: 'restack' })).toBeUndefined()
+  await ui.press({ key: 'checkout' })
+  expect(calls.find(c => c.method === 'POST')?.body).toEqual({ op: 'checkout', branch: 'mul' })
 
   await ui.press({ key: rowKey.branch(MAIN_WS, 'cli-ops') })
   await ui.press({ key: 'move-onto' })
-  // Its own parent and other windows' branches are not targets.
+  // Its own parent is not a target.
   expect(await ui.find({ key: `drop-w${MAIN_WS}-b-div` })).toBeUndefined()
-  expect(await ui.find({ key: `drop-w${DOCS_WS}-b-usage-docs` })).toBeUndefined()
   await ui.press({ key: `drop-w${MAIN_WS}-b-mul` })
   expect(calls.filter(c => c.method === 'POST').at(-1)?.body).toEqual({ op: 'move', branch: 'cli-ops', onto: 'mul', keep_conflicts: true })
   await ui.unmount()
@@ -242,14 +225,12 @@ test('a clash shows both sides with Keep buttons', async ($, on) => {
   await clock.settle()
 
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
-  expect((await ui.find({ key: rowKey.version(2) }))?.text).toContain('1 conflict')
+  expect((await ui.find({ key: rowKey.version(2) }))?.text).toContain('1 clash')
   await ui.press({ key: rowKey.version(2) })
   await clock.settle()
   expect(await ui.find({ type: 'Code', text: 'return str(x)\n' })).toBeDefined()
   expect((await ui.find({ key: 'keep-theirs-calc/fmt.py-1' }))?.text).toBe('Keep main')
   expect((await ui.find({ key: 'keep-ours-calc/fmt.py-1' }))?.text).toBe('Keep claude')
-  // No moves while it clashes.
-  expect(await ui.find({ key: 'rebase-onto' })).toBeUndefined()
   await ui.press({ key: 'keep-theirs-calc/fmt.py-1' })
   expect(calls.find(c => c.method === 'POST')?.body).toEqual({ path: 'calc/fmt.py', hunks: [{ index: 1, take: 'theirs' }] })
   await ui.unmount()

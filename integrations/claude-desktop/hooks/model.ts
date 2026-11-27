@@ -21,17 +21,10 @@ import type {
   WorkspaceList,
   WsBranch,
 } from './shared/api/types'
-import {
-  canMoveBranch,
-  canMoveOnto,
-  canStackOnto,
-  layout,
-  stackStale,
-  type Cell,
-  type GraphRow,
-} from './shared/core/graph'
-import { shortSha, statusWords, theirsName, versionName } from './shared/core/words'
-import { timeAgo } from './shared/lib/format'
+import { canMoveBranch, type Cell } from './shared/core/graph'
+import { nextStep } from './shared/core/next'
+import { mainAhead, needsSync, stackRows, trunkName, windowState } from './shared/core/stack'
+import { prWords, statusWords, theirsName, tryName, versionName } from './shared/core/words'
 
 export const EMPTY_BOARD: AgentvcBoard = {
   isReachable: false,
@@ -185,181 +178,156 @@ export function nameOf(board: AgentvcBoard, id: number): string {
   return g ? versionName(g.attempt) : `a${id}`
 }
 
-const trunkName = (w: WorkspaceInfo) => w.trunk.replace(/^origin\//, '')
+/** The window the pane shows: the one Claude Code runs in, else the first with a stack. */
+export function shownWindow(board: AgentvcBoard): WorkspaceInfo | undefined {
+  const ws = board.workspaces
+  return ws.find(w => w.id === board.here) ?? ws.find(w => w.branches.length > 0 || !!w.pending) ?? ws[0]
+}
 
-/** The tree: main, each window's stack, every version under what it is on. */
+/** Tasks whose tries are listed under Agent work: open, and not made into a branch. */
+export function agentTasks(board: AgentvcBoard): { task: TaskSummary; tries: GraphAttempt[] }[] {
+  const graph = board.graph
+  if (!graph) return []
+  const onBranch = new Set(board.workspaces.flatMap(w => w.branches.map(b => b.task).filter((t): t is number => t !== null)))
+  return board.tasks
+    .filter(t => !onBranch.has(t.id))
+    .map(task => ({ task, tries: graph.attempts.filter(g => g.attempt.task_id === task.id) }))
+    .filter(({ tries }) => tries.length > 0 && nextStep(tries).kind !== 'done')
+}
+
+/**
+ * The tree, the same as the web sidebar: this window's stack like `gt log`
+ * (newest branch on top, main at the bottom), the other windows one line
+ * each, then agent work: each open task with its tries.
+ */
 export function paneRows(board: AgentvcBoard, ui: AgentvcUi): PaneRow[] {
   const graph = board.graph
   if (!graph) return []
-  const windows = board.workspaces
-  const here = board.here
-  const named = windows.filter(w => w.branches.length > 0 || w.pending).length > 1
-  const tips = new Set(windows.flatMap(w => w.branches.map(b => b.tip).filter((t): t is string => !!t)))
-  const { rows, onTip } = layout(graph, board.tasks, {
-    showClosed: ui.showClosed,
-    // This window first.
-    windows: [...windows]
-      .sort((a, b) => Number(b.id === here) - Number(a.id === here))
-      .map(w => ({ id: w.id, base: w.base })),
-    tips,
-  })
-  const byId = new Map(graph.attempts.map(g => [g.attempt.id, g]))
-  const taskName = new Map(board.tasks.map(t => [t.id, t.goal]))
-  const running = new Set(board.running)
-  const newest = graph.trunk[0]?.commit
-
-  const pick = ui.pick
-  const pickedV = pick?.kind === 'version' ? byId.get(pick.id) : undefined
-  const pickedB = pick?.kind === 'branch' ? findBranch(board, pick.workspace, pick.name) : undefined
-
   const out: PaneRow[] = []
-  const draw = (r: GraphRow, lead: string) => {
-    if (r.kind === 'trunk') {
-      const c = graph.trunk.find(t => t.commit === r.commit)
-      if (!c) return
-      let drop: Drop | null = null
-      if (pickedV && canMoveOnto(pickedV, c.commit)) {
-        drop = { kind: 'onto-commit', attempt: pickedV.attempt.id, commit: c.commit, where: c.summary || shortSha(c.commit) }
-      } else if (pickedB && c.commit === newest && canMoveBranch(pickedB.w, pickedB.b.name, pickedB.w.trunk)) {
-        drop = { kind: 'branch-onto', workspace: pickedB.w.id, branch: pickedB.b.name, onto: pickedB.w.trunk, where: trunkName(pickedB.w) }
-      }
-      out.push({
-        ...blankRow(r.key, lead),
-        glyph: r.first ? '◉' : '●',
-        glyphColor: c.on_upstream ? 'claude' : 'inactive',
-        label: c.summary || shortSha(c.commit),
-        sub: [
-          r.first && c.on_upstream ? graph.upstream : null,
-          c.on_upstream ? null : 'not on main',
-          shortSha(c.commit),
-          timeAgo(c.time),
-        ]
-          .filter(Boolean)
-          .join(' · '),
-        isTarget: !!drop,
-        drop,
-      })
-      return
-    }
-    if (r.kind === 'task') {
-      out.push({
-        ...blankRow(r.key, lead + gutter(r.prefix)),
-        label: r.task === null ? 'No task' : (taskName.get(r.task) ?? `Task ${r.task}`),
-        isBold: true,
-      })
-      return
-    }
-    if (r.kind === 'version') {
-      const g = byId.get(r.id)
-      if (!g) return
-      const a = g.attempt
-      const st = statusWords(a.status)
-      const isRunning = running.has(a.id)
-      const stale = stackStale(graph, g)
-      const onBranch = !!g.base_commit && tips.has(g.base_commit)
-      const badges: Badge[] = []
-      if (g.conflicts > 0) badges.push({ text: `${g.conflicts} conflict${g.conflicts === 1 ? '' : 's'}`, color: 'error' })
-      else if (stale) badges.push({ text: `${versionName(stale.attempt)} changed`, color: 'warning' })
-      else if (!onBranch && !g.stacked_on && (g.behind ?? 0) > 0) badges.push({ text: `↓${g.behind}`, color: 'warning' })
-      if (g.pr) badges.push({ text: `#${g.pr.number}`, color: 'suggestion' })
-      if (isRunning) badges.push({ text: 'running', color: 'claude' })
-      const parentTask = g.stacked_on ? byId.get(g.stacked_on.attempt)?.attempt.task_id : undefined
-      const sel: AgentvcSel = { kind: 'version', id: a.id }
-      const drop: Drop | null =
-        pickedV && canStackOnto(graph, pickedV, g)
-          ? { kind: 'onto-version', attempt: pickedV.attempt.id, target: a.id, where: versionName(a) }
-          : null
-      out.push({
-        ...blankRow(r.key, lead + gutter(r.prefix)),
-        glyph: isRunning ? '●' : a.status === 'promoted' ? '★' : a.status === 'abandoned' ? '⊘' : '○',
-        glyphColor: isRunning ? 'claude' : TONE[st.tone] ?? 'inactive',
-        label: versionName(a),
-        isBold: a.status === 'promoted',
-        isStruck: a.status === 'abandoned',
-        isDim: a.status === 'abandoned',
-        sub: [
-          st.label,
-          g.stacked_on && parentTask !== a.task_id && a.task_id !== null
-            ? (taskName.get(a.task_id) ?? `Task ${a.task_id}`)
-            : null,
-        ]
-          .filter(Boolean)
-          .join(' · '),
-        badges,
-        press: sel,
-        isSelected: sameSel(sel, ui.sel) || sameSel(sel, ui.pick),
-        isTarget: !!drop,
-        drop,
-      })
-      return
-    }
-    // A window's stack of branches.
-    const w = windows.find(x => x.id === r.workspace)
-    if (!w) return
-    const base = lead + (r.lead === 'trunk' ? '│  ' : '   ')
-    const queued = w.requests.filter(q => q.status === 'queued')
-    if (w.branches.length === 0 && !w.pending && queued.length === 0) return
-    if (named || w.state === 'agent_running') {
-      out.push({
-        ...blankRow(`${r.key}-head`, base),
-        label: named ? w.name : '',
-        sub: named && w.id === here ? 'this window' : null,
-        isBold: true,
-        badges: [
-          ...(w.state === 'agent_running' ? [{ text: 'agent working', color: 'claude' }] : []),
-          ...(w.kind === 'remote' ? [{ text: `read-only · ${w.machine}`, color: 'inactive' }] : []),
-        ],
-      })
-    }
+  const w = shownWindow(board)
+  const pickedB = ui.pick?.kind === 'branch' ? findBranch(board, ui.pick.workspace, ui.pick.name) : undefined
+  const triesOf = new Map(board.tasks.map(t => [t.id, t.attempts.total - t.attempts.abandoned]))
+
+  if (w && (w.branches.length > 0 || w.pending)) {
+    out.push({
+      ...blankRow(`w${w.id}-head`, ''),
+      label: w.name,
+      sub: w.id === board.here ? 'this window' : null,
+      isBold: true,
+      badges: [
+        ...(w.state === 'agent_running' ? [{ text: 'agent working', color: 'claude' }] : []),
+        ...(w.kind === 'remote' ? [{ text: `read-only · ${w.machine}`, color: 'inactive' }] : []),
+      ],
+    })
     if (w.pending) {
       out.push({
-        ...blankRow(`${r.key}-stop`, base),
+        ...blankRow(`w${w.id}-stop`, ''),
         glyph: '!',
         glyphColor: 'error',
-        label: `${w.pending.branch} clashes with its parent.`,
+        label: `Stopped at ${w.pending.branch}: a file changed on both sides`,
         press: { kind: 'branch', workspace: w.id, name: w.pending.branch },
-        badges: [{ text: 'stopped', color: 'error' }],
+      })
+    } else if (needsSync(w)) {
+      const ahead = mainAhead(w)
+      out.push({
+        ...blankRow(`w${w.id}-sync`, ''),
+        glyph: '↓',
+        glyphColor: 'warning',
+        label: ahead > 0 ? `${trunkName(w)} moved ${ahead} commit${ahead === 1 ? '' : 's'}. Sync to rebase your stack on it.` : 'Some branches are behind their parent. Sync to rebase them.',
       })
     }
-    for (const b of w.branches) {
-      const indent = base + '   '.repeat(Math.max(0, b.depth)) + '└ '
+    for (const { branch: b, lane } of stackRows(w)) {
       const badges: Badge[] = []
-      if (b.current) badges.push({ text: 'checked out', color: 'inactive' })
-      if (b.conflicts > 0) badges.push({ text: `${b.conflicts} conflict${b.conflicts === 1 ? '' : 's'}`, color: 'error' })
-      else if (b.needs_restack) badges.push({ text: 'needs restack', color: 'warning' })
-      else if (b.behind > 0 && b.parent_kind === 'trunk') badges.push({ text: `↓${b.behind}`, color: 'warning' })
-      if (b.pr) badges.push({ text: `#${b.pr.number}`, color: 'suggestion' })
+      if (b.conflicts > 0) badges.push({ text: 'clash', color: 'error' })
+      if (b.status === 'running') badges.push({ text: 'agent', color: 'claude' })
+      const tries = b.task !== null ? (triesOf.get(b.task) ?? 0) : 0
+      if (tries > 1) badges.push({ text: `${tries} tries`, color: 'suggestion' })
       if (b.parent_kind === 'other_window') badges.push({ text: `on ${b.parent_workspace ?? 'another window'}`, color: 'inactive' })
+      if (b.pr) {
+        const pw = prWords(b.pr.state, b.pr.status)
+        badges.push({ text: `#${b.pr.number}${pw ? ` ${pw.short}` : ''}`, color: pw ? (TONE[pw.tone] ?? 'suggestion') : 'suggestion' })
+      }
       const sel: AgentvcSel = { kind: 'branch', workspace: w.id, name: b.name }
       const drop: Drop | null =
         pickedB && pickedB.w.id === w.id && canMoveBranch(w, pickedB.b.name, b.name)
           ? { kind: 'branch-onto', workspace: w.id, branch: pickedB.b.name, onto: b.name, where: b.name }
           : null
-      const dot = b.conflicts > 0 ? 'error' : b.status === 'running' ? 'claude' : b.pr?.state === 'merged' ? 'success' : b.needs_restack ? 'inactive' : 'success'
       out.push({
-        ...blankRow(`${r.key}-b-${b.name}`, indent),
-        glyph: '●',
-        glyphColor: dot,
+        ...blankRow(`w${w.id}-b-${b.name}`, '  '.repeat(lane)),
+        glyph: b.current ? '●' : '○',
+        glyphColor: b.conflicts > 0 ? 'error' : b.current ? 'claude' : 'inactive',
         label: b.name,
         isBold: b.current,
+        sub: b.current ? "you're here" : null,
         badges,
         press: sel,
         isSelected: sameSel(sel, ui.sel) || sameSel(sel, ui.pick),
         isTarget: !!drop,
         drop,
       })
-      const under = b.tip ? onTip.get(b.tip) : undefined
-      for (const sub of under ?? []) draw(sub, base + '   '.repeat(Math.max(0, b.depth) + 1))
     }
-    for (const q of queued) {
+    const toTrunk: Drop | null =
+      pickedB && pickedB.w.id === w.id && canMoveBranch(w, pickedB.b.name, w.trunk)
+        ? { kind: 'branch-onto', workspace: w.id, branch: pickedB.b.name, onto: w.trunk, where: trunkName(w) }
+        : null
+    out.push({ ...blankRow(`w${w.id}-trunk`, ''), glyph: '■', glyphColor: 'inactive', label: trunkName(w), isDim: true, isTarget: !!toTrunk, drop: toTrunk })
+    for (const q of w.requests.filter(r => r.status === 'queued')) {
       out.push({
-        ...blankRow(`${r.key}-q-${q.id}`, base),
+        ...blankRow(`w${w.id}-q-${q.id}`, ''),
         label: `${q.op} ${q.branch ?? ''}${q.onto ? ` onto ${q.onto}` : ''}`,
-        badges: [{ text: 'queued', color: 'claude' }],
+        badges: [{ text: 'waiting for the agent', color: 'claude' }],
       })
     }
   }
-  for (const r of rows) draw(r, '')
+
+  const others = board.workspaces.filter(x => x !== w && (x.branches.length > 0 || x.pending || x.state === 'agent_running'))
+  if (others.length > 0) {
+    out.push({ ...blankRow('others-head', ''), label: 'OTHER WINDOWS', isDim: true })
+    for (const x of others) {
+      const st = windowState(x)
+      const top = stackRows(x)[0]?.branch
+      out.push({
+        ...blankRow(`win-${x.id}`, ''),
+        label: x.name,
+        sub: x.branches.length ? `${x.branches.length} branch${x.branches.length === 1 ? '' : 'es'}` : 'no stack',
+        badges: st ? [{ text: st.label, color: st.tone === 'bad' ? 'error' : st.tone === 'run' ? 'claude' : st.tone === 'warn' ? 'warning' : 'inactive' }] : [],
+        press: top ? { kind: 'branch', workspace: x.id, name: top.name } : null,
+      })
+    }
+  }
+
+  const work = agentTasks(board)
+  if (work.length > 0) {
+    out.push({ ...blankRow('work-head', ''), label: 'AGENT WORK', isDim: true })
+    const running = new Set(board.running)
+    for (const { task, tries } of work) {
+      out.push({ ...blankRow(`t${task.id}`, ''), label: task.goal, isBold: true })
+      for (const g of tries) {
+        const a = g.attempt
+        if (a.status === 'abandoned' && !ui.showClosed) continue
+        const st = statusWords(a.status)
+        const isRunning = running.has(a.id)
+        const badges: Badge[] = []
+        if (g.conflicts > 0) badges.push({ text: `${g.conflicts} clash${g.conflicts === 1 ? '' : 'es'}`, color: 'error' })
+        if (g.pr) badges.push({ text: `#${g.pr.number}`, color: 'suggestion' })
+        if (isRunning) badges.push({ text: 'running', color: 'claude' })
+        const sel: AgentvcSel = { kind: 'version', id: a.id }
+        out.push({
+          ...blankRow(`v${a.id}`, '  '),
+          glyph: isRunning ? '●' : a.status === 'promoted' ? '★' : a.status === 'abandoned' ? '⊘' : '○',
+          glyphColor: isRunning ? 'claude' : (TONE[st.tone] ?? 'inactive'),
+          label: tryName(a, g.agent?.notes.at(-1)?.text ?? a.prompt),
+          isBold: a.status === 'promoted',
+          isStruck: a.status === 'abandoned',
+          isDim: a.status === 'abandoned',
+          sub: `${versionName(a)} · ${st.label}`,
+          badges,
+          press: sel,
+          isSelected: sameSel(sel, ui.sel),
+        })
+      }
+    }
+  }
   return out
 }
 
