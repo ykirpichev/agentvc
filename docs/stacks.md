@@ -244,6 +244,36 @@ always queue) answering `{"outcome": "applied"|"queued", "request_id"}`, and
 Workspace error codes: `no_workspace`, `remote_workspace`, `name_taken`,
 `bad_name`, `stack_locked`, `no_request`, `request_not_queued`.
 
+## One space across checkout folders (monorepos)
+
+A monorepo's build often can't run twice in one checkout, so you clone it
+into several folders, each with one workspace and its own PR stack. These
+folders join one *space*: any of them (`agentvc workspace ls`, its daemon,
+the web UI, the VS Code/Cursor panel, the Claude Code pane) lists the
+workspaces and stacks of every checkout in the space on this machine, and
+can change them. Sync, restack, move, rename, delete, submit, merge,
+conflict resolution and agents all run in the checkout that owns the
+workspace, honoring its lock and queue.
+
+- By default the space is the checkout's remote URL, normalized
+  (`git@github.com:o/r.git` and `https://github.com/o/r` are both
+  `github.com/o/r`), so clones of one repo find each other on their own.
+- `agentvc workspace space` shows the space and its checkouts;
+  `agentvc workspace space NAME` joins another space (git config
+  `agentvc.space`); `agentvc workspace space none` joins none;
+  `--reset` goes back to the remote's URL.
+- A checkout joins when it is first listed (any `workspace ls`, or its
+  daemon starting). The registry is `~/.agentvc/checkouts.json`
+  (`$AGENTVC_HOME` overrides `~/.agentvc`); folders that are gone drop out.
+- Branches don't cross clones: `stack give` to a workspace in another
+  checkout fails with `other_checkout`. Push the branch and `stack get` it
+  there instead.
+- Agent ids are unique across the space, so `agentvc agent show agN` works
+  from any of its checkouts.
+
+Other machines aren't part of this yet; `workspace publish` and
+`ls --remote` still show their stacks read-only.
+
 ## Agents on a stack
 
 Any branch of any workspace's stack (or main) can be the starting point of a

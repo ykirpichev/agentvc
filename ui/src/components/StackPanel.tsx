@@ -82,7 +82,7 @@ export function StackPanel({ tasks, agents }: { tasks: TaskSummary[] | undefined
       </h3>
       {ordered.length === 0 && (
         <p className="sp-empty muted">
-          No workspaces yet. Each git worktree (each editor window) is a workspace with its own stack: run <code>agentvc stack create</code> in one.
+          No workspaces yet. Each git worktree or checkout folder (each editor window) is a workspace with its own stack: run <code>agentvc stack create</code> in one.
         </p>
       )}
       {ordered.map((w) => (
@@ -205,6 +205,11 @@ function WindowStack({
           <span className="sp-ws-name">{w.name}</span>
           {mine && <span className="sp-here">this window</span>}
           {w.kind === 'remote' && <span className="sp-here">{w.machine}</span>}
+          {w.other_checkout && (
+            <span className="sp-here" title={`Another checkout of this repo: ${w.checkout}`}>
+              other folder
+            </span>
+          )}
           <span className="sp-ws-meta">
             {rows.length ? `${rows.length} branch${rows.length === 1 ? '' : 'es'} on ${trunk}` : `no unmerged branches · on ${trunk}`}
             {sync && !stoppedAt && rows.length > 0 && (

@@ -7,6 +7,7 @@ pub mod blame;
 pub mod bridge;
 pub mod bundle;
 pub mod check;
+pub mod checkouts;
 pub mod combine;
 pub mod config;
 pub mod conflicts;

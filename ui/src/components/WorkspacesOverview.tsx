@@ -18,7 +18,10 @@ export function WorkspacesOverview() {
   return (
     <section className="wo" aria-label="Workspaces">
       <h1 className="rv-title">Workspaces</h1>
-      <p className="muted wo-lead">Each workspace is a git worktree with its own stack. Pick a branch to review, rebase or move it.</p>
+      <p className="muted wo-lead">
+        Each workspace is a git worktree{list.some((w) => w.other_checkout) ? ' or another checkout folder of this repo' : ''} with its own stack. Pick a
+        branch to review, rebase or move it.
+      </p>
       <div className="wo-grid">
         {list.map((w) => (
           <Card key={w.id} w={w} />
@@ -42,6 +45,7 @@ function Card({ w }: { w: WorkspaceInfo }) {
       </div>
       <div className="wo-path muted" title={w.path}>
         {w.path.split('/').filter(Boolean).slice(-2).join('/')}
+        {w.other_checkout ? ' · other folder' : ''}
       </div>
       {rows.length === 0 ? (
         <p className="muted wo-none">No unmerged branches.</p>
