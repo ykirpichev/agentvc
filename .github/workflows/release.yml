@@ -1,0 +1,166 @@
+name: Release
+
+# One release of everything a person needs to use agentvc day to day:
+#
+# - agentvc + agentvcd (review UI built in) for macOS, Linux and Windows,
+# - the VS Code / Cursor extension (.vsix, also published to Open VSX for
+#   Cursor and VSCodium; the VS Code Marketplace when VSCE_PAT works),
+# - the Claude Code plugins as zips (they also install straight from this
+#   repository's plugin marketplace).
+#
+# Run it from the Actions tab (or `actions_run_trigger`) with a version such
+# as 0.2.0: it creates the tag v0.2.0 on the commit it ran on. Pushing a tag
+# `v*` works too. Install steps: docs/install.md, which is also the release
+# notes.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release, e.g. 0.2.0"
+        required: true
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  VERSION_IN: ${{ inputs.version || github.ref_name }}
+
+jobs:
+  binaries:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-latest, target: aarch64-apple-darwin }
+          - { os: macos-latest, target: x86_64-apple-darwin }
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc }
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - name: Build the review UI (embedded into agentvcd)
+        working-directory: ui
+        run: npm ci && npm run build
+      - name: Build agentvc and agentvcd
+        run: cargo build --release --locked --target ${{ matrix.target }} -p agentvc-cli -p agentvcd
+      - name: Package
+        run: |
+          v="${VERSION_IN#v}"
+          name="agentvc-$v-${{ matrix.target }}"
+          mkdir -p "dist/$name"
+          ext=""; [ "${{ runner.os }}" = Windows ] && ext=.exe
+          cp "target/${{ matrix.target }}/release/agentvc$ext" "target/${{ matrix.target }}/release/agentvcd$ext" "dist/$name/"
+          cp README.md LICENSE-MIT LICENSE-APACHE docs/install.md "dist/$name/"
+          cd dist
+          if [ "${{ runner.os }}" = Windows ]; then
+            7z a -tzip "$name.zip" "$name" >/dev/null
+          else
+            tar czf "$name.tar.gz" "$name"
+          fi
+          rm -rf "$name"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bin-${{ matrix.target }}
+          path: dist/*
+
+  vscode:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: integrations/vscode
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: integrations/vscode/package-lock.json
+      - run: npm ci
+      - name: Set the version
+        run: npm version --no-git-tag-version --allow-same-version "${VERSION_IN#v}"
+      - run: npm run typecheck
+      - run: npm run test:unit
+      - run: npm run package
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vsix
+          path: integrations/vscode/agentvc.vsix
+
+  plugins:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Zip the Claude Code plugins
+        run: |
+          mkdir -p dist
+          (cd integrations && zip -qr ../dist/agentvc-claude-code-plugin.zip claude-code -x 'claude-code/tests/*')
+          (cd integrations && zip -qr ../dist/agentvc-claude-panel-plugin.zip claude-desktop -x 'claude-desktop/tests/*' '*/node_modules/*')
+      - uses: actions/upload-artifact@v4
+        with:
+          name: plugins
+          path: dist/*
+
+  release:
+    needs: [binaries, vscode, plugins]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        run: cd dist && sha256sum * > SHA256SUMS && cat SHA256SUMS
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          v="${VERSION_IN#v}"
+          tag="v$v"
+          gh release view "$tag" >/dev/null 2>&1 ||
+            gh release create "$tag" --target "$GITHUB_SHA" --title "agentvc $v" --notes-file docs/install.md
+          gh release upload "$tag" dist/* --clobber
+
+  publish-extension:
+    # After the release exists, so a registry failure never blocks it.
+    needs: [release]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: vsix
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Publish to Open VSX (Cursor, VSCodium)
+        env:
+          OVSX_PAT: ${{ secrets.OVSX_PAT }}
+        run: |
+          if [ -z "$OVSX_PAT" ]; then echo "::warning::OVSX_PAT not set; skipping Open VSX"; exit 0; fi
+          # Creates the namespace on first publish; fails harmlessly once it exists.
+          npx --yes ovsx create-namespace avc -p "$OVSX_PAT" || true
+          npx --yes ovsx publish agentvc.vsix -p "$OVSX_PAT"
+      - name: Publish to the VS Code Marketplace
+        continue-on-error: true
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+        run: |
+          if [ -z "$VSCE_PAT" ]; then echo "::warning::VSCE_PAT not set; skipping the Marketplace"; exit 0; fi
+          npx --yes @vscode/vsce publish --no-dependencies --packagePath agentvc.vsix -p "$VSCE_PAT"

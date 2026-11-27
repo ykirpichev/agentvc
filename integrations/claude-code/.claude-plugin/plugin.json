@@ -1,6 +1,6 @@
 {
   "name": "agentvc",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Agent-first version control for Claude Code: snapshot every edit into an agentvc attempt, drive the attempt tree over MCP, and fork, compare and promote attempts with slash commands.",
   "author": { "name": "agentvc" },
   "homepage": "https://github.com/ykirpichev/agentvc",

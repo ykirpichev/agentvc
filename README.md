@@ -21,8 +21,9 @@ Status: early, used daily on this repository.
 ## Day one
 
 ```sh
-git clone https://github.com/ykirpichev/agentvc ~/src/agentvc
-cd ~/src/agentvc && scripts/install.sh --vscode     # agentvc, agentvcd, the VS Code / Cursor extension
+curl -fsSL https://raw.githubusercontent.com/ykirpichev/agentvc/main/scripts/get.sh | sh -s -- --vscode
+# agentvc, agentvcd and the VS Code / Cursor extension from the latest release;
+# Claude Code and by-hand steps: docs/install.md
 
 cd ~/src/my-repo
 agentvcd                                   # review UI at http://localhost:7420 for the whole space
