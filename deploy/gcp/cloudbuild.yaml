@@ -1,0 +1,7 @@
+# Build the agentvc-cloud image in Cloud Build and push it to Artifact
+# Registry. Run by deploy/gcp/deploy.sh build.
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args: ["build", "-f", "Dockerfile.cloud", "-t", "${_IMAGE}", "."]
+images: ["${_IMAGE}"]
+timeout: 3600s
