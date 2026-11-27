@@ -347,6 +347,8 @@ pub enum Op {
     Checkout {
         branch: String,
     },
+    /// Undo that workspace's latest stack command (`agentvc stack undo`).
+    Undo,
 }
 
 impl Op {
@@ -357,7 +359,21 @@ impl Op {
             | Op::Delete { branch }
             | Op::Checkout { branch } => Some(branch),
             Op::Restack { branch } => branch.as_deref(),
-            Op::Sync => None,
+            Op::Sync | Op::Undo => None,
+        }
+    }
+
+    /// The command line this edit stands for, as the undo log shows it.
+    pub fn label(&self) -> String {
+        match self {
+            Op::Move { branch, onto } => format!("move {branch} --onto {onto}"),
+            Op::Restack { branch: Some(b) } => format!("restack --branch {b}"),
+            Op::Restack { branch: None } => "restack".into(),
+            Op::Rename { branch, new_name } => format!("rename {branch} {new_name}"),
+            Op::Delete { branch } => format!("delete {branch}"),
+            Op::Sync => "sync".into(),
+            Op::Checkout { branch } => format!("checkout {branch}"),
+            Op::Undo => "undo".into(),
         }
     }
 }
@@ -496,6 +512,7 @@ fn run_op(w: &mut Window, op: &Op, keep: bool) -> Result<Value> {
             w.settle()?;
             Ok(json!({ "checked_out": w.switch(branch)? }))
         }
+        Op::Undo => Ok(json!(crate::stackundo::undo(w, None)?)),
         Op::Sync => {
             let s = w.sync(true, true, keep)?;
             if s.restack.conflict.is_some() {
@@ -508,7 +525,14 @@ fn run_op(w: &mut Window, op: &Op, keep: bool) -> Result<Value> {
 
 /// Run `req` in `w` and record the outcome in the request file.
 fn settle_request(w: &mut Window, mut req: Request) -> (Request, Result<Value>) {
+    let path = w.path().to_path_buf();
+    let begun = (req.op != Op::Undo)
+        .then(|| crate::stackundo::begin(&path))
+        .flatten();
     let res = run_op(w, &req.op, req.keep_conflicts);
+    if req.op != Op::Undo {
+        crate::stackundo::finish(&path, &req.op.label(), begun);
+    }
     req.finished_at = Some(now());
     match &res {
         Ok(v) => {

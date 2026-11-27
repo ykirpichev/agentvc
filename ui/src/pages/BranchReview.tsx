@@ -10,6 +10,7 @@ import { useResource } from '../api/useResource'
 import { ErrorNote, Skeleton } from '../components/bits'
 import { HunkList } from '../components/ConflictResolver'
 import { DiffView } from '../components/DiffView'
+import { undoIn } from '../components/stackEdit'
 import { useToast } from '../components/Toaster'
 import { HELP, shortSha, WORDS } from '../core/words'
 import { plural, timeAgo } from '../lib/format'
@@ -34,7 +35,7 @@ export function BranchReview() {
       const stoppedAt = r.result?.conflict?.branch
       if (stoppedAt) toast.ok(`Restacking ${stoppedAt} stopped on a clash. Pick what each place should say below.`, { undo: false })
       else if (r.outcome === 'queued') toast.ok(`Queued: ${r.reason ?? 'an agent is working there'}. It applies when the agent stops.`, { undo: false })
-      else toast.ok(done, { undo: false })
+      else toast.ok(done, { undo: op.op === 'checkout' ? false : undoIn(workspace, done) })
     } catch (e) {
       toast.error(e)
     } finally {

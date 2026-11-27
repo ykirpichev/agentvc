@@ -22,6 +22,12 @@ export function branchDrop(e: DragEvent): { workspace: string; branch: string } 
   }
 }
 
+/** Undo for a toast: the window's latest stack command (`stack undo`). */
+export const undoIn = (workspace: string, done: string) => async () => {
+  await api.stackEdit(workspace, { op: 'undo' })
+  return done
+}
+
 /** Run a stack edit in a window and say what happened. */
 export function useStackEdit() {
   const toast = useToast()
@@ -37,7 +43,7 @@ export function useStackEdit() {
       else if (stopped) {
         toast.ok(`${stopped} clashes with its parent. Pick what to keep.`, { undo: false })
         go(branchLink(w.id, stopped))
-      } else toast.ok(done, { undo: false })
+      } else toast.ok(done, { undo: op.op === 'checkout' ? false : undoIn(w.id, done) })
     } catch (e) {
       toast.error(e)
     } finally {

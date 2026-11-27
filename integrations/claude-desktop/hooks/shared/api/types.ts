@@ -540,6 +540,7 @@ export type WsOp =
   | { op: 'rename'; branch: string; new_name: string }
   | { op: 'delete'; branch: string }
   | { op: 'checkout'; branch: string }
+  | { op: 'undo' }
 
 export interface WsRequest {
   id: string

@@ -90,7 +90,7 @@ pub struct Pending {
 }
 
 /// The contents of `stack.json`.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct State {
     pub version: u32,
     /// Trunk branch name, e.g. `main`.
@@ -137,6 +137,31 @@ pub struct RestackResult {
     /// The conflicting branch is being rebased in the worktree: resolve the
     /// files, `git rebase --continue`, then run restack again.
     pub kept_conflicts: bool,
+}
+
+/// What `fold` did.
+#[derive(Clone, Debug, Serialize)]
+pub struct FoldResult {
+    pub folded: String,
+    pub into: String,
+    /// The folded branch's PR, now superseded by the parent's: close it.
+    pub closed_pr: Option<u64>,
+    pub restack: RestackResult,
+}
+
+/// Staged files `absorb` amended into one branch.
+#[derive(Clone, Debug, Serialize)]
+pub struct AbsorbedInto {
+    pub branch: String,
+    pub paths: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct AbsorbResult {
+    pub absorbed: Vec<AbsorbedInto>,
+    /// Staged files no branch of the stack changed: still staged.
+    pub left: Vec<String>,
+    pub restack: RestackResult,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -503,7 +528,7 @@ impl Window {
         })
     }
 
-    pub(crate) fn branch_tip(&self, name: &str) -> Option<String> {
+    pub fn branch_tip(&self, name: &str) -> Option<String> {
         self.repo.rev(&format!("refs/heads/{name}"))
     }
 
@@ -1667,6 +1692,413 @@ impl Window {
         Ok((new, r))
     }
 
+    /// `create` with `--insert`: the new branch goes between the current
+    /// branch and the branches stacked on it, which are restacked onto it.
+    pub fn insert(
+        &mut self,
+        name: Option<&str>,
+        message: Option<&str>,
+        all: bool,
+        keep_conflicts: bool,
+    ) -> Result<(Tracked, Option<String>, RestackResult)> {
+        self.settle()?;
+        let cur = self.require_current()?;
+        let kids = self.children_of(&cur);
+        let (t, commit) = self.create(name, message, all)?;
+        let mut scope = HashSet::new();
+        for c in self.state.branches.iter_mut() {
+            if kids.contains(&c.name) {
+                // parent_rev stays the old tip of `cur`, which is where the
+                // new branch starts: restack replays only the kids' commits.
+                c.parent = t.name.clone();
+            }
+        }
+        self.save()?;
+        for k in &kids {
+            scope.extend(self.upstack(k));
+        }
+        let r = if scope.is_empty() {
+            RestackResult::default()
+        } else {
+            self.restack(Some(&scope), keep_conflicts)?
+        };
+        Ok((t, commit, r))
+    }
+
+    /// Fold the current branch into its parent (`gt fold`): the parent's
+    /// ref moves to this branch's tip, branches on this one move to the
+    /// parent, this branch is deleted and the parent checked out.
+    pub fn fold(&mut self, keep_conflicts: bool) -> Result<FoldResult> {
+        self.settle()?;
+        let cur = self.require_current()?;
+        let b = self.state.branches[self.find(&cur).expect("tracked")].clone();
+        if !self.tracks(&b.parent) {
+            return Err(stack_err_with(
+                "at_bottom",
+                format!(
+                    "{cur} sits on {}, not on a branch of this window; land it through its PR instead",
+                    if b.parent == self.state.trunk { self.base_ref() } else { b.parent.clone() }
+                ),
+                json!({ "branch": cur, "parent": b.parent }),
+            ));
+        }
+        let parent_tip = self.parent_tip(&b.parent)?;
+        let tip = self.branch_tip(&cur).expect("checked out");
+        if b.parent_rev != parent_tip || !self.repo.is_ancestor(&parent_tip, &tip) {
+            return Err(stack_err_with(
+                "needs_restack",
+                format!(
+                    "{cur} is not on {}'s tip; run `agentvc stack restack` first",
+                    b.parent
+                ),
+                json!({ "branch": cur, "parent": b.parent }),
+            ));
+        }
+        if let Some(p) = self.checkouts_elsewhere().get(&b.parent) {
+            return Err(stack_err_with(
+                "checked_out_elsewhere",
+                format!("branch {} is checked out in {}", b.parent, p.display()),
+                json!({ "branch": b.parent, "worktree": p }),
+            ));
+        }
+        self.repo.git(
+            &[
+                "update-ref",
+                "-m",
+                "agentvc stack fold",
+                &format!("refs/heads/{}", b.parent),
+                &tip,
+                &parent_tip,
+            ],
+            None,
+        )?;
+        self.repo.git(&["switch", "--quiet", &b.parent], None)?;
+        self.repo.git(&["branch", "-D", &cur], None)?;
+        for c in self.state.branches.iter_mut() {
+            if c.parent == cur {
+                c.parent = b.parent.clone();
+            }
+        }
+        let i = self.find(&cur).expect("tracked");
+        self.state.branches.remove(i);
+        self.save()?;
+        let mut scope = self.upstack(&b.parent);
+        scope.remove(&b.parent);
+        let restack = if scope.is_empty() {
+            RestackResult::default()
+        } else {
+            self.restack(Some(&scope), keep_conflicts)?
+        };
+        Ok(FoldResult {
+            folded: cur,
+            into: b.parent,
+            closed_pr: b.pr,
+            restack,
+        })
+    }
+
+    /// Split the current branch by commit (`gt split --by-commit`): every
+    /// commit but the last gets its own branch below it, named by `names`
+    /// (bottom first) or `<branch>-1`, `<branch>-2`, ... No commit changes.
+    pub fn split_by_commit(&mut self, names: &[String]) -> Result<Vec<Tracked>> {
+        self.settle()?;
+        let cur = self.require_current()?;
+        let i = self.find(&cur).expect("tracked");
+        let b = self.state.branches[i].clone();
+        let tip = self.branch_tip(&cur).expect("checked out");
+        let onto = self.parent_tip(&b.parent)?;
+        let from = self.replay_from(&b, &tip, &onto);
+        let commits = self.commits_between(&from, &tip)?;
+        if let Some(c) = commits.iter().find(|c| c.parents.len() != 1) {
+            return Err(stack_err_with(
+                "merge_commit",
+                format!(
+                    "{cur} contains merge commit {}; split works on linear branches",
+                    &c.id[..12]
+                ),
+                json!({ "branch": cur, "commit": c.id }),
+            ));
+        }
+        if commits.len() < 2 {
+            return Err(stack_err_with(
+                "nothing_to_split",
+                format!(
+                    "{cur} has {} commit(s); split needs two or more",
+                    commits.len()
+                ),
+                json!({ "branch": cur }),
+            ));
+        }
+        let n = commits.len() - 1;
+        let names: Vec<String> = if names.is_empty() {
+            (1..=n).map(|k| format!("{cur}-{k}")).collect()
+        } else if names.len() == n {
+            names.to_vec()
+        } else {
+            return Err(stack_err_with(
+                "bad_names",
+                format!(
+                    "{cur} has {} commits: give {n} names for the branches below it (bottom first)",
+                    n + 1
+                ),
+                json!({ "branch": cur, "expected": n }),
+            ));
+        };
+        for name in &names {
+            if self
+                .repo
+                .git(&["check-ref-format", "--branch", name], None)
+                .is_err()
+                || name.starts_with('-')
+            {
+                return Err(Error::BadBranch(name.clone()));
+            }
+            if self.branch_tip(name).is_some() {
+                return Err(Error::BranchExists(name.clone()));
+            }
+        }
+        let mut added = Vec::new();
+        let (mut parent, mut parent_rev) = (b.parent.clone(), from.clone());
+        for (name, c) in names.iter().zip(&commits) {
+            self.repo.git(&["branch", name, &c.id], None)?;
+            added.push(Tracked {
+                name: name.clone(),
+                parent: parent.clone(),
+                parent_rev: parent_rev.clone(),
+                pr: None,
+                pr_state: None,
+            });
+            parent = name.clone();
+            parent_rev = c.id.clone();
+        }
+        self.state.branches[i].parent = parent;
+        self.state.branches[i].parent_rev = parent_rev;
+        for (k, t) in added.iter().enumerate() {
+            self.state.branches.insert(i + k, t.clone());
+        }
+        self.save()?;
+        Ok(added)
+    }
+
+    /// The current branch and the tracked branches below it, top first.
+    fn downstack(&self, from: &str) -> Vec<String> {
+        let mut out = vec![from.to_string()];
+        let mut at = from.to_string();
+        while let Some(i) = self.find(&at) {
+            let p = self.state.branches[i].parent.clone();
+            if !self.tracks(&p) || out.contains(&p) {
+                break;
+            }
+            out.push(p.clone());
+            at = p;
+        }
+        out
+    }
+
+    /// Files a branch's own commits change.
+    fn own_files(&self, b: &Tracked) -> Result<HashSet<String>> {
+        let Some(tip) = self.branch_tip(&b.name) else {
+            return Ok(HashSet::new());
+        };
+        let from = match self.parent_tip(&b.parent) {
+            Ok(onto) => self.replay_from(b, &tip, &onto),
+            Err(_) => b.parent_rev.clone(),
+        };
+        Ok(self
+            .repo
+            .git(&["diff", "--name-only", "--no-renames", &from, &tip], None)?
+            .lines()
+            .map(str::to_string)
+            .collect())
+    }
+
+    /// Amend each staged file into the branch of the current stack whose
+    /// commits last changed it (`gt absorb`, by file), then restack. Files
+    /// no branch below changed stay staged. On a conflict nothing changes.
+    pub fn absorb(&mut self, all: bool, keep_conflicts: bool) -> Result<AbsorbResult> {
+        self.settle()?;
+        let cur = self.require_current()?;
+        if all {
+            self.repo.git(&["add", "-A"], None)?;
+        }
+        let staged: Vec<String> = self
+            .repo
+            .git(&["diff", "--cached", "--name-only", "--no-renames"], None)?
+            .lines()
+            .map(str::to_string)
+            .collect();
+        if staged.is_empty() {
+            return Err(stack_err(
+                "nothing_staged",
+                "nothing is staged; `git add` the changes to absorb (or pass -a)",
+            ));
+        }
+        let down = self.downstack(&cur);
+        let mut owners: Vec<(String, Vec<String>)> = Vec::new();
+        let mut left = Vec::new();
+        let files_of: Vec<(String, HashSet<String>)> = down
+            .iter()
+            .map(|n| {
+                let b = self.state.branches[self.find(n).expect("tracked")].clone();
+                self.own_files(&b).map(|f| (n.clone(), f))
+            })
+            .collect::<Result<_>>()?;
+        for f in &staged {
+            match files_of.iter().find(|(_, fs)| fs.contains(f)) {
+                Some((n, _)) => match owners.iter_mut().find(|(o, _)| o == n) {
+                    Some((_, v)) => v.push(f.clone()),
+                    None => owners.push((n.clone(), vec![f.clone()])),
+                },
+                None => left.push(f.clone()),
+            }
+        }
+        if owners.is_empty() {
+            return Err(stack_err_with(
+                "nothing_to_absorb",
+                "no branch of this stack changed the staged files; commit them with `agentvc stack modify` or `create`",
+                json!({ "paths": left }),
+            ));
+        }
+        let absorbed: Vec<String> = owners.iter().flat_map(|(_, v)| v.clone()).collect();
+        let mut args = vec!["diff", "--name-only", "--"];
+        args.extend(absorbed.iter().map(String::as_str));
+        let unstaged = self.repo.git(&args, None)?;
+        if !unstaged.is_empty() {
+            return Err(stack_err_with(
+                "dirty_worktree",
+                format!(
+                    "{} also have unstaged changes; stage or stash them first",
+                    unstaged.lines().collect::<Vec<_>>().join(", ")
+                ),
+                json!({ "paths": unstaged.lines().collect::<Vec<_>>() }),
+            ));
+        }
+        // New commits for each owner, made with a scratch index.
+        // Ask git for the path: on Windows `git_dir` is a `\\?\` path,
+        // which git cannot lock files under.
+        let index_s = self
+            .repo
+            .git(&["rev-parse", "--git-path", "agentvc/absorb.index"], None)?;
+        let index = self.repo.workdir.join(&index_s);
+        fs::create_dir_all(index.parent().expect("has a parent")).at(&index)?;
+        let mut updates = Vec::new();
+        let mut targets = Vec::new();
+        for (owner, files) in &owners {
+            let mut a = vec!["diff", "--cached", "--no-renames", "--full-index", "--"];
+            a.extend(files.iter().map(String::as_str));
+            let patch = self.repo.git_raw(&a)?;
+            let old = self.branch_tip(owner).expect("tracked branch exists");
+            let env = [("GIT_INDEX_FILE", index_s.as_str())];
+            self.repo.git_env(&["read-tree", &old], None, &env)?;
+            if self
+                .repo
+                .git_env(&["apply", "--cached", "-"], Some(&patch), &env)
+                .is_err()
+            {
+                let _ = fs::remove_file(&index);
+                return Err(stack_err_with(
+                    "conflict",
+                    format!(
+                        "the staged changes to {} do not apply to {owner}; nothing was changed",
+                        files.join(", ")
+                    ),
+                    json!({ "branch": owner, "paths": files }),
+                ));
+            }
+            let tree = self.repo.git_env(&["write-tree"], None, &env)?;
+            let c = &self.commits_between(&format!("{old}~1"), &old)?[0];
+            let new = self.repo.git_env(
+                &["commit-tree", &tree, "-p", &c.parents[0], "-F", "-"],
+                Some(&c.message),
+                &[
+                    ("GIT_AUTHOR_NAME", c.author_name.as_str()),
+                    ("GIT_AUTHOR_EMAIL", c.author_email.as_str()),
+                    ("GIT_AUTHOR_DATE", c.author_date.as_str()),
+                ],
+            )?;
+            updates.push(BranchUpdate {
+                branch: owner.clone(),
+                old: old.clone(),
+                new,
+                onto: c.parents[0].clone(),
+                commits: 1,
+                dropped: 0,
+            });
+            targets.push(owner.clone());
+        }
+        let _ = fs::remove_file(&index);
+        // Take the absorbed changes out of the worktree (they now live in
+        // the owners' commits), move the owners, then restack above them.
+        let mut a = vec![
+            "diff",
+            "--cached",
+            "--no-renames",
+            "--full-index",
+            "--binary",
+            "--",
+        ];
+        a.extend(absorbed.iter().map(String::as_str));
+        let saved = self.repo.git_raw(&a)?;
+        let mut r = vec!["restore", "--staged", "--worktree", "--"];
+        r.extend(absorbed.iter().map(String::as_str));
+        self.repo.git(&r, None)?;
+        let undo = |w: &Window| {
+            let _ = w.repo.git(&["apply", "--index", "-"], Some(&saved));
+        };
+        if let Err(e) = self.apply(&updates) {
+            undo(self);
+            return Err(e);
+        }
+        let mut scope = HashSet::new();
+        for t in &targets {
+            scope.extend(self.upstack(t));
+        }
+        let restacked = self.restack(Some(&scope), keep_conflicts);
+        if !left.is_empty() {
+            // Moving the checked-out branch resets the index: stage them again.
+            let mut a = vec!["add", "--"];
+            a.extend(left.iter().map(String::as_str));
+            let _ = self.repo.git(&a, None);
+        }
+        match restacked {
+            Ok(restack) => Ok(AbsorbResult {
+                absorbed: owners
+                    .into_iter()
+                    .map(|(branch, paths)| AbsorbedInto { branch, paths })
+                    .collect(),
+                left,
+                restack,
+            }),
+            Err(e) => {
+                let back: Vec<BranchUpdate> = updates
+                    .iter()
+                    .map(|u| BranchUpdate {
+                        old: u.new.clone(),
+                        new: u.old.clone(),
+                        ..u.clone()
+                    })
+                    .collect();
+                let _ = self.apply(&back);
+                undo(self);
+                Err(e)
+            }
+        }
+    }
+
+    /// Check out a branch of this window by name, or the trunk (detached at
+    /// the remote trunk, since the local trunk may be checked out
+    /// elsewhere).
+    pub fn checkout(&self, branch: &str) -> Result<String> {
+        if branch == self.state.trunk || branch == self.base_ref() {
+            let base = self.require_base()?;
+            self.repo
+                .git(&["switch", "--quiet", "--detach", &base], None)?;
+            return Ok(self.base_ref());
+        }
+        self.require_tracked(branch)?;
+        self.switch(branch)
+    }
+
     // ---- navigation ----
 
     pub(crate) fn switch(&self, branch: &str) -> Result<String> {
@@ -2785,5 +3217,191 @@ mod tests {
         let files = git(&f.w1, &["ls-tree", "--name-only", "d3"]);
         assert!(!files.contains("d2.txt") && files.contains("d3.txt"));
         assert_eq!(w.state.branches.len(), 2);
+    }
+    #[test]
+    fn insert_puts_a_branch_between_current_and_its_children() {
+        let f = setup();
+        let mut w = Window::open(&f.w1).unwrap();
+        fs::write(f.w1.join("x.txt"), "x\n").unwrap();
+        w.create(Some("x"), Some("x"), true).unwrap();
+        fs::write(f.w1.join("y.txt"), "y\n").unwrap();
+        w.create(Some("y"), Some("y"), true).unwrap();
+        w.down().unwrap();
+        fs::write(f.w1.join("m.txt"), "m\n").unwrap();
+        let (t, commit, r) = w.insert(Some("m"), Some("m"), true, false).unwrap();
+        assert_eq!(t.parent, "x");
+        assert!(commit.is_some());
+        assert_eq!(r.updated.len(), 1);
+        let w = Window::open(&f.w1).unwrap();
+        let y = &w.state.branches[w.find("y").unwrap()];
+        assert_eq!(y.parent, "m");
+        assert_eq!(y.parent_rev, rev(&f.w1, "m"));
+        assert_eq!(git(&f.w1, &["show", "y:m.txt"]), "m");
+        assert_eq!(git(&f.w1, &["rev-list", "--count", "m..y"]), "1");
+    }
+
+    #[test]
+    fn fold_merges_a_branch_into_its_parent() {
+        let f = setup();
+        let mut w = Window::open(&f.w1).unwrap();
+        for n in ["p", "c", "top"] {
+            fs::write(f.w1.join(format!("{n}.txt")), "1\n").unwrap();
+            w.create(Some(n), Some(n), true).unwrap();
+        }
+        w.down().unwrap();
+        let c_tip = rev(&f.w1, "c");
+        let r = w.fold(false).unwrap();
+        assert_eq!((r.folded.as_str(), r.into.as_str()), ("c", "p"));
+        assert_eq!(rev(&f.w1, "p"), c_tip);
+        assert_eq!(w.current_branch().as_deref(), Some("p"));
+        assert!(w.branch_tip("c").is_none());
+        let top = &w.state.branches[w.find("top").unwrap()];
+        assert_eq!(top.parent, "p");
+        // The bottom branch has nothing to fold into.
+        assert_eq!(w.fold(false).unwrap_err().code(), "at_bottom");
+    }
+
+    #[test]
+    fn split_by_commit_gives_each_commit_a_branch() {
+        let f = setup();
+        let mut w = Window::open(&f.w1).unwrap();
+        fs::write(f.w1.join("one.txt"), "1\n").unwrap();
+        w.create(Some("big"), Some("one"), true).unwrap();
+        commit_file(&f.w1, "two.txt", "2\n", "two");
+        commit_file(&f.w1, "three.txt", "3\n", "three");
+        let tip = rev(&f.w1, "big");
+        assert_eq!(
+            w.split_by_commit(&["only".into()]).unwrap_err().code(),
+            "bad_names"
+        );
+        let added = w.split_by_commit(&[]).unwrap();
+        assert_eq!(added.len(), 2);
+        assert_eq!(rev(&f.w1, "big"), tip, "no commit changes");
+        assert_eq!(git(&f.w1, &["log", "-1", "--format=%s", "big-1"]), "one");
+        assert_eq!(git(&f.w1, &["log", "-1", "--format=%s", "big-2"]), "two");
+        let l = w.log(false).unwrap();
+        let names: Vec<_> = l
+            .branches
+            .iter()
+            .map(|b| (b.name.as_str(), b.commits))
+            .collect();
+        assert_eq!(names, vec![("big-1", 1), ("big-2", 1), ("big", 1)]);
+        assert!(l.branches.iter().all(|b| !b.needs_restack));
+        assert_eq!(
+            w.split_by_commit(&[]).unwrap_err().code(),
+            "nothing_to_split"
+        );
+    }
+
+    #[test]
+    fn absorb_amends_files_into_the_branch_that_changed_them() {
+        let f = setup();
+        let mut w = Window::open(&f.w1).unwrap();
+        fs::write(f.w1.join("low.txt"), "low\n").unwrap();
+        w.create(Some("low"), Some("low"), true).unwrap();
+        fs::write(f.w1.join("high.txt"), "high\n").unwrap();
+        w.create(Some("high"), Some("high"), true).unwrap();
+        fs::write(f.w1.join("low.txt"), "low fixed\n").unwrap();
+        fs::write(f.w1.join("high.txt"), "high fixed\n").unwrap();
+        fs::write(f.w1.join("new.txt"), "new\n").unwrap();
+        let r = w.absorb(true, false).unwrap();
+        let mut got: Vec<_> = r
+            .absorbed
+            .iter()
+            .map(|a| (a.branch.clone(), a.paths.clone()))
+            .collect();
+        got.sort();
+        assert_eq!(
+            got,
+            vec![
+                ("high".to_string(), vec!["high.txt".to_string()]),
+                ("low".to_string(), vec!["low.txt".to_string()])
+            ]
+        );
+        assert_eq!(r.left, vec!["new.txt".to_string()]);
+        assert_eq!(git(&f.w1, &["show", "low:low.txt"]), "low fixed");
+        assert_eq!(git(&f.w1, &["show", "high:high.txt"]), "high fixed");
+        assert_eq!(git(&f.w1, &["rev-list", "--count", "low..high"]), "1");
+        assert_eq!(
+            git(&f.w1, &["rev-list", "--count", "origin/main..low"]),
+            "1"
+        );
+        // Only the unabsorbed file is left, still staged.
+        assert_eq!(git(&f.w1, &["status", "--porcelain"]), "A  new.txt");
+        git(&f.w1, &["reset", "-q"]);
+        fs::remove_file(f.w1.join("new.txt")).unwrap();
+        assert_eq!(w.absorb(true, false).unwrap_err().code(), "nothing_staged");
+    }
+
+    #[test]
+    fn undo_walks_back_and_redoes() {
+        let f = setup();
+        let cwd = f.w1.clone();
+        let mk = |n: &str| {
+            crate::stackundo::recorded(&cwd, &format!("create {n}"), || {
+                let mut w = Window::open(&cwd)?;
+                fs::write(cwd.join(format!("{n}.txt")), "1\n").unwrap();
+                w.create(Some(n), Some(n), true).map(|_| ())
+            })
+            .unwrap()
+        };
+        mk("u1");
+        mk("u2");
+        let u1 = rev(&f.w1, "u1");
+        crate::stackundo::recorded(&cwd, "delete u1", || {
+            Window::open(&cwd)?.delete("u1", false).map(|_| ())
+        })
+        .unwrap();
+        assert!(Window::open(&cwd).unwrap().branch_tip("u1").is_none());
+
+        let mut w = Window::open(&cwd).unwrap();
+        let u = crate::stackundo::undo(&mut w, None).unwrap();
+        assert_eq!(u.command, "delete u1");
+        let w = Window::open(&cwd).unwrap();
+        assert_eq!(w.branch_tip("u1").as_deref(), Some(u1.as_str()));
+        assert_eq!(w.state.branches.len(), 2);
+        assert_eq!(w.current_branch().as_deref(), Some("u2"));
+
+        // Again: undoes `create u2` (the branch goes, u1 is checked out).
+        let mut w = Window::open(&cwd).unwrap();
+        crate::stackundo::undo(&mut w, None).unwrap();
+        let w = Window::open(&cwd).unwrap();
+        assert!(w.branch_tip("u2").is_none());
+        assert_eq!(w.current_branch().as_deref(), Some("u1"));
+
+        // Undoing that undo redoes the create.
+        let mut w = Window::open(&cwd).unwrap();
+        let rows = crate::stackundo::list(&w);
+        assert_eq!(rows[0].undoes, Some(2));
+        crate::stackundo::undo(&mut w, Some(rows[0].id)).unwrap();
+        let w = Window::open(&cwd).unwrap();
+        assert!(w.branch_tip("u2").is_some());
+        assert_eq!(w.current_branch().as_deref(), Some("u2"));
+
+        // A branch that moved since blocks the undo, and changes nothing.
+        commit_file(&f.w1, "u2.txt", "2\n", "more");
+        let mut w = Window::open(&cwd).unwrap();
+        assert_eq!(
+            crate::stackundo::undo(&mut w, None).unwrap_err().code(),
+            "undo_conflict"
+        );
+        assert!(w.branch_tip("u2").is_some());
+        // Undoing an entry twice is refused.
+        assert_eq!(
+            crate::stackundo::undo(&mut w, Some(3)).unwrap_err().code(),
+            "already_undone"
+        );
+    }
+
+    #[test]
+    fn checkout_by_name_and_trunk() {
+        let f = setup();
+        let mut w = Window::open(&f.w1).unwrap();
+        fs::write(f.w1.join("k.txt"), "k\n").unwrap();
+        w.create(Some("k"), Some("k"), true).unwrap();
+        assert_eq!(w.checkout("main").unwrap(), "origin/main");
+        assert_eq!(w.current_branch(), None);
+        assert_eq!(w.checkout("k").unwrap(), "k");
+        assert_eq!(w.checkout("nope").unwrap_err().code(), "not_in_stack");
     }
 }

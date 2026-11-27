@@ -10,11 +10,15 @@ interface Toast {
   id: number
   kind: 'ok' | 'error'
   text: ReactNode
-  undo: boolean
+  /** true: the space's operation log; a function: a custom undo that
+   * returns what it undid (stack edits use their window's undo log). */
+  undo: Undo
 }
 
+type Undo = boolean | (() => Promise<string>)
+
 interface ToastApi {
-  ok: (text: ReactNode, opts?: { undo?: boolean }) => void
+  ok: (text: ReactNode, opts?: { undo?: Undo }) => void
   error: (e: unknown) => void
 }
 
@@ -25,7 +29,7 @@ let nextId = 0
 export function ToastProvider({ children }: { children: ReactNode }) {
   const [toast, setToast] = useState<Toast | null>(null)
   const { refresh } = useLive()
-  const ok = useCallback((text: ReactNode, opts?: { undo?: boolean }) => setToast({ id: ++nextId, kind: 'ok', text, undo: !!opts?.undo }), [])
+  const ok = useCallback((text: ReactNode, opts?: { undo?: Undo }) => setToast({ id: ++nextId, kind: 'ok', text, undo: opts?.undo ?? false }), [])
   const error = useCallback((e: unknown) => {
     const err = e instanceof ApiError ? e : new ApiError(0, 'client', String(e))
     setToast({ id: ++nextId, kind: 'error', text: <><code>{err.code}</code> {err.message}</>, undo: false })
@@ -37,10 +41,10 @@ export function ToastProvider({ children }: { children: ReactNode }) {
     return () => window.clearTimeout(t)
   }, [toast])
 
-  const undo = async () => {
+  const undo = async (how: Undo) => {
     try {
-      const r = await api.undo()
-      setToast({ id: ++nextId, kind: 'ok', text: <>Undone: {r.undid.summary}</>, undo: false })
+      const what = typeof how === 'function' ? await how() : (await api.undo()).undid.summary
+      setToast({ id: ++nextId, kind: 'ok', text: <>Undone: {what}</>, undo: false })
     } catch (e) {
       error(e)
     } finally {
@@ -55,7 +59,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
         <div className={`gtoast gtoast-${toast.kind}`} role="status">
           <span>{toast.text}</span>
           {toast.undo && (
-            <button type="button" onClick={() => void undo()}>
+            <button type="button" onClick={() => void undo(toast.undo)}>
               Undo
             </button>
           )}
