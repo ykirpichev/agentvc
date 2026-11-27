@@ -21,6 +21,10 @@ here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../.." && pwd)
 state="$here/.state"
 [ -f "$state" ] && . "$state"
+# GITHUB_CLIENT_ID / GITHUB_CLIENT_SECRET can live here (chmod 600, not
+# committed) instead of the command line.
+secrets="$here/.secrets"
+[ -f "$secrets" ] && . "$secrets"
 
 REGION=${REGION:-us-central1}
 ZONE=${ZONE:-us-central1-a}
@@ -60,7 +64,8 @@ retry() {
 
 setup() {
   if [ -z "${PROJECT:-}" ]; then
-    PROJECT="agentvc-cloud-$(LC_ALL=C tr -dc 'a-z0-9' </dev/urandom | head -c 6)"
+    # od, not tr | head: under pipefail, head closing the pipe kills tr (SIGPIPE).
+    PROJECT="agentvc-cloud-$(od -An -N3 -tx1 /dev/urandom | tr -d ' \n')"
   fi
   if ! gcloud projects describe "$PROJECT" >/dev/null 2>&1; then
     echo "creating project $PROJECT"
@@ -122,7 +127,8 @@ Public URL: https://$DOMAIN
 Next: create a GitHub OAuth app at https://github.com/settings/applications/new
   Homepage URL:               https://$DOMAIN
   Authorization callback URL: https://$DOMAIN/auth/github/callback
-then: $0 build && GITHUB_CLIENT_ID=... GITHUB_CLIENT_SECRET=... $0 up
+then put GITHUB_CLIENT_ID=... and GITHUB_CLIENT_SECRET=... in $secrets (chmod 600)
+and run: $0 build && $0 up
 DONE
 }
 
