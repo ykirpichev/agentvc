@@ -37,6 +37,7 @@ export function CommandPalette({ onClose }: { onClose: () => void }) {
     const out: Item[] = [
       { id: 'review', icon: 'inbox', label: 'Home', hint: 'Your stack and agent work', to: '/review' },
       { id: 'find', icon: 'search', label: 'Find', hint: 'Search the code and see who wrote each line', to: '/find' },
+      { id: 'agent-permissions', icon: 'check', label: 'Agent permissions', hint: 'What agents may do, per workspace', to: '/settings/agents' },
     ]
     for (const t of tasks.data ?? []) {
       out.push({ id: `t${t.id}`, icon: 'tasks', label: t.goal, hint: `${t.attempts.total} tries`, to: `/review/t/${t.id}` })

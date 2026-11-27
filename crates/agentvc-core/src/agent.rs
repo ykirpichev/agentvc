@@ -55,8 +55,20 @@ pub const DEFAULT_LIMIT: usize = 8;
 
 /// Runners an agent can use.
 pub const RUNNERS: &[&str] = &["claude", "codex", "cursor", "command"];
-/// Permission levels for Claude Code agents.
-pub const PERMISSIONS: &[&str] = &["edits", "ask", "auto"];
+/// Permission levels for Claude Code agents, the default first.
+pub const PERMISSIONS: &[&str] = &["auto", "edits", "ask", "bypass"];
+/// The permission level when nothing sets one.
+pub const DEFAULT_PERMISSIONS: &str = "auto";
+
+/// Claude Code's `--permission-mode` for an agentvc permission level.
+pub fn claude_permission_mode(level: Option<&str>) -> &'static str {
+    match level.unwrap_or(DEFAULT_PERMISSIONS) {
+        "edits" => "acceptEdits",
+        "ask" => "default",
+        "bypass" => "bypassPermissions",
+        _ => "auto",
+    }
+}
 
 /// How agents started in one workspace run. Kept in the workspace's
 /// `stack.json` (so it is published with the workspace); every field is
@@ -75,10 +87,16 @@ pub struct AgentSettings {
     /// Check command run when an agent stops.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub check: Option<String>,
-    /// Claude Code: `edits` (edit files, ask before commands; default),
-    /// `ask` (ask before edits too) or `auto` (never ask).
+    /// Claude Code: `auto` (Claude Code's auto mode: a safety check
+    /// approves routine steps, risky ones come to you; default), `edits`
+    /// (edit files, ask before commands), `ask` (ask before edits too) or
+    /// `bypass` (never ask, no checks).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permissions: Option<String>,
+    /// Claude Code: run commands in its sandbox, which lets them write only
+    /// inside the agent's worktree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox: Option<bool>,
     /// Agents working at once in this workspace.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max: Option<usize>,
@@ -305,9 +323,19 @@ pub struct Agent {
     pub worktree: PathBuf,
     /// `claude`, `codex`, `cursor` or `command`.
     pub runner: String,
-    /// Claude Code permission level (`edits`, `ask` or `auto`).
+    /// Claude Code permission level (`auto`, `edits`, `ask` or `bypass`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permissions: Option<String>,
+    /// Claude Code commands run in its sandbox.
+    #[serde(default)]
+    pub sandbox: bool,
+    /// The workspace checkout it was started from, whose Claude Code setup
+    /// (local settings, local MCP servers) it inherits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub setup_from: Option<PathBuf>,
+    /// The permission mode Claude Code reported when it started.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claude_mode: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -726,6 +754,7 @@ impl AgentSettings {
                 .permissions
                 .clone()
                 .or_else(|| under.permissions.clone()),
+            sandbox: self.sandbox.or(under.sandbox),
             max: self.max.or(under.max),
         }
     }
@@ -739,6 +768,7 @@ fn repo_defaults(w: &Window) -> AgentSettings {
         model: config(w, "agentvc.agent-model"),
         check: config(w, "agentvc.agent-check"),
         permissions: config(w, "agentvc.agent-permissions"),
+        sandbox: config(w, "agentvc.agent-sandbox").map(|v| v == "true"),
         max: None,
     }
 }
@@ -788,6 +818,7 @@ pub fn set_settings(
         model: blank(new.model),
         check: blank(new.check),
         permissions: blank(new.permissions),
+        sandbox: new.sandbox,
         max: new.max,
     };
     new.validate()?;
@@ -811,6 +842,105 @@ pub fn set_settings(
         w.save()?;
     }
     settings(cwd, Some(&ws.record.id))
+}
+
+/// What agents started in one workspace may do.
+#[derive(Clone, Debug, Serialize)]
+pub struct WorkspacePermissions {
+    pub workspace: String,
+    pub workspace_name: String,
+    pub path: PathBuf,
+    pub runner: String,
+    /// The permission level (`auto`, `edits`, `ask` or `bypass`) and where it
+    /// comes from: `workspace`, `repo` (git config) or `default`.
+    pub permissions: String,
+    pub permissions_from: String,
+    /// Claude Code's `--permission-mode` for it.
+    pub claude_mode: String,
+    pub sandbox: bool,
+    /// The person's Claude Code setup agents inherit (Claude Code runner).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub setup: Option<crate::agent_setup::ClaudeSetup>,
+}
+
+/// One open agent's permissions.
+#[derive(Clone, Debug, Serialize)]
+pub struct AgentPermissions {
+    pub id: String,
+    pub title: String,
+    pub workspace: String,
+    pub workspace_name: String,
+    pub state: AgentState,
+    pub runner: String,
+    pub permissions: Option<String>,
+    /// What Claude Code reported when it started.
+    pub claude_mode: Option<String>,
+    pub sandbox: bool,
+    pub worktree: PathBuf,
+}
+
+/// `agentvc agent permissions`: what agents may do, per workspace and per
+/// open agent, and the guard rails agentvc adds.
+#[derive(Clone, Debug, Serialize)]
+pub struct PermissionsReport {
+    pub guard_rails: Vec<String>,
+    pub workspaces: Vec<WorkspacePermissions>,
+    pub agents: Vec<AgentPermissions>,
+}
+
+/// What agents of every workspace of the space containing `cwd` may do.
+pub fn permissions(cwd: &Path) -> Result<PermissionsReport> {
+    let here = Window::open(cwd)?;
+    let mut workspaces = Vec::new();
+    for l in workspace::space_locals(&here)? {
+        let Ok(w) = Window::open(&l.path) else {
+            continue;
+        };
+        let own = &w.state.agents;
+        let repo = repo_defaults(&w);
+        let eff = own.over(&repo);
+        let runner = eff.runner.clone().unwrap_or_else(|| "claude".into());
+        let (level, from) = match (&own.permissions, &repo.permissions) {
+            (Some(p), _) => (p.clone(), "workspace"),
+            (None, Some(p)) => (p.clone(), "repo"),
+            (None, None) => (DEFAULT_PERMISSIONS.to_string(), "default"),
+        };
+        workspaces.push(WorkspacePermissions {
+            workspace: l.record.id.clone(),
+            workspace_name: l.record.name.clone(),
+            path: l.path.clone(),
+            claude_mode: claude_permission_mode(Some(&level)).into(),
+            permissions: level,
+            permissions_from: from.into(),
+            sandbox: eff.sandbox.unwrap_or(false),
+            setup: (runner == "claude").then(|| crate::agent_setup::read(&l.path)),
+            runner,
+        });
+    }
+    let agents = list(cwd, false)?
+        .agents
+        .into_iter()
+        .map(|a| AgentPermissions {
+            id: a.id,
+            title: a.title,
+            workspace: a.workspace,
+            workspace_name: a.workspace_name,
+            state: a.state,
+            runner: a.runner,
+            permissions: a.permissions,
+            claude_mode: a.claude_mode,
+            sandbox: a.sandbox,
+            worktree: a.worktree,
+        })
+        .collect();
+    Ok(PermissionsReport {
+        guard_rails: crate::agent_setup::GUARD_RAILS
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+        workspaces,
+        agents,
+    })
 }
 
 /// The settings of the workspace `id` of the repo containing `w`, if it is
@@ -847,6 +977,7 @@ pub fn start(cwd: &Path, req: &StartRequest) -> Result<Agent> {
         model: req.model.clone(),
         check: req.check.clone(),
         permissions: req.permissions.clone(),
+        sandbox: None,
         max: None,
     };
     asked.validate()?;
@@ -972,7 +1103,14 @@ pub fn start(cwd: &Path, req: &StartRequest) -> Result<Agent> {
             None
         },
         runner,
-        permissions: eff.permissions.clone(),
+        permissions: Some(
+            eff.permissions
+                .clone()
+                .unwrap_or_else(|| DEFAULT_PERMISSIONS.into()),
+        ),
+        sandbox: eff.sandbox.unwrap_or(false),
+        setup_from: Some(canon(&ws.path)),
+        claude_mode: None,
         model: eff.model.clone(),
         check: eff.check.clone(),
         machine: workspace::machine(),
@@ -1599,8 +1737,15 @@ fn on_stream_line(dir: &Path, line: &str) {
         Some("system") => {
             if let Some(sid) = v.get("session_id").and_then(Value::as_str) {
                 let sid = sid.to_string();
+                let mode = v
+                    .get("permissionMode")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
                 let _ = update(dir, |a| {
                     a.session_id = Some(sid);
+                    if mode.is_some() {
+                        a.claude_mode = mode;
+                    }
                     Ok(())
                 });
             }
@@ -1698,24 +1843,34 @@ fn turn_command(a: &Agent, dir: &Path, exe: &Path, prompt: &str) -> Command {
         }
         _ => {
             let program = std::env::var(ENV_CLAUDE).unwrap_or_else(|_| "claude".into());
-            let mcp = json!({ "mcpServers": { "agentvc": {
-                "type": "stdio",
-                "command": exe,
-                "args": ["mcp"],
-                "env": { ENV_DIR: dir },
-            }}});
+            // The person's own setup for the workspace's checkout (#162):
+            // its local settings and MCP servers, plus agentvc's guard rails.
+            let setup = a
+                .setup_from
+                .as_deref()
+                .map(crate::agent_setup::read)
+                .unwrap_or_default();
+            let mut servers = setup.mcp_servers_arg().clone();
+            servers.insert(
+                "agentvc".into(),
+                json!({
+                    "type": "stdio",
+                    "command": exe,
+                    "args": ["mcp"],
+                    "env": { ENV_DIR: dir },
+                }),
+            );
+            let mcp = json!({ "mcpServers": servers });
             let mut c = Command::new(program);
             c.arg("-p")
                 .arg(prompt)
                 .args(["--output-format", "stream-json", "--verbose"])
                 .args([
                     "--permission-mode",
-                    match a.permissions.as_deref() {
-                        Some("ask") => "default",
-                        Some("auto") => "bypassPermissions",
-                        _ => "acceptEdits",
-                    },
+                    claude_permission_mode(a.permissions.as_deref()),
                 ])
+                .arg("--settings")
+                .arg(setup.settings_arg(exe, a.sandbox).to_string())
                 .arg("--mcp-config")
                 .arg(mcp.to_string())
                 .args(["--permission-prompt-tool", "mcp__agentvc__approve"])
@@ -1734,6 +1889,7 @@ fn turn_command(a: &Agent, dir: &Path, exe: &Path, prompt: &str) -> Command {
     cmd.current_dir(&a.worktree)
         .env(ENV_DIR, dir)
         .env("AGENTVC_AGENT", &a.id)
+        .env(crate::agent_setup::ENV_WORKTREE, &a.worktree)
         // `ask_human` waits for a person, which can take hours.
         .env("MCP_TOOL_TIMEOUT", "86400000")
         .env_remove("CLAUDECODE")
@@ -2188,7 +2344,8 @@ mod tests {
                 command: Some("printf 'ws\\n' > ws.txt".into()),
                 check: Some("grep -q ws ws.txt".into()),
                 model: Some("  ".into()),
-                permissions: Some("auto".into()),
+                permissions: Some("edits".into()),
+                sandbox: Some(true),
                 max: Some(2),
             },
         )
@@ -2211,7 +2368,13 @@ mod tests {
             },
         );
         assert_eq!(a.runner, "command");
-        assert_eq!(a.permissions.as_deref(), Some("auto"));
+        assert_eq!(a.permissions.as_deref(), Some("edits"));
+        assert!(a.sandbox);
+        let p = permissions(&work).unwrap();
+        assert_eq!(p.workspaces[0].permissions, "edits");
+        assert_eq!(p.workspaces[0].permissions_from, "workspace");
+        assert!(p.workspaces[0].sandbox);
+        assert_eq!(p.workspaces[0].claude_mode, "acceptEdits");
         assert_eq!(a.check.as_deref(), Some("grep -q ws ws.txt"));
         assert_eq!(a.state, AgentState::Ready, "{a:?}");
 
@@ -2394,7 +2557,8 @@ mod tests {
     #[test]
     fn stream_json_updates_the_record() {
         let (_t, work) = repo();
-        let script = r#"echo '{"type":"system","subtype":"init","session_id":"s-1"}'
+        let script = r#"printf '%s\n' "$@" > "$AGENTVC_AGENT_DIR/args.txt"
+echo '{"type":"system","subtype":"init","session_id":"s-1","permissionMode":"auto"}'
 echo '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Edit","input":{"file_path":"src/x.rs"}}]}}'
 echo '{"type":"result","total_cost_usd":0.25,"num_turns":3,"is_error":false,"result":"Done: added x"}'"#;
         let a = start(
@@ -2423,6 +2587,25 @@ echo '{"type":"result","total_cost_usd":0.25,"num_turns":3,"is_error":false,"res
         std::env::remove_var(ENV_CLAUDE);
         assert_eq!(b.state, AgentState::Ready, "{b:?}");
         assert_eq!(b.session_id.as_deref(), Some("s-1"));
+        assert_eq!(
+            b.permissions.as_deref(),
+            Some("auto"),
+            "auto mode by default"
+        );
+        assert_eq!(b.claude_mode.as_deref(), Some("auto"));
+        let args = fs::read_to_string(dir.join("args.txt")).unwrap();
+        let args: Vec<&str> = args.lines().collect();
+        let after = |flag: &str| args[args.iter().position(|a| *a == flag).unwrap() + 1];
+        assert_eq!(after("--permission-mode"), "auto");
+        let settings: Value = serde_json::from_str(after("--settings")).unwrap();
+        assert!(settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap()
+            .ends_with("agent guard"));
+        assert!(settings["permissions"]["deny"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("Bash(git push:*)")));
         assert_eq!(b.cost_usd, 0.25);
         assert_eq!(b.turns, 3);
         assert_eq!(b.last_step.as_deref(), Some("Edit src/x.rs"));

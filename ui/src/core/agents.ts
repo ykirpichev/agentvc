@@ -51,10 +51,32 @@ export const RUNNER_WORDS: Record<AgentRunner, string> = {
   command: 'Custom command',
 }
 export const PERMISSION_WORDS: Record<AgentPermissions, string> = {
+  auto: 'Auto: asks only when risky',
   edits: 'Edit files, ask before commands',
   ask: 'Ask before every change',
-  auto: 'Never ask',
+  bypass: 'Never ask (no checks)',
 }
+
+/** What each permission level means, for the permissions page. */
+export const PERMISSION_HELP: Record<AgentPermissions, string> = {
+  auto: "Claude Code's auto mode: a safety check approves routine steps; anything risky comes to you.",
+  edits: 'Edits files on its own; asks you before every command it has no allow rule for.',
+  ask: 'Asks you before every edit and every command your settings do not allow.',
+  bypass: 'Never asks and skips the safety check. Only the guard rails below still apply.',
+}
+
+const PERMISSION_SHORT: Record<AgentPermissions, string> = {
+  auto: 'auto mode',
+  edits: 'asks before commands',
+  ask: 'asks before every change',
+  bypass: 'never asks',
+}
+
+/** The default when neither the workspace nor the repo sets one. */
+export const DEFAULT_PERMISSIONS: AgentPermissions = 'auto'
+
+/** Where the permissions page lives. */
+export const PERMISSIONS_LINK = '/settings/agents'
 
 /** One line saying how agents run in a workspace. */
 export function settingsLine(s: AgentSettings | undefined): string {
@@ -62,7 +84,8 @@ export function settingsLine(s: AgentSettings | undefined): string {
   const parts = [RUNNER_WORDS[runner]]
   if (s?.model) parts.push(s.model)
   if (s?.check) parts.push(`checks: ${s.check}`)
-  if (runner === 'claude' && s?.permissions && s.permissions !== 'edits') parts.push(PERMISSION_WORDS[s.permissions].toLowerCase())
+  if (runner === 'claude') parts.push(PERMISSION_SHORT[s?.permissions ?? DEFAULT_PERMISSIONS])
+  if (runner === 'claude' && s?.sandbox) parts.push('sandboxed')
   if (s?.max) parts.push(`up to ${s.max} at once`)
   return parts.join(' · ')
 }

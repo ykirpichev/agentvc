@@ -40,7 +40,8 @@ pub enum AgentCmd {
         /// (`agentvc workspace agents`).
         #[arg(long)]
         runner: Option<String>,
-        /// Claude Code: edits, ask or auto. Defaults to the workspace's.
+        /// Claude Code: auto (auto mode, the default), edits, ask or bypass.
+        /// Defaults to the workspace's.
         #[arg(long)]
         permissions: Option<String>,
         /// What the agent should do.
@@ -84,6 +85,14 @@ pub enum AgentCmd {
         #[arg(required = true, num_args = 1.., trailing_var_arg = true)]
         question: Vec<String>,
     },
+    /// What agents may do: each workspace's permission level, the Claude
+    /// Code setup its agents inherit (settings, allowlists, MCP servers),
+    /// the guard rails agentvc adds, and each open agent's mode.
+    Permissions,
+    /// Inside an agent: the Claude Code `PreToolUse` hook that keeps file
+    /// edits inside the agent's worktree. Reads the hook input on stdin.
+    #[command(hide = true)]
+    Guard,
     /// Inside an agent: ask the person to approve a tool call and wait (the
     /// MCP permission prompt tool `approve`).
     #[command(hide = true)]
@@ -249,6 +258,57 @@ pub fn run(cwd: &Path, cmd: AgentCmd) -> anyhow::Result<(Value, String)> {
         AgentCmd::Ask { question } => {
             let answer = agent::ask(&question.join(" "))?;
             (json!({ "answer": answer }), answer)
+        }
+        AgentCmd::Permissions => {
+            let r = agent::permissions(cwd)?;
+            let mut text = String::new();
+            for w in &r.workspaces {
+                text.push_str(&format!(
+                    "{}  {}  {} ({}){}\n",
+                    w.workspace_name,
+                    w.runner,
+                    w.permissions,
+                    w.permissions_from,
+                    if w.sandbox { ", sandboxed" } else { "" }
+                ));
+                if let Some(s) = &w.setup {
+                    for src in s.sources.iter().filter(|s| s.found) {
+                        text.push_str(&format!("  uses {}\n", src.path.display()));
+                    }
+                    text.push_str(&format!(
+                        "  {} allow, {} ask, {} deny rules; MCP: {}\n",
+                        s.allow.len(),
+                        s.ask.len(),
+                        s.deny.len(),
+                        s.mcp_servers
+                            .iter()
+                            .map(|m| m.name.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ));
+                }
+            }
+            text.push_str("Always:\n");
+            for g in &r.guard_rails {
+                text.push_str(&format!("  {g}\n"));
+            }
+            (json!(r), text)
+        }
+        AgentCmd::Guard => {
+            use std::io::Read;
+            let mut input = String::new();
+            std::io::stdin().read_to_string(&mut input)?;
+            let v: Value = serde_json::from_str(&input).unwrap_or(Value::Null);
+            let wt = std::env::var_os(agentvc_core::agent_setup::ENV_WORKTREE)
+                .map(PathBuf::from)
+                .or_else(|| v.get("cwd").and_then(Value::as_str).map(PathBuf::from))
+                .unwrap_or_else(|| cwd.to_path_buf());
+            // The hook's stdout is Claude Code's input: print it here and
+            // return nothing for the usual output.
+            if let Some(why) = agentvc_core::agent_setup::guard(&v, &wt) {
+                println!("{}", agentvc_core::agent_setup::guard_deny(&why));
+            }
+            std::process::exit(0);
         }
         AgentCmd::Permission { tool, input } => {
             let input: Value = serde_json::from_str(&input)

@@ -2,6 +2,7 @@
 //! copy-on-write views. See `docs/design.md`.
 
 pub mod agent;
+pub mod agent_setup;
 pub mod annotate;
 pub mod blame;
 pub mod bridge;
