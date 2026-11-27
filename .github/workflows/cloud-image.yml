@@ -12,7 +12,7 @@ on:
   workflow_dispatch:
     inputs:
       push:
-        description: Publish to ghcr.io/${{ github.repository_owner }}/agentvc-cloud
+        description: Publish the image to ghcr.io (agentvc-cloud package)
         type: boolean
         default: false
 
