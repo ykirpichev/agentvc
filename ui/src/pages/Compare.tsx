@@ -133,7 +133,7 @@ export function CompareView({ data, embedded }: { data: CompareResponse; embedde
             index={i}
             focused={i === focus}
             onFocus={() => setFocus(i)}
-            actions={i === focus ? <ActionButtons actions={actions} compact /> : null}
+            actions={i === focus && !embedded ? <ActionButtons actions={actions} compact /> : null}
           />
         ))}
       </div>
@@ -184,7 +184,7 @@ export function CompareView({ data, embedded }: { data: CompareResponse; embedde
                   onToggle={() => toggleCollapsed(f.path)}
                   style={gridStyle}
                   focus={focus}
-                  canTake={actions.canAct}
+                  canTake={actions.canAct && !embedded}
                   onTake={(i) => actions.take(cols[i]!.attempt, [f.path])}
                 />
                 {!collapsed.has(f.path) && <FileGrid file={f} data={data} style={gridStyle} />}

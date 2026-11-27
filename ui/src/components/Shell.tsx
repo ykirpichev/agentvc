@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { NavLink, Outlet, useNavigate } from 'react-router'
+import { Outlet, useNavigate } from 'react-router'
 import { api } from '../api/client'
 import { useLive } from '../api/live'
 import { useResource } from '../api/useResource'
@@ -15,10 +15,10 @@ import { embedMode, onHost, toHost } from '../core/embed'
 import { hosted } from '../core/base'
 import type { ReviewContext } from '../pages/reviewContext'
 
-const NAV: { to: string; label: string; icon: IconName; keys: string }[] = [
-  { to: '/review', label: 'Review', icon: 'inbox', keys: 'g r' },
-  { to: '/live', label: 'Live', icon: 'live', keys: 'g l' },
-  { to: '/find', label: 'Find', icon: 'search', keys: 'g f' },
+// No tabs: the sidebar is the stack; these stay as shortcuts and in Ctrl+K.
+const NAV: { to: string; label: string; keys: string }[] = [
+  { to: '/review', label: 'Home', keys: 'g r' },
+  { to: '/find', label: 'Find', keys: 'g f' },
 ]
 
 export function Shell() {
@@ -31,8 +31,6 @@ export function Shell() {
   const graph = useResource('graph', api.graph)
   const tasks = useResource('tasks', api.tasks)
 
-  const liveCount = graph.data?.attempts.filter((g) => g.attempt.status === 'exploring' && g.attempt.id !== 1).length ?? 0
-  const counts: Record<string, number> = { '/live': liveCount }
   const ctx: ReviewContext = { graph: graph.data, tasks: tasks.data }
 
   useHotkeys([
@@ -130,15 +128,6 @@ export function Shell() {
           <Kbd keys="mod+k" />
         </button>
 
-        <nav className="nav nav-row">
-          {NAV.map((n) => (
-            <NavLink key={n.to} to={n.to} className="nav-item">
-              <Icon name={n.icon} />
-              <span className="nav-label">{n.label}</span>
-              {(counts[n.to] ?? 0) > 0 && <span className="nav-count">{counts[n.to]}</span>}
-            </NavLink>
-          ))}
-        </nav>
 
         <div className="tree-scroll">{graphBox}</div>
 

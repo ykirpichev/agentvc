@@ -18,46 +18,41 @@ import { MovePreview } from '../components/MovePreview'
 import { useToast } from '../components/Toaster'
 import { stackStale, visibleVersions } from '../core/graph'
 import { nextStep, type NextStep } from '../core/next'
-import { agentLine, HELP, shortSha, statusWords, testsWords, versionName, WORDS } from '../core/words'
+import { agentLine, HELP, shortSha, statusWords, testsWords, tryName, versionName, WORDS } from '../core/words'
 import { money, plural, timeAgo } from '../lib/format'
 import { CompareView } from './Compare'
 
 const versionsOf = (graph: Graph, task: number) =>
   visibleVersions(graph, { showClosed: true }).filter((g) => g.attempt.task_id === task)
 
-/** `/review`: every task that needs you, with its next step. */
+/** `/review`: nothing picked yet; agent work that waits on you, if any. */
 export function ReviewHome() {
   const { graph, tasks } = useReview()
   if (!graph || !tasks) return <div className="page"><Skeleton rows={6} /></div>
   const rows = tasks
     .map((t) => ({ t, next: nextStep(versionsOf(graph, t.id)), n: versionsOf(graph, t.id).length }))
-    .filter((r) => r.n > 0)
-  const needs = rows.filter((r) => r.next.kind !== 'done' && r.next.kind !== 'wait')
-  const rest = rows.filter((r) => !needs.includes(r))
+    .filter((r) => r.n > 0 && r.next.kind !== 'done')
   return (
     <div className="page rv">
-      <h1 className="rv-title">What needs you</h1>
-      {rows.length === 0 && (
-        <Empty title="No versions yet">
-          Start agents with <code>agentvc run --task tN -- claude -p "…"</code>; their versions show up in the graph on the left.
-        </Empty>
+      {rows.length === 0 ? (
+        <Empty title="Pick a branch on the left">Its commits, changes and PR show here.</Empty>
+      ) : (
+        <>
+          <h1 className="rv-title">Agent work</h1>
+          <div className="rv-list">
+            {rows.map(({ t, next, n }) => (
+              <Link key={t.id} to={taskLink(t.id)} className="rv-item">
+                <span className="rv-item-name">{t.goal}</span>
+                <span className="muted">
+                  {n} {n === 1 ? 'try' : 'tries'} · {next.kind === 'wait' ? 'agents working' : next.label.toLowerCase()} · {timeAgo(t.updated_at)}
+                </span>
+              </Link>
+            ))}
+          </div>
+        </>
       )}
-      <div className="rv-list">
-        {[...needs, ...rest].map(({ t, next, n }) => (
-          <Link key={t.id} to={taskLink(t.id)} className="rv-item">
-            <span className="rv-item-name">{t.goal}</span>
-            <span className="muted">{plural(n, 'version')} · {timeAgo(t.updated_at)}</span>
-            <NextPill next={next} />
-          </Link>
-        ))}
-      </div>
     </div>
   )
-}
-
-function NextPill({ next }: { next: NextStep }) {
-  const done = next.kind === 'done' || next.kind === 'wait'
-  return <span className={`next-pill ${done ? 'next-done' : ''}`}>{done ? next.label : `Next: ${next.label}`}</span>
 }
 
 /** `/review/t/:id` */
@@ -128,48 +123,50 @@ export function TaskReview() {
       <div className="rv-head">
         <div>
           <h1 className="rv-title">{task.goal}</h1>
-          {task.criteria && <p className="muted">Done when: {task.criteria}</p>}
+          <p className="muted">
+            {versions.length} {versions.length === 1 ? 'try' : 'tries'}
+            {task.criteria ? ` · done when ${task.criteria}` : ''}
+          </p>
         </div>
-        <div className="rv-head-acts">
-          <NextPill next={next} />
-          {primaryLabel[next.kind] && (
-            <button type="button" className="btn btn-primary" disabled={busy} onClick={primary}>
-              {primaryLabel[next.kind]}
-            </button>
-          )}
-        </div>
+        {primaryLabel[next.kind] && (
+          <button type="button" className="btn btn-primary" disabled={busy} onClick={primary}>
+            {primaryLabel[next.kind]}
+          </button>
+        )}
       </div>
 
-      <div className="rv-cards" id="rv-versions">
+      <div className="rv-tries" id="rv-versions">
         {versions.map((g) => {
           const a = g.attempt
           const s = statusWords(a.status)
           const st = statOf(a.id)
           const chosen = versions.some((v) => v.attempt.status === 'promoted')
+          const summary = st?.summary ?? g.agent?.notes.at(-1)?.text ?? null
           return (
-            <div key={a.id} className={`rv-card ${a.status === 'promoted' ? 'chosen' : ''} ${a.status === 'abandoned' ? 'closed' : ''}`}>
-              <div className="rv-card-top">
-                <Link to={versionLink(a.id)} className="rv-card-name">{versionName(a)}</Link>
-                <span className={`tone tone-${s.tone}`}>{s.label}</span>
+            <div key={a.id} className={`rv-try ${a.status === 'promoted' ? 'chosen' : ''} ${a.status === 'abandoned' ? 'closed' : ''}`}>
+              <div className="rv-try-main">
+                <Link to={versionLink(a.id)} className="rv-try-name">
+                  {tryName(a, summary ?? a.prompt)}
+                </Link>
+                <span className="muted rv-try-meta">
+                  {versionName(a)}
+                  {st?.cost_usd != null ? ` · ${money(st.cost_usd)}` : ''}
+                  {g.conflicts > 0 ? ` · ${`${g.conflicts} clash${g.conflicts === 1 ? '' : 'es'}`}` : ''} · {timeAgo(st?.last_activity ?? a.created_at)}
+                </span>
               </div>
-              <p className="rv-card-sum">{st?.summary ?? g.agent?.notes.at(-1)?.text ?? a.reason ?? a.prompt ?? 'No summary yet.'}</p>
-              <p className="muted rv-card-stats">
-                {g.tests && a.status === 'promoted' ? `${testsWords(g.tests).label} · ` : ''}
-                {st?.cost_usd != null ? `${money(st.cost_usd)} · ` : ''}
-                {(g.behind ?? 0) > 0 ? `${g.behind} behind main · ` : ''}
-                {g.conflicts > 0 ? `${plural(g.conflicts, 'conflict')} · ` : ''}
-                updated {timeAgo(st?.last_activity ?? a.created_at)}
-              </p>
-              {!chosen && (a.status === 'passed' || a.status === 'exploring' || a.status === 'failed') && (
+              <span className={`tone tone-${s.tone}`}>{g.tests && a.status === 'promoted' ? testsWords(g.tests).label : s.label}</span>
+              {!chosen && (a.status === 'passed' || a.status === 'exploring' || a.status === 'failed') ? (
                 <button
                   type="button"
                   className={`btn ${a.status === 'passed' ? 'btn-primary' : 'btn-ghost'}`}
                   disabled={busy}
                   title={HELP.choose}
-                  onClick={() => void act(() => api.promote(a.id), `Chose ${versionName(a)}. The others stay in history.`)}
+                  onClick={() => void act(() => api.promote(a.id), `Using ${tryName(a, summary)}. The other tries stay in history.`)}
                 >
                   {WORDS.choose}
                 </button>
+              ) : (
+                <span />
               )}
             </div>
           )
