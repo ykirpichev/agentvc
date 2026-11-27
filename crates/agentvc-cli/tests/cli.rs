@@ -2304,3 +2304,136 @@ fn space_holds_workspaces_and_says_where_each_lives() {
     assert_eq!(s["space"], "solo", "{s}");
     assert_eq!(s["space_info"]["name"], "solo");
 }
+
+#[test]
+fn folders_of_one_github_repo_are_separate_workspaces_in_one_or_more_spaces() {
+    let tmp = tempdir();
+    let home = tmp.path().join("home");
+    git(
+        tmp.path(),
+        &["init", "--quiet", "--bare", "-b", "main", "mono.git"],
+    );
+    let seed = tmp.path().join("seed");
+    git(tmp.path(), &["clone", "--quiet", "mono.git", "seed"]);
+    fs::write(seed.join(".gitignore"), "target/\nnode_modules/\n").unwrap();
+    git(&seed, &["add", "-A"]);
+    git(&seed, &["commit", "--quiet", "-m", "init"]);
+    git(&seed, &["push", "--quiet", "origin", "HEAD:main"]);
+    // Two folders, both called `mono`, of one GitHub repo (ssh and https).
+    for d in ["a", "b"] {
+        fs::create_dir(tmp.path().join(d)).unwrap();
+        git(
+            &tmp.path().join(d),
+            &["clone", "--quiet", "../mono.git", "mono"],
+        );
+    }
+    let a = tmp.path().join("a/mono");
+    let b = tmp.path().join("b/mono");
+    git(
+        &a,
+        &["remote", "set-url", "origin", "git@github.com:o/mono.git"],
+    );
+    git(
+        &b,
+        &["remote", "set-url", "origin", "https://github.com/o/mono"],
+    );
+    let sa = agentvc_home(&home, &a, &["space"]);
+    let sb = agentvc_home(&home, &b, &["space"]);
+    assert_eq!(sa["space"]["key"], "github.com/o/mono", "{sa}");
+    assert_eq!(sa["space"]["id"], sb["space"]["id"]);
+
+    // Separate workspaces, with names unique in the space.
+    let l = agentvc_home(&home, &a, &["workspace", "ls"]);
+    let ws = l["workspaces"].as_array().unwrap();
+    assert_eq!(ws.len(), 2, "{l}");
+    assert_ne!(ws[0]["id"], ws[1]["id"]);
+    let mut names: Vec<&str> = ws.iter().map(|w| w["name"].as_str().unwrap()).collect();
+    names.sort();
+    assert_eq!(names, ["mono", "mono-2"], "{l}");
+    // ...and the same names seen from the other folder.
+    let l2 = agentvc_home(&home, &b, &["workspace", "ls"]);
+    let mut names2: Vec<&str> = l2["workspaces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|w| w["name"].as_str().unwrap())
+        .collect();
+    names2.sort();
+    assert_eq!(names2, names);
+
+    // A worktree is a workspace of its clone; it can't pick another space.
+    let r = agentvc_home(&home, &a, &["workspace", "new", "../wt", "--space", "x"]);
+    assert_eq!(r["error"]["code"], "worktree_space", "{r}");
+    // Build and dependency folders come along (copied here: tmp has no
+    // copy-on-write); tracked files never do.
+    fs::create_dir_all(a.join("target/debug")).unwrap();
+    fs::write(a.join("target/debug/app"), "bin").unwrap();
+    fs::create_dir_all(a.join("pkg/web/node_modules/x")).unwrap();
+    fs::write(a.join("pkg/web/node_modules/x/i.js"), "x").unwrap();
+    let r = agentvc_home(&home, &a, &["workspace", "new", "../wt", "--seed", "copy"]);
+    assert_eq!(r["ok"], true, "{r}");
+    assert_eq!(r["kind"], "worktree");
+    let wt = tmp.path().join("a/wt");
+    assert_eq!(
+        fs::read_to_string(wt.join("target/debug/app")).unwrap(),
+        "bin"
+    );
+    assert!(wt.join("pkg/web/node_modules/x/i.js").exists(), "{r}");
+    let seeded: Vec<&str> = r["seeded"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(seeded, ["target", "pkg/web/node_modules"], "{r}");
+    let r = agentvc_home(
+        &home,
+        &a,
+        &["workspace", "new", "../wt-bare", "--seed", "off"],
+    );
+    assert!(r["seeded"].as_array().unwrap().is_empty(), "{r}");
+    assert!(!tmp.path().join("a/wt-bare/target").exists());
+
+    // A clone made from this folder points at the real remote, has only the
+    // trunk, and joins the same space; with --space, another one.
+    let r = agentvc_home(
+        &home,
+        &a,
+        &[
+            "workspace",
+            "new",
+            "--clone",
+            "../../c/mono",
+            "--seed",
+            "off",
+        ],
+    );
+    assert_eq!(r["ok"], true, "{r}");
+    let c = tmp.path().join("c/mono");
+    assert_eq!(r["space"]["id"], sa["space"]["id"], "{r}");
+    assert_eq!(r["workspace"]["name"], "mono-3", "{r}");
+    let url = git(&c, &["remote", "get-url", "origin"]);
+    assert!(url.contains("github.com"), "{url}");
+    assert_eq!(git(&c, &["branch", "--format=%(refname:short)"]), "main");
+    assert!(c.join(".gitignore").exists());
+    let r = agentvc_home(
+        &home,
+        &a,
+        &[
+            "workspace",
+            "new",
+            "--clone",
+            "../../d/mono",
+            "--space",
+            "solo",
+            "--seed",
+            "off",
+        ],
+    );
+    assert_eq!(r["space"]["key"], "solo", "{r}");
+    assert_eq!(r["workspace"]["name"], "mono", "{r}");
+    let l = agentvc_home(&home, &a, &["workspace", "ls"]);
+    assert_eq!(l["workspaces"].as_array().unwrap().len(), 5, "{l}");
+    let l = agentvc_home(&home, &tmp.path().join("d/mono"), &["workspace", "ls"]);
+    assert_eq!(l["workspaces"].as_array().unwrap().len(), 1, "{l}");
+}

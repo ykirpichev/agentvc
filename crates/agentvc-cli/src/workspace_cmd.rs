@@ -79,18 +79,33 @@ pub enum WorkspaceCmd {
     /// Push this workspace's record and stack as refs/agentvc/workspaces/<id>
     /// so other machines list it (`ls --remote`).
     Publish,
-    /// Make a new workspace in this space: a worktree of this checkout, or
-    /// with --clone a fresh clone (own folder, own build) that joins the
-    /// same space. Says which space it joined.
+    /// Make a new workspace: a worktree of this checkout (shares its git
+    /// objects), or with --clone a separate clone (own git dir and config;
+    /// cloned from this checkout on disk, then pointed at the real remote).
+    /// Build and dependency folders (target, node_modules, ...) are seeded
+    /// from this workspace with copy-on-write clones where the filesystem
+    /// can. Says which space it joined.
     New {
         /// Folder for it; must not exist or be empty.
         folder: std::path::PathBuf,
         /// Its name (unique in the space). Defaults to the folder's name.
         #[arg(long)]
         name: Option<String>,
-        /// Clone the remote into the folder instead of adding a worktree.
+        /// A separate clone instead of a worktree.
         #[arg(long)]
         clone: bool,
+        /// With --clone: join this space instead of this checkout's (`none`
+        /// joins none).
+        #[arg(long)]
+        space: Option<String>,
+        /// auto: copy-on-write clones of build/dependency folders when the
+        /// filesystem can, else none; copy: copy them anyway; off: none.
+        #[arg(long, value_enum, default_value = "auto")]
+        seed: SeedArg,
+        /// Seed these folders (relative; `*` matches one level) instead of
+        /// git config `agentvc.seed` or the usual ones. Repeatable.
+        #[arg(long = "seed-path", value_name = "PATH")]
+        seed_paths: Vec<String>,
     },
     /// Same as `agentvc space join`: show or set the space this checkout
     /// belongs to.
@@ -130,6 +145,13 @@ pub enum SpaceCmd {
         #[arg(long, conflicts_with = "key")]
         reset: bool,
     },
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+pub enum SeedArg {
+    Auto,
+    Copy,
+    Off,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -301,14 +323,23 @@ pub fn run(cwd: &Path, cmd: WorkspaceCmd) -> anyhow::Result<(Value, String)> {
             folder,
             name,
             clone,
+            space,
+            seed,
+            seed_paths,
         } => {
-            let kind = if clone {
-                workspace::NewKind::Clone
-            } else {
-                workspace::NewKind::Worktree
+            let o = workspace::NewOptions {
+                name,
+                clone,
+                space,
+                seed: match seed {
+                    SeedArg::Auto => workspace::SeedMode::Auto,
+                    SeedArg::Copy => workspace::SeedMode::Copy,
+                    SeedArg::Off => workspace::SeedMode::Off,
+                },
+                seed_paths,
             };
-            let c = workspace::create(cwd, &folder, name.as_deref(), kind)?;
-            let text = format!(
+            let c = workspace::create(cwd, &folder, &o)?;
+            let mut text = format!(
                 "workspace {} ({}) at {} on {}\n{}\n",
                 c.workspace.name,
                 c.workspace.id,
@@ -316,10 +347,22 @@ pub fn run(cwd: &Path, cmd: WorkspaceCmd) -> anyhow::Result<(Value, String)> {
                 c.workspace.machine,
                 match &c.space {
                     Some(s) => format!("joined {}", space_line(s)),
-                    None =>
-                        "joined no space (no remote); `agentvc space join KEY` joins one".into(),
+                    None => "joined no space; `agentvc space join KEY` joins one".into(),
                 }
             );
+            for s in &c.seeded {
+                text += &match s.how.as_str() {
+                    "skipped" => format!(
+                        "  {}: not seeded ({})\n",
+                        s.path,
+                        s.reason.as_deref().unwrap_or("")
+                    ),
+                    how => format!(
+                        "  {}: seeded from {} ({how}, {} files, {} ms)\n",
+                        s.path, c.seeded_from, s.files, s.millis
+                    ),
+                };
+            }
             (json!(c), text)
         }
         WorkspaceCmd::Name { name } => {
