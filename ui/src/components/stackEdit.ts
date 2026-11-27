@@ -43,7 +43,7 @@ export function useStackEdit() {
       else if (stopped) {
         toast.ok(`${stopped} clashes with its parent. Pick what to keep.`, { undo: false })
         go(branchLink(w.id, stopped))
-      } else toast.ok(done, { undo: op.op === 'checkout' ? false : undoIn(w.id, done) })
+      } else toast.ok(done, { undo: op.op === 'checkout' || op.op === 'merge' ? false : undoIn(w.id, done) })
     } catch (e) {
       toast.error(e)
     } finally {

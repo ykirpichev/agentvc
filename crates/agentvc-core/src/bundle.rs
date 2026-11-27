@@ -69,6 +69,10 @@ pub struct BundleRestore {
     pub incomplete: Vec<i64>,
     /// Open attempts whose views were written out.
     pub views: Vec<i64>,
+    /// Settings of the machine or session that saved the space, left out
+    /// here (#97).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub settings_dropped: Vec<String>,
 }
 
 const B64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -497,6 +501,7 @@ fn restore_into(
     let doc = &payload["space"];
     let space = sync::empty_space(workdir)?;
     sync::insert_rows(&space, doc)?;
+    let settings_dropped = sync::forget_foreign_settings(&space, repo)?;
     let space_id = doc["space_id"].as_str().unwrap_or_default().to_string();
     if !space_id.is_empty() {
         space.set_meta(sync::SPACE_ID_KEY, &space_id)?;
@@ -546,6 +551,7 @@ fn restore_into(
         rebuilt,
         incomplete,
         views,
+        settings_dropped,
     };
     Ok((space, result))
 }

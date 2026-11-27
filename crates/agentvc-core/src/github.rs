@@ -497,6 +497,7 @@ impl Api {
             _ => {
                 let req = match method {
                     "POST" => self.agent.post(&url),
+                    "PUT" => self.agent.put(&url),
                     _ => self.agent.patch(&url),
                 };
                 req.header("Authorization", &auth)

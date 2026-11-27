@@ -62,6 +62,102 @@ pub struct Tracked {
     /// `closed` or `merged`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pr_state: Option<String>,
+    /// Checks and review of the PR when this window last looked
+    /// (`stack log --prs`, `stack merge`, the daemon's poller).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr_status: Option<PrBrief>,
+}
+
+/// A PR's checks and review, as `stack log --prs` shows them.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PrBrief {
+    /// `pass`, `fail`, `pending` or `none`.
+    pub checks: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failing: Vec<String>,
+    /// `approved`, `changes_requested` or `none`.
+    pub review: String,
+    /// Review threads neither resolved nor outdated.
+    pub unresolved: usize,
+    /// GitHub's `mergeable` (`None` while it computes it).
+    pub mergeable: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mergeable_state: Option<String>,
+    /// The PR's head commit.
+    pub head: Option<String>,
+    /// When it was fetched (unix seconds).
+    pub at: i64,
+}
+
+impl PrBrief {
+    pub fn of(f: &crate::feedback::PrFeedback) -> PrBrief {
+        PrBrief {
+            checks: f.checks.state.clone(),
+            failing: f.checks.failing.clone(),
+            review: f.decision.clone(),
+            unresolved: f.unresolved,
+            mergeable: f.mergeable,
+            mergeable_state: f.mergeable_state.clone(),
+            head: f.head_sha.clone(),
+            at: f.refreshed_at,
+        }
+    }
+}
+
+/// What `stack get` did.
+#[derive(Clone, Debug, Serialize)]
+pub struct GetResult {
+    /// The branches now tracked here, parents first.
+    pub tracked: Vec<Tracked>,
+    /// Local branches created from the remote.
+    pub created: Vec<String>,
+    /// Local branches fast-forwarded to the remote.
+    pub updated: Vec<String>,
+}
+
+/// Options for `stack merge`.
+#[derive(Clone, Debug, Default)]
+pub struct MergeOptions {
+    /// Merge up to this branch (default: the current one).
+    pub branch: Option<String>,
+    /// `squash` (default), `merge` or `rebase`.
+    pub method: Option<String>,
+    /// GitHub `owner/name`; defaults to the remote's.
+    pub repo: Option<String>,
+    /// Say whether the bottom PR could merge, change nothing.
+    pub dry_run: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct MergedPr {
+    pub branch: String,
+    pub number: u64,
+    /// The merge commit GitHub reported.
+    pub sha: Option<String>,
+}
+
+/// Why `stack merge` stopped before the target.
+#[derive(Clone, Debug, Serialize)]
+pub struct MergeStop {
+    pub branch: String,
+    pub number: Option<u64>,
+    /// `checks_pending`, `checks_failed`, `changes_requested`, `pr_draft`,
+    /// `not_mergeable`, `blocked`, `not_pushed`, `no_pr`, `pr_closed`,
+    /// `merge_failed`, `conflict`.
+    pub code: String,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct MergeResult {
+    pub repo: String,
+    pub merged: Vec<MergedPr>,
+    /// Set when it stopped before merging everything up to the target;
+    /// run it again once that is fixed (or checks are done).
+    pub stopped: Option<MergeStop>,
+    /// With `dry_run`: the bottom PR would merge now.
+    pub ready: bool,
+    pub statuses: Vec<(String, PrBrief)>,
 }
 
 /// PR state as `pr_state` records it.
@@ -214,6 +310,11 @@ pub struct BranchInfo {
     pub children: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pr: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pr_state: Option<String>,
+    /// Checks and review as last fetched (`log --prs`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pr_status: Option<PrBrief>,
     /// Another worktree that has this branch checked out.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub checked_out_elsewhere: Option<PathBuf>,
@@ -1310,6 +1411,7 @@ impl Window {
             parent_rev,
             pr: None,
             pr_state: None,
+            pr_status: None,
         };
         self.state.branches.push(t.clone());
         self.save()?;
@@ -1436,6 +1538,7 @@ impl Window {
                 parent_rev,
                 pr: None,
                 pr_state: None,
+                pr_status: None,
             };
             added.push(t);
             if chain && parent != self.state.trunk && !self.tracks(&parent) {
@@ -1867,6 +1970,7 @@ impl Window {
                 parent_rev: parent_rev.clone(),
                 pr: None,
                 pr_state: None,
+                pr_status: None,
             });
             parent = name.clone();
             parent_rev = c.id.clone();
@@ -2097,6 +2201,441 @@ impl Window {
         }
         self.require_tracked(branch)?;
         self.switch(branch)
+    }
+
+    // ---- PR status and merge ----
+
+    fn github_repo(&self, repo: Option<&str>) -> Result<String> {
+        if self.state.remote.is_empty() {
+            return Err(stack_err("no_remote", "this repository has no remote"));
+        }
+        crate::github::repo_for(&self.repo.workdir, &self.state.remote, repo)
+    }
+
+    /// Fetch checks and review of every tracked branch's PR and record them
+    /// in the stack (`stack log --prs`).
+    pub fn refresh_prs(&mut self, repo: Option<&str>) -> Result<Vec<(String, PrBrief)>> {
+        if !self.state.branches.iter().any(|b| b.pr.is_some()) {
+            return Ok(Vec::new());
+        }
+        let api = Api::new(crate::github::token()?);
+        let repo = self.github_repo(repo)?;
+        self.refresh_prs_with(&api, &repo)
+    }
+
+    pub(crate) fn refresh_prs_with(
+        &mut self,
+        api: &Api,
+        repo: &str,
+    ) -> Result<Vec<(String, PrBrief)>> {
+        let mut out = Vec::new();
+        for i in 0..self.state.branches.len() {
+            let Some(n) = self.state.branches[i].pr else {
+                continue;
+            };
+            if matches!(
+                self.state.branches[i].pr_state.as_deref(),
+                Some("merged" | "closed")
+            ) {
+                continue;
+            }
+            let f = crate::feedback::fetch_with(api, repo, n)?;
+            let brief = PrBrief::of(&f);
+            let b = &mut self.state.branches[i];
+            b.pr_state = Some(if f.state == "open" && f.draft {
+                "draft".into()
+            } else {
+                f.state.clone()
+            });
+            b.pr_status = Some(brief.clone());
+            out.push((b.name.clone(), brief));
+        }
+        self.save()?;
+        Ok(out)
+    }
+
+    /// Merge the stack's PRs on GitHub from the bottom up to `opts.branch`
+    /// (default: the current branch), like Graphite's merge. Each PR must
+    /// be pushed, out of draft, mergeable, with passing checks and no
+    /// change requests. After each merge the stack is synced and the rest
+    /// re-submitted, so the next PR targets the trunk; that usually starts
+    /// its checks again, and the command stops there (`checks_pending`).
+    /// Run it again when they pass. Never waits.
+    pub fn merge_stack(&mut self, opts: &MergeOptions) -> Result<MergeResult> {
+        let api = Api::new(crate::github::token()?);
+        self.merge_stack_with(opts, &api)
+    }
+
+    pub(crate) fn merge_stack_with(
+        &mut self,
+        opts: &MergeOptions,
+        api: &Api,
+    ) -> Result<MergeResult> {
+        self.settle()?;
+        let repo = self.github_repo(opts.repo.as_deref())?;
+        let target = match &opts.branch {
+            Some(b) => {
+                self.require_tracked(b)?;
+                b.clone()
+            }
+            None => self.require_current()?,
+        };
+        let method = opts.method.clone().unwrap_or_else(|| "squash".into());
+        if !matches!(method.as_str(), "squash" | "merge" | "rebase") {
+            return Err(stack_err(
+                "bad_method",
+                format!("merge method {method}: use squash, merge or rebase"),
+            ));
+        }
+        let mut chain = self.downstack(&target);
+        chain.reverse();
+        let bottom = &self.state.branches[self.find(&chain[0]).expect("tracked")];
+        if bottom.parent != self.state.trunk {
+            return Err(stack_err_with(
+                "not_on_trunk",
+                format!(
+                    "{} sits on {}, another window's branch; merge that one first",
+                    bottom.name, bottom.parent
+                ),
+                json!({ "branch": bottom.name, "parent": bottom.parent }),
+            ));
+        }
+        let mut result = MergeResult {
+            repo: repo.clone(),
+            merged: Vec::new(),
+            stopped: None,
+            ready: false,
+            statuses: Vec::new(),
+        };
+        let stop = |b: &str, n: Option<u64>, code: &str, msg: String| MergeStop {
+            branch: b.to_string(),
+            number: n,
+            code: code.to_string(),
+            message: msg,
+        };
+        for name in chain {
+            let Some(i) = self.find(&name) else {
+                continue; // merged and dropped by an earlier sync
+            };
+            let Some(n) = self.state.branches[i].pr else {
+                result.stopped = Some(stop(
+                    &name,
+                    None,
+                    "no_pr",
+                    format!("{name} has no PR yet; run `agentvc stack submit`"),
+                ));
+                break;
+            };
+            let f = crate::feedback::fetch_with(api, &repo, n)?;
+            let brief = PrBrief::of(&f);
+            self.state.branches[i].pr_status = Some(brief.clone());
+            self.state.branches[i].pr_state = Some(f.state.clone());
+            self.save()?;
+            result.statuses.push((name.clone(), brief.clone()));
+            let tip = self.branch_tip(&name);
+            let why: Option<(&str, String)> = if f.state == "merged" {
+                None
+            } else if f.state == "closed" {
+                Some(("pr_closed", format!("PR #{n} of {name} is closed")))
+            } else if f.draft {
+                Some((
+                    "pr_draft",
+                    format!("PR #{n} of {name} is a draft; mark it ready for review"),
+                ))
+            } else if f.head_sha != tip {
+                Some((
+                    "not_pushed",
+                    format!("{name} has local changes not on PR #{n}; run `agentvc stack submit`"),
+                ))
+            } else if brief.checks == "fail" {
+                Some((
+                    "checks_failed",
+                    format!(
+                        "checks fail on PR #{n} of {name}: {}",
+                        brief.failing.join(", ")
+                    ),
+                ))
+            } else if brief.checks == "pending" {
+                Some(("checks_pending", format!("checks are still running on PR #{n} of {name}; run this again when they pass")))
+            } else if brief.review == "changes_requested" {
+                Some((
+                    "changes_requested",
+                    format!("changes were requested on PR #{n} of {name}"),
+                ))
+            } else if brief.mergeable == Some(false)
+                || brief.mergeable_state.as_deref() == Some("dirty")
+            {
+                Some(("not_mergeable", format!("PR #{n} of {name} conflicts with its base; run `agentvc stack sync` and submit")))
+            } else if brief.mergeable_state.as_deref() == Some("blocked") {
+                Some(("blocked", format!("PR #{n} of {name} is blocked by branch protection (a required review or check)")))
+            } else {
+                None
+            };
+            if let Some((code, msg)) = why {
+                result.stopped = Some(stop(&name, Some(n), code, msg));
+                break;
+            }
+            if opts.dry_run {
+                result.ready = true;
+                break;
+            }
+            let mut sha = f.merge_commit.clone();
+            if f.state != "merged" {
+                let r = api.call(
+                    "PUT",
+                    &format!("/repos/{repo}/pulls/{n}/merge"),
+                    Some(json!({ "merge_method": method, "sha": f.head_sha })),
+                );
+                match r {
+                    Ok(v) if v["merged"].as_bool() != Some(false) => {
+                        sha = v["sha"].as_str().map(str::to_string);
+                    }
+                    Ok(v) => {
+                        result.stopped = Some(stop(
+                            &name,
+                            Some(n),
+                            "merge_failed",
+                            format!(
+                                "GitHub did not merge PR #{n}: {}",
+                                v["message"].as_str().unwrap_or("no reason given")
+                            ),
+                        ));
+                        break;
+                    }
+                    Err(e) => {
+                        result.stopped = Some(stop(
+                            &name,
+                            Some(n),
+                            "merge_failed",
+                            format!("GitHub did not merge PR #{n}: {e}"),
+                        ));
+                        break;
+                    }
+                }
+            }
+            if let Some(i) = self.find(&name) {
+                self.state.branches[i].pr_state = Some("merged".into());
+                self.save()?;
+            }
+            result.merged.push(MergedPr {
+                branch: name.clone(),
+                number: n,
+                sha,
+            });
+            // Drop it, put the rest on the trunk, retarget their PRs, then
+            // remove the merged branch from the remote.
+            if let Err(e) = self.sync_with(true, true, false, Some(api)) {
+                result.stopped = Some(stop(
+                    &name,
+                    Some(n),
+                    e.code(),
+                    format!("merged PR #{n}, but syncing the stack failed: {e}"),
+                ));
+                break;
+            }
+            if self.tracks(&target) {
+                let sub = SubmitOptions {
+                    branch: Some(target.clone()),
+                    repo: Some(repo.clone()),
+                    ..Default::default()
+                };
+                if let Err(e) = self.submit_with(&sub, Some(api)) {
+                    result.stopped = Some(stop(
+                        &name,
+                        Some(n),
+                        e.code(),
+                        format!("merged PR #{n}, but re-submitting the rest failed: {e}"),
+                    ));
+                    break;
+                }
+            }
+            let remote = self.state.remote.clone();
+            let _ = self
+                .repo
+                .git(&["push", "--quiet", &remote, "--delete", &name], None);
+        }
+        if result.merged.is_empty() && !opts.dry_run {
+            if let Some(s) = &result.stopped {
+                let code: &'static str = match s.code.as_str() {
+                    "checks_pending" => "checks_pending",
+                    "checks_failed" => "checks_failed",
+                    "changes_requested" => "changes_requested",
+                    "pr_draft" => "pr_draft",
+                    "not_mergeable" => "not_mergeable",
+                    "blocked" => "blocked",
+                    "not_pushed" => "not_pushed",
+                    "no_pr" => "no_pr",
+                    "pr_closed" => "pr_closed",
+                    _ => "merge_failed",
+                };
+                return Err(stack_err_with(code, s.message.clone(), json!(s)));
+            }
+        }
+        Ok(result)
+    }
+
+    /// Pick up `names` of a stack published from another machine (`state`,
+    /// from `refs/agentvc/workspaces/<id>`): fetch the branches, create or
+    /// fast-forward them locally and track them here with the published
+    /// parents (`stack get`, like `gt get`). Running it again brings later
+    /// pushes from that machine. Nothing changes when a local branch has
+    /// commits the remote one lacks (`branch_diverged`) or another window
+    /// here tracks it.
+    pub fn get_published(&mut self, state: &State, names: &[String]) -> Result<GetResult> {
+        self.settle()?;
+        if self.state.remote.is_empty() {
+            return Err(stack_err(
+                "no_remote",
+                "this repository has no remote to fetch from",
+            ));
+        }
+        let remote = self.state.remote.clone();
+        let picked: Vec<Tracked> = state
+            .branches
+            .iter()
+            .filter(|b| names.contains(&b.name))
+            .cloned()
+            .collect();
+        // Parents outside the set (another window there): fetched as plain
+        // branches, read-only bases here.
+        let mut fetch: Vec<String> = picked.iter().map(|b| b.name.clone()).collect();
+        for b in &picked {
+            if b.parent != state.trunk && !names.contains(&b.parent) && !fetch.contains(&b.parent) {
+                fetch.push(b.parent.clone());
+            }
+        }
+        let mut args = vec!["fetch".to_string(), "--quiet".into(), remote.clone()];
+        args.push(format!(
+            "+refs/heads/{0}:refs/remotes/{remote}/{0}",
+            state.trunk
+        ));
+        for n in &fetch {
+            args.push(format!("+refs/heads/{n}:refs/remotes/{remote}/{n}"));
+        }
+        // What this machine saw of them before: a local branch still there
+        // has no work of its own, so a rewritten remote branch may replace it.
+        let seen: HashMap<String, Option<String>> = fetch
+            .iter()
+            .map(|n| {
+                (
+                    n.clone(),
+                    self.repo.rev(&format!("refs/remotes/{remote}/{n}")),
+                )
+            })
+            .collect();
+        let a: Vec<&str> = args.iter().map(String::as_str).collect();
+        self.repo.git(&a, None).map_err(|e| {
+            stack_err_with(
+                "branch_missing",
+                format!("fetching {} from {remote} failed: {e}", fetch.join(", ")),
+                json!({ "branches": fetch }),
+            )
+        })?;
+        // Check everything before changing anything.
+        let elsewhere = self.checkouts_elsewhere();
+        let current = self.current_branch();
+        let mut moves: Vec<(String, Option<String>, String)> = Vec::new();
+        for n in &fetch {
+            let theirs = self
+                .repo
+                .rev(&format!("refs/remotes/{remote}/{n}"))
+                .ok_or_else(|| {
+                    stack_err_with(
+                        "branch_missing",
+                        format!("{n} is not on {remote}"),
+                        json!({ "branch": n }),
+                    )
+                })?;
+            let tracked_here = names.contains(n);
+            if tracked_here {
+                if let Some(p) = self.owner_elsewhere(n) {
+                    return Err(stack_err_with(
+                        "owned_by_other_window",
+                        format!(
+                            "branch {n} belongs to the window at {}; nothing was changed",
+                            p.display()
+                        ),
+                        json!({ "branch": n, "window": p }),
+                    ));
+                }
+            }
+            let mine = self.branch_tip(n);
+            match &mine {
+                Some(m) if *m == theirs => continue,
+                Some(m)
+                    if !self.repo.is_ancestor(m, &theirs)
+                        && seen.get(n).cloned().flatten().as_deref() != Some(m.as_str()) =>
+                {
+                    if !tracked_here {
+                        continue; // a base we only read: keep the local one
+                    }
+                    return Err(stack_err_with(
+                        "branch_diverged",
+                        format!("local {n} has commits that {remote}/{n} lacks; push or drop them first. Nothing was changed"),
+                        json!({ "branch": n }),
+                    ));
+                }
+                _ => {}
+            }
+            if let Some(p) = elsewhere.get(n) {
+                return Err(stack_err_with(
+                    "checked_out_elsewhere",
+                    format!(
+                        "branch {n} is checked out in {}; nothing was changed",
+                        p.display()
+                    ),
+                    json!({ "branch": n, "worktree": p }),
+                ));
+            }
+            moves.push((n.clone(), mine, theirs));
+        }
+        let mut created = Vec::new();
+        let mut updated = Vec::new();
+        for (n, old, new) in &moves {
+            if current.as_deref() == Some(n.as_str()) {
+                self.repo.git(&["reset", "--keep", new], None)?;
+            } else {
+                let mut a = vec!["update-ref", "-m", "agentvc stack get"];
+                let r = format!("refs/heads/{n}");
+                a.push(&r);
+                a.push(new);
+                if let Some(o) = old {
+                    a.push(o);
+                }
+                self.repo.git(&a, None)?;
+            }
+            if old.is_some() {
+                updated.push(n.clone());
+            } else {
+                created.push(n.clone());
+            }
+        }
+        let mut tracked = Vec::new();
+        for b in &picked {
+            let t = Tracked {
+                name: b.name.clone(),
+                parent: if b.parent == state.trunk {
+                    self.state.trunk.clone()
+                } else {
+                    b.parent.clone()
+                },
+                parent_rev: b.parent_rev.clone(),
+                pr: b.pr,
+                pr_state: b.pr_state.clone(),
+                pr_status: b.pr_status.clone(),
+            };
+            match self.find(&b.name) {
+                Some(i) => self.state.branches[i] = t.clone(),
+                None => self.state.branches.push(t.clone()),
+            }
+            tracked.push(t);
+        }
+        self.save()?;
+        Ok(GetResult {
+            tracked,
+            created,
+            updated,
+        })
     }
 
     // ---- navigation ----
@@ -2583,6 +3122,8 @@ impl Window {
                 depth,
                 children: self.children_of(&name),
                 pr: b.pr,
+                pr_state: b.pr_state.clone(),
+                pr_status: b.pr_status.clone(),
                 checked_out_elsewhere: elsewhere.get(&name).cloned(),
             });
         }
@@ -2968,6 +3509,18 @@ mod tests {
         Api,
         std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
     ) {
+        fake_github_on(None)
+    }
+
+    /// With `origin`: PR heads are read from it, check runs report each
+    /// PR's `x_checks` (default `success`), and merging a PR squashes its
+    /// branch into origin's main.
+    fn fake_github_on(
+        origin: Option<PathBuf>,
+    ) -> (
+        Api,
+        std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+    ) {
         use std::io::{BufRead, BufReader, Read, Write};
         use std::sync::{Arc, Mutex};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -3000,7 +3553,73 @@ mod tests {
                 let mut prs = store.lock().unwrap();
                 let num =
                     |p: &str| -> Option<usize> { p.split('/').nth(5).and_then(|n| n.parse().ok()) };
-                let out = if method == "POST" && path == "/repos/o/r/pulls" {
+                let head_of = |pr: &serde_json::Value| -> Option<String> {
+                    let o = origin.as_ref()?;
+                    let r = pr["head"]["ref"].as_str()?;
+                    let out = Command::new("git")
+                        .arg("--git-dir")
+                        .arg(o)
+                        .args([
+                            "rev-parse",
+                            "--verify",
+                            "--quiet",
+                            &format!("refs/heads/{r}"),
+                        ])
+                        .output()
+                        .ok()?;
+                    out.status
+                        .success()
+                        .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+                };
+                if origin.is_some() {
+                    for pr in prs.iter_mut() {
+                        if pr["merged"] != json!(true) {
+                            if let Some(h) = head_of(pr) {
+                                pr["head"]["sha"] = json!(h);
+                            }
+                        }
+                    }
+                }
+                let out = if path.contains("/check-runs") {
+                    let sha = path.split('/').nth(5).unwrap_or_default();
+                    let c = prs
+                        .iter()
+                        .find(|p| p["head"]["sha"] == sha)
+                        .and_then(|p| p["x_checks"].as_str().map(str::to_string))
+                        .unwrap_or_else(|| "success".into());
+                    if c == "in_progress" {
+                        json!({ "check_runs": [{ "name": "ci", "status": "in_progress" }] })
+                    } else {
+                        json!({ "check_runs": [{ "name": "ci", "status": "completed", "conclusion": c }] })
+                    }
+                } else if path.ends_with("/status") {
+                    json!({ "statuses": [] })
+                } else if path.contains("/reviews")
+                    || path.contains("/comments")
+                    || path == "/graphql"
+                {
+                    json!([])
+                } else if method == "PUT" && path.ends_with("/merge") {
+                    let i = num(&path).unwrap() - 1;
+                    let o = origin.clone().expect("merging needs an origin");
+                    let tmp = o.parent().unwrap().join(format!("merge-{}", i + 1));
+                    let _ = fs::remove_dir_all(&tmp);
+                    git(
+                        o.parent().unwrap(),
+                        &["clone", "-q", o.to_str().unwrap(), tmp.to_str().unwrap()],
+                    );
+                    let head = prs[i]["head"]["ref"].as_str().unwrap().to_string();
+                    git(
+                        &tmp,
+                        &["merge", "-q", "--squash", &format!("origin/{head}")],
+                    );
+                    git(&tmp, &["commit", "-q", "-m", &format!("Squash #{}", i + 1)]);
+                    git(&tmp, &["push", "-q", "origin", "main"]);
+                    prs[i]["merged"] = json!(true);
+                    prs[i]["state"] = json!("closed");
+                    prs[i]["merged_at"] = json!("2026-11-27T00:00:00Z");
+                    json!({ "merged": true, "sha": git(&tmp, &["rev-parse", "HEAD"]) })
+                } else if method == "POST" && path == "/repos/o/r/pulls" {
                     let n = prs.len() + 1;
                     let pr = json!({
                         "number": n, "html_url": format!("https://github.com/o/r/pull/{n}"),
@@ -3403,5 +4022,99 @@ mod tests {
         assert_eq!(w.current_branch(), None);
         assert_eq!(w.checkout("k").unwrap(), "k");
         assert_eq!(w.checkout("nope").unwrap_err().code(), "not_in_stack");
+    }
+    #[test]
+    fn merge_lands_the_stack_bottom_up_and_stops_on_pending_checks() {
+        let f = setup();
+        let mut w = Window::open(&f.w1).unwrap();
+        for i in 1..=3 {
+            fs::write(f.w1.join(format!("m{i}.txt")), format!("{i}\n")).unwrap();
+            w.create(
+                Some(&format!("m{i}")),
+                Some(&format!("Merge step {i}")),
+                true,
+            )
+            .unwrap();
+        }
+        let (api, prs) = fake_github_on(Some(f.origin.clone()));
+        let sub = SubmitOptions {
+            repo: Some("o/r".into()),
+            ..Default::default()
+        };
+        w.submit_with(&sub, Some(&api)).unwrap();
+        let st = w.refresh_prs_with(&api, "o/r").unwrap();
+        assert_eq!(st.len(), 3);
+        assert!(st.iter().all(|(_, b)| b.checks == "pass"));
+        assert_eq!(
+            w.log(false).unwrap().branches[0]
+                .pr_status
+                .as_ref()
+                .unwrap()
+                .checks,
+            "pass"
+        );
+
+        // Checks still run on m2: m1 merges, the rest is re-submitted onto
+        // main, and it stops at m2.
+        prs.lock().unwrap()[1]["x_checks"] = json!("in_progress");
+        let opts = MergeOptions {
+            branch: Some("m3".into()),
+            repo: Some("o/r".into()),
+            ..Default::default()
+        };
+        let r = w.merge_stack_with(&opts, &api).unwrap();
+        assert_eq!(
+            r.merged
+                .iter()
+                .map(|m| m.branch.as_str())
+                .collect::<Vec<_>>(),
+            vec!["m1"]
+        );
+        let stop = r.stopped.unwrap();
+        assert_eq!(
+            (stop.branch.as_str(), stop.code.as_str()),
+            ("m2", "checks_pending")
+        );
+        assert!(!w.tracks("m1"));
+        assert_eq!(prs.lock().unwrap()[1]["base"]["ref"], "main");
+        assert!(
+            git(&f.origin, &["branch", "--list", "m1"]).is_empty(),
+            "merged branch left the remote"
+        );
+
+        // Nothing ready: an error with the code, nothing merged.
+        let e = w.merge_stack_with(&opts, &api).unwrap_err();
+        assert_eq!(e.code(), "checks_pending");
+
+        // Checks pass: m2 and m3 merge in one go.
+        prs.lock().unwrap()[1]["x_checks"] = json!("success");
+        let dry = MergeOptions {
+            dry_run: true,
+            ..opts.clone()
+        };
+        assert!(w.merge_stack_with(&dry, &api).unwrap().ready);
+        let r = w.merge_stack_with(&opts, &api).unwrap();
+        assert_eq!(r.merged.len(), 2);
+        assert!(r.stopped.is_none());
+        assert!(w.state.branches.is_empty());
+        let main = git(&f.origin, &["ls-tree", "--name-only", "main"]);
+        for i in 1..=3 {
+            assert!(main.contains(&format!("m{i}.txt")), "{main}");
+        }
+
+        // A failing check stops it before merging anything.
+        fs::write(f.w1.join("m4.txt"), "4\n").unwrap();
+        git(&f.w1, &["switch", "-q", "--detach", "origin/main"]);
+        w.create(Some("m4"), Some("m4"), true).unwrap();
+        w.submit_with(&sub, Some(&api)).unwrap();
+        prs.lock().unwrap()[3]["x_checks"] = json!("failure");
+        let o4 = MergeOptions {
+            branch: None,
+            ..opts
+        };
+        assert_eq!(
+            w.merge_stack_with(&o4, &api).unwrap_err().code(),
+            "checks_failed"
+        );
     }
 }

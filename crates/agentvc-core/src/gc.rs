@@ -461,6 +461,19 @@ pub fn auto_needed(space: &Space) -> bool {
 // ---- gc ----------------------------------------------------------------------
 
 /// Run gc. See the module docs for what it touches.
+/// `gc.keepViewsDays` when unset: 7, or 0 in a Claude Code cloud session
+/// (`CLAUDE_CODE_REMOTE`), whose container is thrown away long before a
+/// week and whose disk allowance fills with closed attempts' build dirs
+/// (#100).
+pub fn default_keep_views_days() -> i64 {
+    // Tests run in cloud sessions too; they expect the plain default.
+    if !cfg!(test) && std::env::var_os("CLAUDE_CODE_REMOTE").is_some() {
+        0
+    } else {
+        KEEP_VIEWS_DAYS
+    }
+}
+
 pub fn gc(space: &Space, opts: &GcOptions) -> Result<GcResult> {
     let start = std::time::Instant::now();
     let mut res = GcResult {
@@ -516,7 +529,11 @@ pub fn gc(space: &Space, opts: &GcOptions) -> Result<GcResult> {
     // 2. Views of attempts closed long ago, and 3. overlay layers.
     let view_days = match opts.keep_views_days {
         Some(d) => d,
-        None => config_i64(space, crate::config::GC_KEEP_VIEWS, KEEP_VIEWS_DAYS)?,
+        None => config_i64(
+            space,
+            crate::config::GC_KEEP_VIEWS,
+            default_keep_views_days(),
+        )?,
     };
     let dropping = gc_views(space, t - view_days * day, opts.dry_run, &mut res)?;
     #[cfg(target_os = "linux")]
@@ -658,8 +675,21 @@ fn gc_views(space: &Space, cutoff: i64, dry_run: bool, res: &mut GcResult) -> Re
         .filter(|r| r.alive != Some(false))
         .map(|r| r.attempt_id)
         .collect();
+    // A promoted attempt is still being finished until its PR is closed:
+    // review and CI fixes go into its view (#116).
+    let open_pr: HashSet<i64> = space
+        .open_prs()?
+        .into_iter()
+        .flat_map(|(_, ids, _)| ids)
+        .collect();
+    let any_pr: HashSet<i64> = space.prs()?.into_iter().flat_map(|(_, ids)| ids).collect();
     let mut dropping = Vec::new();
     for a in space.attempts(None)? {
+        if open_pr.contains(&a.id)
+            || (a.status == crate::space::Status::Promoted && !any_pr.contains(&a.id))
+        {
+            continue;
+        }
         // Only closed attempts, never the host checkout, only views agentvc
         // made (under .agentvc/views).
         if a.status.is_open()
@@ -1015,5 +1045,24 @@ mod tests {
             .set_config(crate::config::GC_AUTO, &["0".into()])
             .unwrap();
         assert!(!auto_needed(&space));
+    }
+    #[test]
+    fn keeps_the_view_of_a_promoted_attempt_until_its_pr_closes() {
+        let (_tmp, space) = space();
+        let win = fork(&space);
+        let lose = fork(&space);
+        space.set_status(win.id, Status::Promoted, None).unwrap();
+        space
+            .set_status(lose.id, Status::Abandoned, Some("no"))
+            .unwrap();
+        let opts = GcOptions {
+            keep_views_days: Some(0),
+            no_pack: true,
+            ..Default::default()
+        };
+        let r = gc(&space, &opts).unwrap();
+        let removed: Vec<i64> = r.views.iter().map(|v| v.attempt).collect();
+        assert_eq!(removed, vec![lose.id]);
+        assert!(win.view_path.exists(), "the winner is still being finished");
     }
 }

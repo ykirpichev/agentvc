@@ -87,6 +87,12 @@ pub struct PrFeedback {
     /// `open`, `closed` or `merged`.
     pub state: String,
     pub draft: bool,
+    /// GitHub's `mergeable` (`None` while it is still computing it).
+    #[serde(default)]
+    pub mergeable: Option<bool>,
+    /// `clean`, `blocked`, `behind`, `dirty`, `unstable`, ...
+    #[serde(default)]
+    pub mergeable_state: Option<String>,
     pub head_sha: Option<String>,
     pub merge_commit: Option<String>,
     pub merged_at: Option<String>,
@@ -306,7 +312,13 @@ pub fn fetch(url: &str) -> Result<PrFeedback> {
         kind: "pull request",
         id: url.to_string(),
     })?;
-    let api = Api::new(github::token()?);
+    fetch_with(&Api::new(github::token()?), &repo, number)
+}
+
+/// [`fetch`] with a given client, for PR `number` of `repo` (owner/name).
+pub(crate) fn fetch_with(api: &Api, repo: &str, number: u64) -> Result<PrFeedback> {
+    let url = format!("https://github.com/{repo}/pull/{number}");
+    let repo = repo.to_string();
     let pr = api.call("GET", &format!("/repos/{repo}/pulls/{number}"), None)?;
     let head_sha = pr["head"]["sha"].as_str().map(str::to_string);
     let (runs, statuses) = match &head_sha {
@@ -325,10 +337,10 @@ pub fn fetch(url: &str) -> Result<PrFeedback> {
         &format!("/repos/{repo}/pulls/{number}/reviews?per_page=100"),
         None,
     )?);
-    let threads = match threads_graphql(&api, &repo, number) {
+    let threads = match threads_graphql(api, &repo, number) {
         Ok(t) => t,
         Err(e @ Error::RateLimited { .. }) => return Err(e),
-        Err(_) => threads_rest(&api, &repo, number)?,
+        Err(_) => threads_rest(api, &repo, number).unwrap_or_default(),
     };
     let merged = pr["merged"].as_bool().unwrap_or(false) || !pr["merged_at"].is_null();
     let state = if merged {
@@ -344,11 +356,13 @@ pub fn fetch(url: &str) -> Result<PrFeedback> {
         "none"
     };
     Ok(PrFeedback {
-        url: url.to_string(),
+        url,
         repo,
         number,
         state,
         draft: pr["draft"].as_bool().unwrap_or(false),
+        mergeable: pr["mergeable"].as_bool(),
+        mergeable_state: pr["mergeable_state"].as_str().map(str::to_string),
         head_sha,
         merge_commit: merged
             .then(|| pr["merge_commit_sha"].as_str().map(str::to_string))
@@ -431,7 +445,7 @@ impl Space {
     }
 
     /// Every distinct PR URL with the attempts exported to it, newest first.
-    fn prs(&self) -> Result<Vec<(String, Vec<i64>)>> {
+    pub(crate) fn prs(&self) -> Result<Vec<(String, Vec<i64>)>> {
         let mut stmt = self.db.prepare(
             "SELECT pr_url, attempt_id FROM exports WHERE pr_url IS NOT NULL ORDER BY id DESC",
         )?;
@@ -677,6 +691,8 @@ mod tests {
             number: 7,
             state: "open".into(),
             draft: false,
+            mergeable: None,
+            mergeable_state: None,
             head_sha: None,
             merge_commit: None,
             merged_at: None,

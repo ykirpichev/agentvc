@@ -151,6 +151,10 @@ pub struct CloneResult {
     /// Open attempts whose views were written out from their latest snapshot.
     pub views: Vec<i64>,
     pub objects_imported: usize,
+    /// Settings of the machine or session that synced the space, left out
+    /// here (#97).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub settings_dropped: Vec<String>,
 }
 
 pub(crate) fn remote_name(r: &Option<String>) -> String {
@@ -803,6 +807,7 @@ fn restore(
 
     let runs_dir = dir.join("runs");
     insert_rows(&space, doc)?;
+    let settings_dropped = forget_foreign_settings(&space, repo)?;
     // Rows synced before uids existed get the uid every machine derives.
     crate::syncmerge::assign_uids(&space, Some(doc))?;
     space.set_meta(SPACE_ID_KEY, &picked.space_id)?;
@@ -841,8 +846,51 @@ fn restore(
         snapshots: count("snapshots"),
         views,
         objects_imported,
+        settings_dropped,
     };
     Ok((space, result))
+}
+
+/// After restoring a space synced elsewhere, drop the settings that belong
+/// to the machine or session that synced it (#97): `pr.branch` (another
+/// thread's push branch), session trailers (`Claude-Session: ...`) and the
+/// remembered refused push. Kept when `pr.branch` names the branch checked
+/// out here: the same thread in a new container. Returns what was dropped.
+pub(crate) fn forget_foreign_settings(space: &Space, repo: &HostRepo) -> Result<Vec<String>> {
+    let here = repo
+        .git(&["symbolic-ref", "--short", "-q", "HEAD"], None)
+        .ok();
+    let branches = space.config_values("pr.branch")?;
+    if branches.is_empty() || here.as_ref().is_some_and(|h| branches.contains(h)) {
+        return Ok(Vec::new());
+    }
+    let mut dropped = Vec::new();
+    for b in &branches {
+        dropped.push(format!("pr.branch {b}"));
+    }
+    space.delete_meta(&crate::config::meta_key("pr.branch"))?;
+    let trailers = space.config_values("pr.trailer")?;
+    let (session, keep): (Vec<String>, Vec<String>) = trailers.into_iter().partition(|t| {
+        t.trim_start()
+            .to_ascii_lowercase()
+            .starts_with("claude-session:")
+    });
+    if !session.is_empty() {
+        for t in &session {
+            dropped.push(format!("pr.trailer {t}"));
+        }
+        let k = crate::config::meta_key("pr.trailer");
+        if keep.is_empty() {
+            space.delete_meta(&k)?;
+        } else {
+            space.set_meta(&k, &serde_json::to_string(&keep).expect("serializes"))?;
+        }
+    }
+    if space.meta(crate::github::PUSH_REFUSED_KEY)?.is_some() {
+        space.delete_meta(crate::github::PUSH_REFUSED_KEY)?;
+        dropped.push(crate::github::PUSH_REFUSED_KEY.to_string());
+    }
+    Ok(dropped)
 }
 
 /// A new, empty space in `workdir`, for rebuilding one from elsewhere.
@@ -1414,5 +1462,49 @@ mod tests {
                 .code(),
             "space_exists"
         );
+    }
+    #[test]
+    fn restoring_elsewhere_leaves_out_the_session_settings() {
+        let (tmp, bare) = remote();
+        let a = checkout(&tmp, &bare, "a");
+        let space = busy_space(&a);
+        space
+            .set_config("pr.branch", &["claude/other-thread".to_string()])
+            .unwrap();
+        space
+            .set_config(
+                "pr.trailer",
+                &[
+                    "Co-Authored-By: Someone <s@x>".to_string(),
+                    "Claude-Session: https://claude.ai/code/session_x".to_string(),
+                ],
+            )
+            .unwrap();
+        space
+            .set_meta(crate::github::PUSH_REFUSED_KEY, "1")
+            .unwrap();
+        sync(&space, &SyncOptions::default()).unwrap();
+
+        let b = checkout(&tmp, &bare, "b");
+        let (copy, c) = clone_from_remote(&b, &CloneOptions::default()).unwrap();
+        assert_eq!(c.settings_dropped.len(), 3, "{:?}", c.settings_dropped);
+        assert!(copy.config_values("pr.branch").unwrap().is_empty());
+        assert_eq!(
+            copy.config_values("pr.trailer").unwrap(),
+            vec!["Co-Authored-By: Someone <s@x>".to_string()]
+        );
+        assert!(copy
+            .meta(crate::github::PUSH_REFUSED_KEY)
+            .unwrap()
+            .is_none());
+
+        // The same thread in a new container (pr.branch is checked out): kept.
+        copy.set_config(
+            "pr.branch",
+            &[git(&b, &["symbolic-ref", "--short", "HEAD"])],
+        )
+        .unwrap();
+        let repo = HostRepo::open(&b).unwrap();
+        assert!(forget_foreign_settings(&copy, &repo).unwrap().is_empty());
     }
 }

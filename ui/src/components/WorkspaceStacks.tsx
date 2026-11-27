@@ -11,7 +11,7 @@ import { useLive } from '../api/live'
 import type { WorkspaceInfo, WsBranch, WsOp, WsRequest } from '../api/types'
 import { branchLink, selectionFromPath, useGo } from '../core/links'
 import { canMoveBranch } from '../core/graph'
-import { shortSha } from '../core/words'
+import { prWords, shortSha } from '../core/words'
 import { timeAgo } from '../lib/format'
 import { BRANCH_MIME, useStackEdit } from './stackEdit'
 import { useToast } from './Toaster'
@@ -222,7 +222,7 @@ function BranchRow({
         ) : b.behind > 0 && b.parent_kind === 'trunk' ? (
           <span className="bbadge bbadge-behind">↓{b.behind}</span>
         ) : null}
-        {b.pr && <span className="bbadge bbadge-pr">#{b.pr.number}</span>}
+        {b.pr && <PrBadge pr={b.pr} />}
         {b.parent_kind === 'other_window' && <span className="bbadge">on {b.parent_workspace ?? 'another window'}</span>}
       </span>
       {movable && b.needs_restack && b.conflicts === 0 && !stopped && (
@@ -233,5 +233,16 @@ function BranchRow({
         </span>
       )}
     </div>
+  )
+}
+
+/** `#12` with what the PR needs, e.g. `#12 · checks fail`. */
+function PrBadge({ pr }: { pr: NonNullable<WsBranch['pr']> }) {
+  const w = prWords(pr.state, pr.status)
+  return (
+    <span className={`bbadge bbadge-pr${w ? ` bbadge-pr-${w.tone}` : ''}`} title={w ? `PR #${pr.number}: ${w.label}` : `PR #${pr.number}`}>
+      #{pr.number}
+      {w ? ` · ${w.short}` : ''}
+    </span>
   )
 }

@@ -192,6 +192,9 @@ pub enum Error {
 impl Error {
     /// Stable error code, safe to match on from scripts and agents.
     pub fn code(&self) -> &'static str {
+        if self.is_disk_full() {
+            return "disk_full";
+        }
         match self {
             Error::NoSpace(_) => "no_space",
             Error::Stack { code, .. } => code,
@@ -311,6 +314,28 @@ impl Error {
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
+/// What to do about `disk_full` (#100).
+pub const DISK_FULL_HINT: &str = "the disk is full. Closed attempts' views (each with its own build dirs) and overlay layers are usually what fills it: `agentvc gc --keep-views-days 0` deletes the views of every closed attempt (their history stays)";
+
+impl Error {
+    /// The disk (or this session's disk allowance) ran out: ENOSPC from a
+    /// file operation, or from a git or child command.
+    pub fn is_disk_full(&self) -> bool {
+        let full = |e: &std::io::Error| {
+            matches!(e.raw_os_error(), Some(28) | Some(112))
+                || e.kind() == std::io::ErrorKind::StorageFull
+        };
+        match self {
+            Error::Io { source, .. } | Error::Spawn { source, .. } => full(source),
+            Error::Git { stderr, .. } => {
+                let s = stderr.to_ascii_lowercase();
+                s.contains("no space left on device") || s.contains("disk quota exceeded")
+            }
+            _ => false,
+        }
+    }
+}
+
 /// Attach a path to an `std::io::Error`.
 pub(crate) trait IoContext<T> {
     fn at(self, path: impl Into<PathBuf>) -> Result<T>;
@@ -322,5 +347,29 @@ impl<T> IoContext<T> for std::io::Result<T> {
             path: path.into(),
             source,
         })
+    }
+}
+
+#[cfg(test)]
+mod disk_full_tests {
+    use super::*;
+
+    #[test]
+    fn enospc_is_disk_full() {
+        let e = Error::Io {
+            path: "x".into(),
+            source: std::io::Error::from_raw_os_error(28),
+        };
+        assert_eq!(e.code(), "disk_full");
+        let g = Error::Git {
+            cmd: "commit".into(),
+            stderr: "fatal: unable to write: No space left on device".into(),
+        };
+        assert_eq!(g.code(), "disk_full");
+        let other = Error::Io {
+            path: "x".into(),
+            source: std::io::Error::from_raw_os_error(2),
+        };
+        assert_eq!(other.code(), "io");
     }
 }
