@@ -919,12 +919,38 @@ fn sibling_locals(siblings: &[PathBuf]) -> Vec<(Window, Vec<Local>)> {
 /// Every workspace of the space `w` belongs to on this machine: its own
 /// repo's first, then those of the other checkouts in its space (#160).
 pub fn space_locals(w: &Window) -> Result<Vec<Local>> {
-    let mut all = locals(w)?;
+    let mut groups = vec![locals(w)?];
     let (_, sib) = crate::checkouts::space_and_siblings(w);
     for (_, ls) in sibling_locals(&sib) {
-        all.extend(ls);
+        groups.push(ls);
     }
-    Ok(all)
+    dedupe_names(&mut groups);
+    Ok(groups.into_iter().flatten().collect())
+}
+
+/// Workspace names must be unique in a space, but each checkout names its
+/// own: two clones in folders both called `mono` start out as two `mono`s.
+/// The older keeps the name; the newer becomes `mono-2` (saved, so every
+/// checkout sees the same names from then on).
+fn dedupe_names(groups: &mut [Vec<Local>]) {
+    let mut order: Vec<(i64, String, usize, usize)> = Vec::new();
+    for (g, ls) in groups.iter().enumerate() {
+        for (i, l) in ls.iter().enumerate() {
+            order.push((l.record.created_at, l.record.id.clone(), g, i));
+        }
+    }
+    order.sort();
+    let mut seen: Vec<String> = Vec::new();
+    for (_, _, g, i) in order {
+        let l = &mut groups[g][i];
+        if seen.contains(&l.record.name) {
+            let all: Vec<&str> = seen.iter().map(String::as_str).collect();
+            let name = unique_name(&l.record.name, &all);
+            l.record.name = name;
+            let _ = write_record(&l.git_dir, &l.record);
+        }
+        seen.push(l.record.name.clone());
+    }
 }
 
 /// The workspace `target` names, in this repo or another checkout of its
@@ -1005,6 +1031,51 @@ pub enum NewKind {
     Clone,
 }
 
+/// How [`create`] fills a new workspace's build and dependency folders.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SeedMode {
+    /// Copy-on-write clones when the filesystem can (APFS, btrfs, XFS);
+    /// otherwise leave them out.
+    #[default]
+    Auto,
+    /// Like `Auto`, but copy byte by byte when there is no copy-on-write.
+    Copy,
+    /// Start with none: the first build and install run from scratch.
+    Off,
+}
+
+/// What [`create`] makes.
+#[derive(Clone, Debug, Default)]
+pub struct NewOptions {
+    /// Its name (unique in the space); defaults to its folder's name.
+    pub name: Option<String>,
+    /// A clone instead of a worktree.
+    pub clone: bool,
+    /// Join this space instead of the source checkout's (`none`: no space).
+    /// Only for a clone: worktrees share their clone's git config.
+    pub space: Option<String>,
+    pub seed: SeedMode,
+    /// Folders to seed (relative to the workspace). Empty: git config
+    /// `agentvc.seed` (multi-valued), else the usual build and dependency
+    /// folders that exist and are git-ignored.
+    pub seed_paths: Vec<String>,
+}
+
+/// One build or dependency folder [`create`] seeded (or could not).
+#[derive(Clone, Debug, Serialize)]
+pub struct Seeded {
+    pub path: String,
+    /// `reflink`, `mixed`, `copy`, or `skipped`.
+    pub how: String,
+    pub files: u64,
+    /// Bytes actually copied (0 when every file was a copy-on-write clone).
+    pub bytes_copied: u64,
+    pub millis: u128,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
 /// A workspace just made by [`create`].
 #[derive(Clone, Debug, Serialize)]
 pub struct Created {
@@ -1013,13 +1084,188 @@ pub struct Created {
     pub folder: String,
     /// The space it joined, if any.
     pub space: Option<crate::checkouts::SpaceRef>,
+    /// The workspace its build and dependency folders came from.
+    pub seeded_from: String,
+    pub seeded: Vec<Seeded>,
 }
 
-/// Make a new workspace at `dir` in the space of the checkout containing
-/// `cwd`: a worktree (detached at the stack base) or, with `clone`, a clone
-/// of the same remote that joins the same space. Named `name`, else after
-/// its folder.
-pub fn create(cwd: &Path, dir: &Path, name: Option<&str>, kind: NewKind) -> Result<Created> {
+/// Build and dependency folders worth carrying into a new workspace, when
+/// they exist and git ignores them. `*/` entries look one and two levels
+/// down (monorepo packages).
+pub const DEFAULT_SEEDS: &[&str] = &[
+    "target",
+    "node_modules",
+    "*/node_modules",
+    "*/*/node_modules",
+    ".venv",
+    "venv",
+    "build",
+    "dist",
+    ".next",
+    ".turbo",
+    ".gradle",
+    ".angular",
+    ".nuxt",
+    ".svelte-kit",
+];
+
+/// The seed folders of workspace `src` (relative paths that exist there).
+fn seed_paths(w: &Window, src: &Path, wanted: &[String]) -> Vec<String> {
+    let explicit = !wanted.is_empty();
+    let mut pats: Vec<String> = wanted.to_vec();
+    if pats.is_empty() {
+        pats = w
+            .repo
+            .git(&["config", "--get-all", "agentvc.seed"], None)
+            .map(|o| {
+                o.lines()
+                    .map(|l| l.trim().to_string())
+                    .filter(|l| !l.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
+    }
+    let configured = !pats.is_empty();
+    if pats.is_empty() {
+        pats = DEFAULT_SEEDS.iter().map(|s| s.to_string()).collect();
+    }
+    let mut out: Vec<String> = Vec::new();
+    for p in &pats {
+        for rel in expand(src, p) {
+            if !src.join(&rel).is_dir() || out.contains(&rel) {
+                continue;
+            }
+            // Never seed what git tracks: the checkout has it already.
+            // Guessed folders must also be ignored, not just untracked.
+            let ignored = HostRepo {
+                workdir: src.to_path_buf(),
+            }
+            .git(&["check-ignore", "-q", &rel], None)
+            .is_ok();
+            if ignored || ((explicit || configured) && !tracked(src, &rel)) {
+                out.push(rel);
+            }
+        }
+    }
+    out
+}
+
+fn tracked(src: &Path, rel: &str) -> bool {
+    HostRepo {
+        workdir: src.to_path_buf(),
+    }
+    .git(&["ls-files", "--", rel], None)
+    .map(|o| !o.trim().is_empty())
+    .unwrap_or(false)
+}
+
+/// `a/*/b` against the folders under `root` (only `*` as a whole part).
+fn expand(root: &Path, pat: &str) -> Vec<String> {
+    let mut found = vec![String::new()];
+    for part in pat.split('/').filter(|p| !p.is_empty()) {
+        let mut next = Vec::new();
+        for base in &found {
+            let dir = if base.is_empty() {
+                root.to_path_buf()
+            } else {
+                root.join(base)
+            };
+            let join = |n: &str| {
+                if base.is_empty() {
+                    n.to_string()
+                } else {
+                    format!("{base}/{n}")
+                }
+            };
+            if part == "*" {
+                if let Ok(rd) = fs::read_dir(&dir) {
+                    let mut names: Vec<String> = rd
+                        .flatten()
+                        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+                        .map(|e| e.file_name().to_string_lossy().into_owned())
+                        .filter(|n| n != ".git" && n != ".agentvc" && n != "node_modules")
+                        .collect();
+                    names.sort();
+                    next.extend(names.iter().map(|n| join(n)));
+                }
+            } else if part != ".." {
+                next.push(join(part));
+            }
+        }
+        found = next;
+    }
+    found.into_iter().filter(|f| !f.is_empty()).collect()
+}
+
+/// Copy the build and dependency folders of `src` into `dst` with
+/// copy-on-write clones (or plain copies with [`SeedMode::Copy`]).
+fn seed(w: &Window, src: &Path, dst: &Path, o: &NewOptions) -> Vec<Seeded> {
+    if o.seed == SeedMode::Off {
+        return Vec::new();
+    }
+    let paths = seed_paths(w, src, &o.seed_paths);
+    if paths.is_empty() {
+        return Vec::new();
+    }
+    // macOS clones whole folders with clonefile; elsewhere probe reflinks.
+    let cow = cfg!(target_os = "macos") || crate::view::reflinks_supported(dst).is_ok();
+    let mut out = Vec::new();
+    for rel in paths {
+        let to = dst.join(&rel);
+        if !cow && o.seed == SeedMode::Auto {
+            out.push(Seeded {
+                path: rel,
+                how: "skipped".into(),
+                files: 0,
+                bytes_copied: 0,
+                millis: 0,
+                reason: Some("no copy-on-write on this filesystem; --seed copy copies it".into()),
+            });
+            continue;
+        }
+        if to.exists() {
+            continue;
+        }
+        let res = to
+            .parent()
+            .map(|p| fs::create_dir_all(p).at(p))
+            .unwrap_or(Ok(()))
+            .and_then(|_| crate::view::fork_dir(&src.join(&rel), &to, !cow));
+        out.push(match res {
+            Ok(st) => Seeded {
+                path: rel,
+                how: st.backend().as_str().into(),
+                files: st.files,
+                bytes_copied: st.bytes_copied,
+                millis: st.millis,
+                reason: None,
+            },
+            Err(e) => {
+                let _ = fs::remove_dir_all(&to);
+                Seeded {
+                    path: rel,
+                    how: "skipped".into(),
+                    files: 0,
+                    bytes_copied: 0,
+                    millis: 0,
+                    reason: Some(e.to_string()),
+                }
+            }
+        });
+    }
+    out
+}
+
+/// Make a new workspace at `dir` from the checkout containing `cwd`.
+///
+/// Cheap by design (docs/spaces.md, "Cheap workspaces"):
+/// - a worktree shares the clone's git objects;
+/// - a clone is cloned from this checkout on disk (git hardlinks its
+///   objects), then pointed at the real remote and fetched, so it is
+///   independent yet costs almost no disk or network;
+/// - build and dependency folders of the workspace at `cwd` are seeded with
+///   copy-on-write clones, so the first build and install are incremental.
+pub fn create(cwd: &Path, dir: &Path, o: &NewOptions) -> Result<Created> {
     let w = Window::open(cwd)?;
     let dir = if dir.is_absolute() {
         dir.to_path_buf()
@@ -1047,7 +1293,14 @@ pub fn create(cwd: &Path, dir: &Path, name: Option<&str>, kind: NewKind) -> Resu
             json!({ "path": dir }),
         ));
     }
-    if let Some(n) = name {
+    if o.space.is_some() && !o.clone {
+        return Err(ws_err_with(
+            "worktree_space",
+            "a worktree is in its clone's space; use --clone to start a workspace in another space",
+            json!({ "space": o.space }),
+        ));
+    }
+    if let Some(n) = o.name.as_deref() {
         check_name(n)?;
         if space_locals(&w)?.iter().any(|l| l.record.name == n) {
             return Err(ws_err_with(
@@ -1059,6 +1312,16 @@ pub fn create(cwd: &Path, dir: &Path, name: Option<&str>, kind: NewKind) -> Resu
     }
     let dir_s = dir.to_string_lossy().into_owned();
     let (key, source) = crate::checkouts::space_of(&w);
+    let kind = if o.clone {
+        NewKind::Clone
+    } else {
+        NewKind::Worktree
+    };
+    let remote = if w.state.remote.is_empty() {
+        "origin".to_string()
+    } else {
+        w.state.remote.clone()
+    };
     match kind {
         NewKind::Worktree => {
             let at = w.base().unwrap_or_else(|| "HEAD".into());
@@ -1066,14 +1329,9 @@ pub fn create(cwd: &Path, dir: &Path, name: Option<&str>, kind: NewKind) -> Resu
                 .git(&["worktree", "add", "--detach", &dir_s, &at], None)?;
         }
         NewKind::Clone => {
-            let remote = if w.state.remote.is_empty() {
-                "origin"
-            } else {
-                &w.state.remote
-            };
             let url = w
                 .repo
-                .git(&["remote", "get-url", remote], None)
+                .git(&["remote", "get-url", &remote], None)
                 .map_err(|_| {
                     ws_err_with(
                         "no_remote",
@@ -1081,14 +1339,83 @@ pub fn create(cwd: &Path, dir: &Path, name: Option<&str>, kind: NewKind) -> Resu
                         json!({ "remote": remote }),
                     )
                 })?;
-            w.repo
-                .git(&["clone", "--origin", remote, url.trim(), &dir_s], None)?;
+            let url = url.trim().to_string();
+            // From this checkout on disk: git hardlinks the objects (copies
+            // them across filesystems), so nothing is downloaded twice.
+            let main = crate::checkouts::main_path(&w);
+            w.repo.git(
+                &[
+                    "clone",
+                    "--quiet",
+                    "--no-checkout",
+                    "--origin",
+                    &remote,
+                    &main.to_string_lossy(),
+                    &dir_s,
+                ],
+                None,
+            )?;
+            let nr = HostRepo {
+                workdir: dir.clone(),
+            };
+            // The clone's remote branches are this checkout's *local* ones;
+            // swap them for this checkout's copy of the real remote's (a
+            // local fetch), then point at the real remote and catch up.
+            let stale = nr
+                .git(
+                    &[
+                        "for-each-ref",
+                        "--format=%(refname)",
+                        &format!("refs/remotes/{remote}/"),
+                    ],
+                    None,
+                )
+                .unwrap_or_default();
+            for r in stale.lines().filter(|l| !l.is_empty()) {
+                let _ = nr.git(&["update-ref", "-d", r], None);
+            }
+            let spec = format!("+refs/remotes/{remote}/*:refs/remotes/{remote}/*");
+            let _ = nr.git(
+                &[
+                    "fetch",
+                    "--quiet",
+                    "--no-tags",
+                    &main.to_string_lossy(),
+                    &spec,
+                ],
+                None,
+            );
+            nr.git(&["remote", "set-url", &remote, &url], None)?;
+            // Offline is fine: the local copy is already complete.
+            let _ = nr.git(&["fetch", "--quiet", "--prune", &remote], None);
+            let trunk = w.state.trunk.clone();
+            let head = nr
+                .git(&["symbolic-ref", "--quiet", "--short", "HEAD"], None)
+                .unwrap_or_default();
+            let start = format!("{remote}/{trunk}");
+            if nr.rev(&format!("refs/remotes/{start}")).is_some() {
+                nr.git(&["checkout", "--quiet", "-B", &trunk, &start], None)?;
+            } else {
+                nr.git(&["reset", "--quiet", "--hard", "HEAD"], None)?;
+            }
+            let head = head.trim();
+            if !head.is_empty() && head != trunk {
+                // This checkout's current branch is not the new clone's.
+                let _ = nr.git(&["branch", "-D", head], None);
+            }
         }
     }
     let nw = Window::open(&dir)?;
-    if kind == NewKind::Clone && source == crate::checkouts::Source::Config {
-        crate::checkouts::set_space(&nw, key.as_deref().or(Some(crate::checkouts::NONE)))?;
+    if kind == NewKind::Clone {
+        match &o.space {
+            Some(s) => crate::checkouts::set_space(&nw, Some(s))?,
+            None if source == crate::checkouts::Source::Config => {
+                crate::checkouts::set_space(&nw, key.as_deref().or(Some(crate::checkouts::NONE)))?
+            }
+            None => {}
+        }
     }
+    let seeded = seed(&w, w.path(), &dir, o);
     let all = space_locals(&nw)?;
     let mut rec = all
         .iter()
@@ -1100,29 +1427,38 @@ pub fn create(cwd: &Path, dir: &Path, name: Option<&str>, kind: NewKind) -> Resu
         .filter(|l| l.git_dir != nw.git_dir)
         .map(|l| l.record.name.as_str())
         .collect();
-    let want = match name {
+    let want = match o.name.as_deref() {
         Some(n) => n.to_string(),
-        None => {
-            // Folder names can repeat across clones; names may not.
-            let mut n = rec.name.clone();
-            let mut i = 2;
-            while taken.contains(&n.as_str()) {
-                n = format!("{}-{i}", rec.name);
-                i += 1;
-            }
-            n
-        }
+        None => unique_name(&rec.name, &taken),
     };
     if want != rec.name {
         rec.name = want;
         write_record(&nw.git_dir, &rec)?;
     }
+    let from = locals(&w)?
+        .into_iter()
+        .find(|l| l.git_dir == w.git_dir)
+        .map(|l| l.record.name)
+        .unwrap_or_default();
     Ok(Created {
         folder: tilde(nw.path()),
         workspace: rec,
         kind,
         space: crate::checkouts::describe(&nw),
+        seeded_from: from,
+        seeded,
     })
+}
+
+/// `base`, else `base-2`, `base-3`, ... whichever is not taken.
+fn unique_name(base: &str, taken: &[&str]) -> String {
+    let mut n = base.to_string();
+    let mut i = 2;
+    while taken.contains(&n.as_str()) {
+        n = format!("{base}-{i}");
+        i += 1;
+    }
+    n
 }
 
 fn check_name(name: &str) -> Result<()> {
@@ -1281,9 +1617,14 @@ pub fn list(cwd: &Path, space: Option<&Space>, remote: bool) -> Result<Workspace
     let here = Window::open(cwd)?;
     let own = locals(&here)?;
     let (space_name, sib) = crate::checkouts::space_and_siblings(&here);
-    let mut groups: Vec<(Vec<Local>, Option<&Space>)> = vec![(own.clone(), space)];
+    let mut named: Vec<Vec<Local>> = vec![own.clone()];
     for (_, ls) in sibling_locals(&sib) {
-        groups.push((ls, None));
+        named.push(ls);
+    }
+    dedupe_names(&mut named);
+    let mut groups: Vec<(Vec<Local>, Option<&Space>)> = Vec::new();
+    for (i, ls) in named.into_iter().enumerate() {
+        groups.push((ls, if i == 0 { space } else { None }));
     }
     let running: Vec<i64> = space
         .and_then(|s| s.runs(true).ok())
