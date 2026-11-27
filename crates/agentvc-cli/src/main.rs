@@ -20,11 +20,32 @@ use agentvc_core::{Attempt, Error, ExportOptions, ForkRequest, PrOptions, Ref, S
 use clap::{Parser, Subcommand};
 use serde_json::{json, Value};
 
+/// The commands `--help` leaves out of the list: the attempt engine under
+/// agents and the review UI's history, plus CI and maintenance tools.
+const ATTEMPT_HELP: &str = "\
+Advanced (not listed above; each has --help):
+  Attempt history  task, fork, run, ps, snapshot, check, annotate, mark, diff, take,
+                   merge, promote, abandon, rebase, resolve, conflicts, overlaps,
+                   story, export, pr, land, comments, log, show, blame, tag, status,
+                   path, apply, op, undo
+  Sharing          sync, import, overview
+  CI               restack (see .github/workflows/restack.yml)
+  Upkeep           gc, prepare";
+
 #[derive(Parser)]
 #[command(
     name = "agentvc",
     version,
-    about = "Version control built for AI agents"
+    about = "Version control built for AI agents",
+    long_about = "Version control built for AI agents.\n\n\
+Three ideas:\n  \
+space      one repository, with every checkout of it on every machine\n  \
+workspace  one checkout folder or worktree, with its own stack of branches\n  \
+agent      a coding agent started on a branch of a workspace; you review and land its work\n\n\
+Start with `agentvc stack --help` (your branches and PRs) and `agentvc agent --help`.\n\
+`agentvcd` serves the review UI for the whole space.",
+    after_help = "Attempt history and CI tools work but are not listed: `agentvc --help` names them.",
+    after_long_help = ATTEMPT_HELP
 )]
 struct Cli {
     /// Print one JSON object instead of text.
@@ -39,11 +60,15 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Create a space here and snapshot the working directory as attempt a1.
+    /// Set up agentvc in this repository (agentvcd does it on first start).
+    ///
+    /// Creates the space here and snapshots the working directory as attempt
+    /// a1, the root of the attempt history.
     ///
     /// Where forks will use overlayfs, this also starts `agentvc prepare a1`
     /// in the background, so the first fork does not pay for copying the
     /// working directory into a base layer.
+    #[command(display_order = 6)]
     Init {
         /// Do not prepare a1 in the background.
         #[arg(long)]
@@ -76,13 +101,6 @@ enum Cmd {
         #[arg(long, requires = "from_pr")]
         repo: Option<String>,
     },
-    /// Merge spaces saved in PR comments (by `agentvc pr` / `sync`) into this
-    /// space, so every PR's attempt tree shows in one place: the review UI,
-    /// editors and `agentvc overview`.
-    ///
-    /// Imported tasks and attempts get fresh ids; each space keeps only its
-    /// newest comment, and importing again replaces the earlier copy. Creates
-    /// the space here first if there is none.
     /// Keep open PR branches mergeable as main moves: re-merge each branch
     /// with the remote's default branch using the conflict resolution
     /// strategies. A branch with one commit is rebased (pushed with a lease),
@@ -90,6 +108,7 @@ enum Cmd {
     /// touched; with --comment their PR says which files. Needs no space, so
     /// it runs in CI (see .github/workflows/restack.yml). Without --push it
     /// only reports.
+    #[command(hide = true)]
     Restack {
         /// Branches on the remote to restack.
         branches: Vec<String>,
@@ -126,6 +145,14 @@ enum Cmd {
         #[arg(long)]
         no_auto_resolve: bool,
     },
+    /// Merge spaces saved in PR comments (by `agentvc pr` / `sync`) into this
+    /// space, so every PR's attempt tree shows in one place: the review UI,
+    /// editors and `agentvc overview`.
+    ///
+    /// Imported tasks and attempts get fresh ids; each space keeps only its
+    /// newest comment, and importing again replaces the earlier copy. Creates
+    /// the space here first if there is none.
+    #[command(hide = true)]
     Import {
         /// Every PR of the repository, open and closed.
         #[arg(long, conflicts_with = "pr")]
@@ -142,6 +169,7 @@ enum Cmd {
     /// refs/agentvc/spaces/<id> (restore with `agentvc init --from-remote`),
     /// and write it into a comment on the space's latest PR (restore with
     /// `agentvc init --from-pr`). Either one is enough.
+    #[command(hide = true)]
     Sync {
         #[arg(long, default_value = "origin")]
         remote: String,
@@ -172,16 +200,18 @@ enum Cmd {
         repo: Option<String>,
     },
     /// Create and list tasks.
-    #[command(subcommand)]
+    #[command(subcommand, hide = true)]
     Task(TaskCmd),
     /// Open attempts of other tasks that change the same files as aN (or
     /// every such pair), and which of those files would conflict if both
     /// landed. Catch a conflict while both are still open.
+    #[command(hide = true)]
     Overlaps { attempt: Option<String> },
     /// Resolve conflict hunks in an attempt's view without editing markers
     /// by hand: take ours (the attempt), theirs (main, or the source of a
     /// take), both, or the base, for every hunk or for --hunk N. Records a
     /// `resolve` snapshot once no conflict of the attempt is left.
+    #[command(hide = true)]
     Resolve {
         attempt: String,
         /// Conflicted files.
@@ -195,41 +225,53 @@ enum Cmd {
         #[arg(long = "hunk", value_name = "N")]
         hunks: Vec<usize>,
     },
+    /// This workspace's stack of branches and PRs (create, submit, sync, merge).
+    ///
     /// Stacked branches that belong to this worktree only, so each editor
     /// window has its own stack (#107). Works in any git worktree; no space
     /// needed.
-    #[command(subcommand)]
+    #[command(subcommand, display_order = 4)]
     Stack(stack_cmd::StackCmd),
-    /// Every workspace (worktree) of this repo with its stack, from
-    /// anywhere: list them, name them, and change another one's stack with
-    /// `agentvc stack ... --workspace W` (applied now if idle, else queued
-    /// until its agent stops).
-    #[command(subcommand)]
+    /// Every checkout of the repo, each with its own stack: list, name, add.
+    ///
+    /// Every workspace (worktree or clone folder) of this repo with its stack,
+    /// from anywhere: list them, name them, and change another one's stack
+    /// with `agentvc stack ... --workspace W` (applied now if idle, else
+    /// queued until its agent stops).
+    #[command(subcommand, display_order = 2)]
     Workspace(workspace_cmd::WorkspaceCmd),
+    /// The repo as one place: all its workspaces, on every machine.
+    ///
     /// The space: one project that humans and agents work on together. It
     /// holds workspaces (worktrees and clone folders, on any machine), each
     /// an isolated place for one agent or person. With no subcommand, shows
     /// this space and where each of its workspaces lives.
+    #[command(display_order = 1)]
     Space {
         #[command(subcommand)]
         cmd: Option<workspace_cmd::SpaceCmd>,
     },
+    /// Coding agents on a branch: start, see who needs you, answer, land.
+    ///
     /// Coding agents started on a workspace's stack: start one on a branch
     /// with a prompt, see which need you, answer, review and land them.
-    #[command(subcommand)]
+    #[command(subcommand, display_order = 3)]
     Agent(agent_cmd::AgentCmd),
+    /// Review comments pinned to lines; send them to the agent as a review.
+    ///
     /// Review comments on a branch, an agent or a try, pinned to lines of a
     /// file: add, list, reply, resolve, and send drafts as a review (to the
     /// agent working on it). Threads follow their lines as the branch moves.
-    #[command(subcommand)]
+    #[command(subcommand, display_order = 5)]
     Comment(comment_cmd::CommentCmd),
     /// Supervise one agent turn (started by `agent start` and `agent reply`).
     #[command(hide = true)]
     AgentWorker { dir: PathBuf },
     /// Conflict tools: see how resolution strategies handle real conflicts.
-    #[command(subcommand)]
+    #[command(subcommand, hide = true)]
     Conflicts(ConflictsCmd),
     /// Start a new attempt in its own view, forked from an attempt or snapshot.
+    #[command(hide = true)]
     Fork {
         /// Task this attempt works on (tN or N).
         #[arg(long)]
@@ -264,6 +306,7 @@ enum Cmd {
     /// as uncommitted changes, like `git stash pop` or trying out a branch.
     /// Refuses with `dirty_worktree` when that would overwrite local edits.
     /// Never touches the index or the checked-out branch.
+    #[command(hide = true)]
     Apply {
         attempt: String,
         /// Only these files or directories. Repeatable.
@@ -274,6 +317,7 @@ enum Cmd {
         force: bool,
     },
     /// Record the current state of an attempt's view.
+    #[command(hide = true)]
     Snapshot {
         /// Attempt (aN). Defaults to the attempt of the current directory.
         attempt: Option<String>,
@@ -288,6 +332,7 @@ enum Cmd {
     /// and tokens. Works on closed attempts too. Claude Code runs record
     /// tokens and the transcript by themselves (Stop hook), and the cost
     /// with `claude -p --output-format json`.
+    #[command(hide = true)]
     Annotate {
         /// Attempt (aN). Defaults to the attempt of the current directory.
         attempt: Option<String>,
@@ -315,6 +360,7 @@ enum Cmd {
     /// or --junit) and the end of the output. The same tree and command
     /// reuse an earlier result. An open attempt is marked passed or failed;
     /// a promoted one keeps its status (re-test it after `rebase`).
+    #[command(hide = true)]
     Check {
         /// Attempt (aN). Defaults to the attempt of the current directory.
         attempt: Option<String>,
@@ -338,18 +384,21 @@ enum Cmd {
         command: Vec<String>,
     },
     /// Mark an attempt as passed or failed (it stays open).
+    #[command(hide = true)]
     Mark {
         attempt: String,
         #[arg(value_parser = ["passed", "failed", "exploring"])]
         status: String,
     },
     /// Close an attempt, keeping it and its reason in history.
+    #[command(hide = true)]
     Abandon {
         attempt: String,
         #[arg(long)]
         reason: String,
     },
     /// Pick an attempt as the winner; its open siblings are abandoned.
+    #[command(hide = true)]
     Promote { attempt: String },
     /// The review on an attempt's PR, for the agent that addresses it:
     /// change requests and open comment threads with file and line, as
@@ -357,6 +406,7 @@ enum Cmd {
     /// it was forked from, so a follow-up fork sees its parent's PR. Uses
     /// what the last `agentvc pr --refresh` fetched; `--refresh` fetches
     /// first.
+    #[command(hide = true)]
     Comments {
         /// Attempt (aN). Defaults to the attempt of the current directory.
         attempt: Option<String>,
@@ -369,7 +419,7 @@ enum Cmd {
     },
     /// The operation log: every change to the space, newest first, with the
     /// ids `agentvc undo` takes.
-    #[command(subcommand)]
+    #[command(subcommand, hide = true)]
     Op(OpCmd),
     /// Reverse an operation: a status change, a promote (its siblings and
     /// ancestors reopen), a task creation, or a fork (the attempt is closed
@@ -378,6 +428,7 @@ enum Cmd {
     /// `undo` walks back. Undo is itself an operation: `agentvc undo <id of
     /// the undo>` redoes. Refused with `undo_conflict`, changing nothing,
     /// when later operations changed the same attempts.
+    #[command(hide = true)]
     Undo {
         /// Operation id from `agentvc op log` (N or opN).
         op: Option<String>,
@@ -389,10 +440,12 @@ enum Cmd {
     /// runs, PR, and whether main has moved since its base (`behind`). In the
     /// host checkout: open tasks with their attempts, what needs review and
     /// what is running. Takes no snapshot and fetches nothing.
+    #[command(hide = true)]
     Status { attempt: Option<String> },
     /// Show attempts as a tree.
     /// The attempt tree, or with filters a flat list of matching attempts:
     /// for example `agentvc log --task t3 --touched x.py --meta tests=pass`.
+    #[command(hide = true)]
     Log {
         #[arg(long)]
         task: Option<String>,
@@ -427,6 +480,7 @@ enum Cmd {
     /// the squashed PR commit; lines older than the attempt fall through to
     /// git blame. Defaults to the attempt of the current view, including
     /// its unsnapshotted work.
+    #[command(hide = true)]
     Blame {
         path: String,
         attempt: Option<String>,
@@ -435,11 +489,13 @@ enum Cmd {
         no_working: bool,
     },
     /// Show one attempt and its snapshots (aN, or a tag: its attempt).
+    #[command(hide = true)]
     Show { attempt: String },
     /// Name a snapshot (a checkpoint): `agentvc tag good a3` names a3's
     /// current state, `agentvc tag demo s12` one snapshot. Names work
     /// wherever a ref does (fork --from, diff, show), pin the snapshot
     /// against gc, and travel with sync. `--list` lists, `-d` deletes.
+    #[command(hide = true)]
     Tag {
         /// The name (letters, digits, '.', '_', '-', '/'; not aN/sN/tN).
         #[arg(required_unless_present = "list")]
@@ -465,6 +521,7 @@ enum Cmd {
     /// `--absorb` folds each file into the last change that touched it, or
     /// `--append TITLE` adds a change. `export` and `pr` then write one
     /// commit per change (`--squash` for one). With no options, shows it.
+    #[command(hide = true)]
     Story {
         /// The attempt. Defaults to the attempt of the current directory.
         attempt: Option<String>,
@@ -497,6 +554,7 @@ enum Cmd {
     /// snapshot it was forked from (or the commit it was rebased onto). With
     /// no refs, inside a view, compares the view's working state with that
     /// base, without taking a snapshot first.
+    #[command(hide = true)]
     Diff {
         a: Option<String>,
         b: Option<String>,
@@ -510,10 +568,13 @@ enum Cmd {
         #[arg(long, short = 'U', default_value_t = agentvc_core::patch::DEFAULT_CONTEXT, value_name = "N")]
         unified: usize,
     },
-    /// Check that the database, objects, views, overlay layers, runs and sync
-    /// state agree (the `git fsck` of agentvc). Each finding has a stable
+    /// Check the space's data and fix what is safe (the `git fsck` of agentvc).
+    ///
+    /// Checks that the database, objects, views, overlay layers, runs and
+    /// sync state agree. Each finding has a stable
     /// code and severity; exits non-zero (also with --json) while errors
     /// remain.
+    #[command(display_order = 8)]
     Doctor {
         /// Fix what is safe to fix: remount views, rewrite missing views from
         /// their latest snapshot, copy missing objects back from git, mark
@@ -530,6 +591,7 @@ enum Cmd {
     /// gc.keepViewsDays ago, and overlay layers nothing uses. Never prunes
     /// open, promoted, exported or named work, or what the last sync did
     /// not carry.
+    #[command(hide = true)]
     Gc {
         /// Report what would be freed; change nothing.
         #[arg(long)]
@@ -553,16 +615,19 @@ enum Cmd {
     },
     /// Print the view directory of an attempt, mounting an overlay view first
     /// if it is not mounted (for example after a reboot).
+    #[command(hide = true)]
     Path { attempt: String },
     /// Freeze an attempt's view into an overlay layer now, so the next fork
     /// from it is fast. The first prepare copies the view; later ones write
     /// only what changed. Does nothing where forks do not use overlayfs.
+    #[command(hide = true)]
     Prepare {
         /// Attempt (aN). Defaults to the attempt of the current directory.
         attempt: Option<String>,
     },
     /// Write an attempt's latest state as a commit on a branch of the host git
     /// repo, without touching the working tree, index or checked-out branch.
+    #[command(hide = true)]
     Export {
         attempt: String,
         /// Branch to create.
@@ -604,6 +669,7 @@ enum Cmd {
     /// checked-out branch, whose working tree moves along; local edits the
     /// move would overwrite fail with `checkout_dirty`. Then `git push`
     /// works with any remote.
+    #[command(hide = true)]
     Land {
         attempt: String,
         /// Local branch to land on. Defaults to the checked-out branch.
@@ -636,6 +702,7 @@ enum Cmd {
     /// tree with the new commit, writes the result into its view and records
     /// it as a snapshot. On conflicts nothing changes and the error (code
     /// `conflict`) lists the paths.
+    #[command(hide = true)]
     Rebase {
         attempt: String,
         /// Git revision to rebase onto, or `aN` to stack it on version N
@@ -666,6 +733,7 @@ enum Cmd {
     /// aY` shows) into an attempt's view, three-way merged with its own
     /// work, and record a `take` snapshot crediting the source. The source
     /// is not changed.
+    #[command(hide = true)]
     Take {
         /// The attempt to take from (aY).
         source: String,
@@ -692,6 +760,7 @@ enum Cmd {
     },
     /// Three-way merge all of another attempt's changes into an attempt
     /// (`take` with everything), recorded as a `merge` snapshot.
+    #[command(hide = true)]
     Merge {
         source: String,
         #[arg(long)]
@@ -704,6 +773,7 @@ enum Cmd {
         no_auto_resolve: bool,
     },
     /// Export an attempt, push its branch and open (or update) a GitHub PR.
+    #[command(hide = true)]
     Pr {
         /// Attempt (aN). With --refresh and no attempt: every open PR.
         #[arg(required_unless_present = "refresh")]
@@ -767,6 +837,7 @@ enum Cmd {
     /// Keys: pr.branch (also $AGENTVC_PR_BRANCH), pr.base ($AGENTVC_PR_BASE),
     /// pr.trailer (a list: use --add), pr.body-prefix (a file, relative to
     /// the space; $AGENTVC_PR_BODY_PREFIX).
+    #[command(display_order = 7)]
     Config {
         key: Option<String>,
         value: Option<String>,
@@ -783,6 +854,7 @@ enum Cmd {
     /// attempt is marked passed or failed by the check's exit code; without
     /// it, a non-zero exit marks it failed. In text mode `agentvc run` exits
     /// with the command's exit code.
+    #[command(hide = true)]
     Run {
         /// Task this attempt works on (tN or N).
         #[arg(long)]
@@ -820,19 +892,22 @@ enum Cmd {
     ///
     /// Used by dashboards outside the daemon, such as the Claude project
     /// artifact; see docs/overview.md.
+    #[command(hide = true)]
     Overview {
         /// Write the document to this file (pretty JSON) instead of printing it.
         #[arg(long, value_name = "FILE")]
         out: Option<PathBuf>,
     },
     /// List runs that have not finished (or all with --all).
+    #[command(hide = true)]
     Ps {
         #[arg(long)]
         all: bool,
     },
     #[command(hide = true)]
     RunWorker { run: i64 },
-    /// Install or remove Claude Code hooks that snapshot attempts per tool call.
+    /// Install or remove the Claude Code hooks (snapshots per tool call).
+    #[command(display_order = 9)]
     Hooks {
         /// Write ~/.claude/settings.json instead of this repo's
         /// .claude/settings.local.json.
@@ -847,6 +922,7 @@ enum Cmd {
     /// Each tool runs the matching command with `--json` and returns its
     /// JSON. Commands run in --space (or -C, or the current directory), which
     /// picks the space and the current attempt.
+    #[command(display_order = 10)]
     Mcp {
         /// Directory to run commands in. Defaults to -C or the current directory.
         #[arg(long, value_name = "DIR")]
@@ -854,6 +930,7 @@ enum Cmd {
     },
     /// Hook handler called by Claude Code; reads the hook JSON on stdin.
     /// Always exits 0 so a hook can never break an agent session.
+    #[command(hide = true)]
     Hook {
         #[arg(value_parser = [
             "post-tool-use",
@@ -871,10 +948,12 @@ enum Cmd {
         #[arg(value_parser = ["post-commit"])]
         event: String,
     },
-    /// Set up an editor to work in this space: for Cursor, the MCP server
-    /// (.cursor/mcp.json), hooks that snapshot the agent's edits
-    /// (.cursor/hooks.json) and a rule describing the attempt workflow
-    /// (.cursor/rules/agentvc.mdc).
+    /// Set up Cursor for this space: MCP server, hooks and a rule.
+    ///
+    /// For Cursor: the MCP server (.cursor/mcp.json), hooks that snapshot the
+    /// agent's edits (.cursor/hooks.json) and a rule describing the attempt
+    /// workflow (.cursor/rules/agentvc.mdc).
+    #[command(display_order = 11)]
     Integrate {
         #[arg(value_parser = ["cursor"])]
         editor: String,

@@ -45,21 +45,23 @@ struct Cli {
     /// Defaults to `git config user.name`, then `$USER`.
     #[arg(long, value_name = "NAME")]
     user: Option<String>,
+    // The hosted service is paused, so the --cloud options are hidden from
+    // --help; they still work for a self-hosted agentvc-cloud (deploy/).
     /// Also serve this space through the hosted review UI at URL
     /// (agentvc-cloud). The daemon dials out; nothing listens publicly. The
     /// machine token comes from $AGENTVC_CLOUD_TOKEN or --cloud-token-file.
-    #[arg(long, value_name = "URL", env = "AGENTVC_CLOUD_URL")]
+    #[arg(long, value_name = "URL", env = "AGENTVC_CLOUD_URL", hide = true)]
     cloud: Option<String>,
     /// File holding the machine token for --cloud.
-    #[arg(long, value_name = "PATH", requires = "cloud")]
+    #[arg(long, value_name = "PATH", requires = "cloud", hide = true)]
     cloud_token_file: Option<PathBuf>,
     /// Only answer reads from the hosted UI; review actions stay local.
-    #[arg(long, requires = "cloud")]
+    #[arg(long, requires = "cloud", hide = true)]
     cloud_read_only: bool,
     /// Let the hosted page start, answer and land agents on this machine
     /// (they run code here). Off by default: relayed calls can only read
     /// agents.
-    #[arg(long, requires = "cloud")]
+    #[arg(long, requires = "cloud", hide = true)]
     allow_remote_agents: bool,
 }
 

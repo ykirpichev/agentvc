@@ -1,4 +1,5 @@
 // Status bar: the attempt whose view is open in this window, and its last snapshot.
+// Shown only in such a window (and while the daemon is down).
 
 import * as vscode from 'vscode'
 import type { Connection } from './connection'
@@ -39,13 +40,10 @@ export class StatusBar implements vscode.Disposable {
       if (attempt) break
     }
     if (!attempt) {
+      // Outside an attempt's view the stack item says where you are; open
+      // attempts and tasks are history, so they don't get a status bar entry.
       this.current = undefined
-      const open = this.tree.allAttempts.filter((a) => a.status === 'exploring' || a.status === 'passed')
-      const ready = this.tree.allTasks.filter((t) => t.attempts.passed > 0 && t.attempts.promoted === 0)
-      this.item.text = `$(versions) ${open.length} open${ready.length ? ` · ${ready.length} to pick` : ''}`
-      this.item.tooltip = `agentvc${s === 'cli' ? ' (CLI, no daemon)' : ''}: ${open.length} open attempts, ${ready.length} tasks ready to pick a winner`
-      this.item.command = 'workbench.view.extension.agentvc'
-      this.item.show()
+      this.item.hide()
       return
     }
     let head: Snapshot | null = null
