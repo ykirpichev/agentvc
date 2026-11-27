@@ -23,20 +23,21 @@ embed it, so build the UI before `cargo build --release`.
 
 ## The review screen
 
-The sidebar is one window's **stack**, drawn like `gt log`: the newest
-branch on top, main at the bottom, a filled dot on the branch you are on. It
-opens on the editor window you are in (`?here=`) or the window of the open
-branch; the name at the top switches windows. **Sync** fetches main, drops
+The sidebar lists every **workspace** (a git worktree, one per editor
+window), each with its own **stack**, drawn like `gt log`: the newest branch
+on top, main at the bottom, a filled dot on the branch you are on. Branches
+whose PR merged are hidden. The editor window you are in (`?here=`) comes
+first; click a workspace's name to fold it. The home page shows the same
+workspaces side by side. Each workspace has its own **Sync**: it fetches main, drops
 merged branches and rebases the stack (`POST /api/workspaces/{id}/stack`
-`{"op": "sync"}`); a banner says when main moved, and a clash stops the sync
+`{"op": "sync"}`); the header says when main moved, and a clash stops the sync
 on the branch page with both sides of each clash, titled *Now on <parent>*
 and *Your change*; Continue carries on, Cancel puts every branch back.
 **Submit stack** pushes every branch and opens or updates one PR per branch
 (`{"op": "submit"}`). **↶** undoes the window's last
 stack change, and every change's toast has Undo too. Click a branch to open
 it, double-click to check it out, drag it onto another branch or onto main to
-move it. Under the stack, **Other windows** lists each other window in one
-line, and **Agent work** lists tasks whose agent tries are still open; a task
+move it. Under the workspaces, **Agent work** lists tasks whose agent tries are still open; a task
 made into a branch shows as an **N tries** chip on that branch instead. There
 are no tabs: Ctrl+K jumps anywhere, including **Find** (search and blame).
 
@@ -100,3 +101,7 @@ performance marks bracket that time.
 ## Checks
 
 `npm run typecheck`, `npm run lint` and `npm run build` run in CI.
+
+To try it, `integrations/vscode/scripts/demo-workspaces.sh DIR target/debug`
+builds a repo with three workspaces, each with a stack of unmerged branches
+(and one clash with main); then run `agentvcd -C DIR/invoices`.
