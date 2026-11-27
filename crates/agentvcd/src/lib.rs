@@ -26,6 +26,7 @@ mod agents;
 mod api;
 mod assets;
 pub mod cloud;
+mod comments;
 mod conflicts;
 mod events;
 mod graph;
@@ -126,6 +127,11 @@ impl AppState {
             config.poll_interval * 2,
         );
         agents::spawn_poller(
+            state.clone(),
+            state.workdir().to_path_buf(),
+            config.poll_interval * 2,
+        );
+        comments::spawn_poller(
             state.clone(),
             state.workdir().to_path_buf(),
             config.poll_interval * 2,

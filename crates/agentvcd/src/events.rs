@@ -70,6 +70,11 @@ pub enum Event {
         agent: String,
         state: agentvc_core::agent::AgentState,
     },
+    /// Review comments changed on these targets (`branch:WS/NAME`,
+    /// `agent:agN`, `attempt:aN`; empty: unknown); refetch their threads.
+    CommentsChanged {
+        targets: Vec<String>,
+    },
     /// The client fell behind and missed events; it should refetch.
     Resync,
 }
