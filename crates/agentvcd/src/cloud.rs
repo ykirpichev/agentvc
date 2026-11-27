@@ -281,7 +281,7 @@ pub(crate) async fn relay(
     };
     let res = match app.oneshot(req).await {
         Ok(r) => r,
-        Err(e) => return (500, json_ct, error_body("internal", &e.to_string())),
+        Err(never) => match never {},
     };
     let status = res.status();
     let ct = res
