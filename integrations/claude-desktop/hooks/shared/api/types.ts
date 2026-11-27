@@ -682,6 +682,9 @@ export interface Agent {
   worktree: string
   runner: string
   permissions?: AgentPermissions
+  sandbox?: boolean
+  /** The permission mode Claude Code reported when it started. */
+  claude_mode?: string
   model?: string
   check?: string
   machine: string
@@ -735,7 +738,7 @@ export interface StartAgent {
 }
 
 export type AgentRunner = 'claude' | 'codex' | 'cursor' | 'command'
-export type AgentPermissions = 'edits' | 'ask' | 'auto'
+export type AgentPermissions = 'auto' | 'edits' | 'ask' | 'bypass'
 
 /** `agentvc workspace agents`: how agents started in a workspace run. */
 export interface AgentSettings {
@@ -744,6 +747,8 @@ export interface AgentSettings {
   model?: string
   check?: string
   permissions?: AgentPermissions
+  /** Claude Code: run commands in its sandbox (writes only in the worktree). */
+  sandbox?: boolean
   max?: number
 }
 
@@ -754,4 +759,53 @@ export interface WorkspaceAgentSettings {
   /** Repo defaults (git config agentvc.agent-*) under the workspace's. */
   defaults: AgentSettings
   machine_limit: number
+}
+
+/** A file of the person's Claude Code setup that agents inherit. */
+export interface SetupSource {
+  label: string
+  path: string
+  found: boolean
+  /** `claude`: Claude Code reads it itself; `agentvc`: passed on to the agent. */
+  via: 'claude' | 'agentvc'
+}
+
+export interface ClaudeSetup {
+  sources: SetupSource[]
+  allow: string[]
+  ask: string[]
+  deny: string[]
+  mcp_servers: { name: string; scope: 'user' | 'local' | 'project' | 'agentvc' }[]
+  /** Settings left out so the agent stays in its worktree. */
+  dropped: string[]
+}
+
+export interface WorkspacePermissions {
+  workspace: string
+  workspace_name: string
+  path: string
+  runner: AgentRunner
+  permissions: AgentPermissions
+  permissions_from: 'workspace' | 'repo' | 'default'
+  claude_mode: string
+  sandbox: boolean
+  setup?: ClaudeSetup
+}
+
+/** `GET /api/agent-permissions`: what agents may do. */
+export interface PermissionsReport {
+  guard_rails: string[]
+  workspaces: WorkspacePermissions[]
+  agents: {
+    id: string
+    title: string
+    workspace: string
+    workspace_name: string
+    state: AgentState
+    runner: AgentRunner
+    permissions?: AgentPermissions
+    claude_mode?: string
+    sandbox: boolean
+    worktree: string
+  }[]
 }
