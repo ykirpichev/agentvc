@@ -28,6 +28,7 @@ pub mod overview;
 pub mod patch;
 pub mod query;
 pub mod rebase;
+pub mod relay;
 pub mod resolve;
 pub mod restack;
 pub mod run;

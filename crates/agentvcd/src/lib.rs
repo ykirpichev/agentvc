@@ -24,6 +24,7 @@ use tokio::sync::{broadcast, Notify};
 
 mod api;
 mod assets;
+pub mod cloud;
 mod conflicts;
 mod events;
 mod graph;

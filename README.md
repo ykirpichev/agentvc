@@ -277,6 +277,18 @@ can be committed. Otherwise it is written as an absolute path.
 To review attempts inside Cursor, install the VS Code extension
 ([integrations/vscode](integrations/vscode)): Cursor runs VS Code extensions.
 
+## Hosted review UI
+
+`agentvc-cloud` serves the same review UI at a public HTTPS URL, with GitHub
+sign-in, for every machine you connect. A machine connects by dialing out:
+
+```sh
+AGENTVC_CLOUD_TOKEN=avc_... agentvcd --cloud https://agentvc.example.com
+```
+
+Code stays on your machines; the service relays the UI to them and stores no
+code. Setup, security and deployment: [deploy/README.md](deploy/README.md).
+
 ## Build
 
 ```sh

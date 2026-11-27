@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client'
 import { BrowserRouter } from 'react-router'
 import { LiveProvider } from './api/live'
 import { App } from './App'
+import { basePath } from './core/base'
 import { HotkeyProvider } from './keyboard/hotkeys'
 import { ThemeProvider } from './theme/theme'
 import './styles.css'
@@ -14,7 +15,7 @@ createRoot(document.getElementById('root')!).render(
     <ThemeProvider>
       <HotkeyProvider>
         <LiveProvider>
-          <BrowserRouter>
+          <BrowserRouter basename={basePath || undefined}>
             <App />
           </BrowserRouter>
         </LiveProvider>

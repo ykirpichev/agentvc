@@ -40,6 +40,36 @@ struct Cli {
     /// Defaults to `git config user.name`, then `$USER`.
     #[arg(long, value_name = "NAME")]
     user: Option<String>,
+    /// Also serve this space through the hosted review UI at URL
+    /// (agentvc-cloud). The daemon dials out; nothing listens publicly. The
+    /// machine token comes from $AGENTVC_CLOUD_TOKEN or --cloud-token-file.
+    #[arg(long, value_name = "URL", env = "AGENTVC_CLOUD_URL")]
+    cloud: Option<String>,
+    /// File holding the machine token for --cloud.
+    #[arg(long, value_name = "PATH", requires = "cloud")]
+    cloud_token_file: Option<PathBuf>,
+    /// Only answer reads from the hosted UI; review actions stay local.
+    #[arg(long, requires = "cloud")]
+    cloud_read_only: bool,
+}
+
+/// The machine token for `--cloud`: the file, else `$AGENTVC_CLOUD_TOKEN`.
+fn cloud_token(file: Option<&std::path::Path>) -> Result<String, String> {
+    let token = match file {
+        Some(p) => {
+            std::fs::read_to_string(p).map_err(|e| format!("cannot read {}: {e}", p.display()))?
+        }
+        None => std::env::var("AGENTVC_CLOUD_TOKEN").map_err(|_| {
+            "--cloud needs a machine token: set AGENTVC_CLOUD_TOKEN or pass --cloud-token-file \
+             (make one on the hosted service's home page)"
+                .to_string()
+        })?,
+    };
+    let token = token.trim().to_string();
+    if token.is_empty() {
+        return Err("the cloud machine token is empty".into());
+    }
+    Ok(token)
 }
 
 /// Who UI actions are recorded as: `--user`, else the space's identity
@@ -77,6 +107,18 @@ async fn main() -> ExitCode {
     config.actor = reviewer(&cli.dir, cli.user);
     config.pr_poll = (cli.pr_poll_secs > 0).then(|| Duration::from_secs(cli.pr_poll_secs.max(30)));
 
+    let cloud = match &cli.cloud {
+        Some(url) => match cloud_token(cli.cloud_token_file.as_deref()) {
+            Ok(token) => Some(agentvcd::cloud::CloudConfig {
+                url: url.clone(),
+                token,
+                read_only: cli.cloud_read_only,
+            }),
+            Err(e) => return fail(cli.json, "cloud_token", e),
+        },
+        None => None,
+    };
+
     let state = match AppState::start(&config) {
         Ok(s) => s,
         Err(e) => return fail(cli.json, e.code(), e.to_string()),
@@ -91,7 +133,7 @@ async fn main() -> ExitCode {
     if cli.json {
         println!(
             "{}",
-            json!({ "ok": true, "url": url, "workdir": state.workdir(), "actor": state.actor() })
+            json!({ "ok": true, "url": url, "workdir": state.workdir(), "actor": state.actor(), "cloud": cli.cloud })
         );
     } else {
         println!(
@@ -101,6 +143,9 @@ async fn main() -> ExitCode {
         );
     }
 
+    if let Some(c) = cloud {
+        agentvcd::cloud::spawn(state.clone(), c);
+    }
     let app = agentvcd::router(state);
     let shutdown = async {
         let _ = tokio::signal::ctrl_c().await;
