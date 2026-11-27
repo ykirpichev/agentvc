@@ -245,6 +245,38 @@ fn fork_opts(argv: &mut Argv, a: &Args) -> Result<(), BadArgs> {
 /// Every tool, in the order `tools/list` returns them.
 pub static TOOLS: &[Tool] = &[
     Tool {
+        name: "ask_human",
+        title: "Ask the person",
+        description: "Only for agents started from the agentvc control center: ask the person one short question and wait for their answer (it may take a while). Use it instead of guessing when a decision is theirs. Returns {answer}.",
+        read_only: true,
+        destructive: false,
+        open_world: true,
+        params: || vec![("question", s("One short question, with the options if there are any."), true)],
+        argv: |a| Ok(Argv::new(&["agent", "ask"]).pos(Some(a.req("question")?)).done()),
+    },
+    Tool {
+        name: "approve",
+        title: "Approve tool call",
+        description: "Claude Code's permission prompt tool for agents started from the agentvc control center: asks the person to approve a tool call and waits. Returns {decision}.",
+        read_only: true,
+        destructive: false,
+        open_world: true,
+        params: || {
+            vec![
+                ("tool_name", s("The tool that wants to run."), true),
+                ("input", json!({ "type": "object", "description": "The tool's input." }), true),
+                ("tool_use_id", s("The tool call's id."), false),
+            ]
+        },
+        argv: |a| {
+            let input = a.get("input").cloned().unwrap_or(Value::Null);
+            Ok(Argv::new(&["agent", "permission"])
+                .opt("tool", Some(a.req("tool_name")?))
+                .opt("input", Some(input.to_string()))
+                .done())
+        },
+    },
+    Tool {
         name: "task_new",
         title: "New task",
         description: "Open a task: the goal that one or more attempts work on. Returns {task}.",

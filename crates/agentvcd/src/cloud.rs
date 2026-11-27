@@ -35,6 +35,8 @@ pub struct CloudConfig {
     pub token: String,
     /// Refuse every relayed request that is not a GET.
     pub read_only: bool,
+    /// Let the hosted page start, answer and land agents on this machine.
+    pub allow_agents: bool,
 }
 
 /// Keep a connection to the service open until the process exits.
@@ -199,8 +201,18 @@ async fn session(state: &AppState, app: &Router, cfg: &CloudConfig) -> Result<()
                 let app = app.clone();
                 let tx = tx.clone();
                 let read_only = cfg.read_only;
+                let allow_agents = cfg.allow_agents;
                 tokio::spawn(async move {
-                    let res = relay(app, read_only, &method, &path, content_type, body).await;
+                    let res = relay(
+                        app,
+                        read_only,
+                        allow_agents,
+                        &method,
+                        &path,
+                        content_type,
+                        body,
+                    )
+                    .await;
                     let (status, content_type, body) = res;
                     let _ = tx
                         .send(to_json(&DaemonMsg::Response {
@@ -237,6 +249,7 @@ fn error_body(code: &str, message: &str) -> String {
 pub(crate) async fn relay(
     app: Router,
     read_only: bool,
+    allow_agents: bool,
     method: &str,
     path: &str,
     content_type: Option<String>,
@@ -271,7 +284,11 @@ pub(crate) async fn relay(
     let mut req = Request::builder()
         .method(method)
         .uri(path)
-        .header(header::HOST, "localhost");
+        .header(header::HOST, "localhost")
+        .header(
+            crate::agents::RELAY_HEADER,
+            if allow_agents { "agents" } else { "1" },
+        );
     if let Some(ct) = content_type {
         req = req.header(header::CONTENT_TYPE, ct);
     }

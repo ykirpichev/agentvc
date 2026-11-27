@@ -22,6 +22,7 @@ use axum::response::{IntoResponse, Response};
 use axum::Router;
 use tokio::sync::{broadcast, Notify};
 
+mod agents;
 mod api;
 mod assets;
 pub mod cloud;
@@ -84,6 +85,8 @@ struct Inner {
     poke: Notify,
     /// Same for the workspace poller.
     workspace_poke: Notify,
+    /// Same for the agent poller.
+    agent_poke: Notify,
 }
 
 impl AppState {
@@ -113,10 +116,16 @@ impl AppState {
                 events: tx,
                 poke: Notify::new(),
                 workspace_poke: Notify::new(),
+                agent_poke: Notify::new(),
             }),
         };
         events::spawn_poller(state.clone(), watcher, config.poll_interval);
         workspaces::spawn_poller(
+            state.clone(),
+            state.workdir().to_path_buf(),
+            config.poll_interval * 2,
+        );
+        agents::spawn_poller(
             state.clone(),
             state.workdir().to_path_buf(),
             config.poll_interval * 2,
@@ -154,6 +163,15 @@ impl AppState {
 
     pub(crate) async fn workspaces_poked(&self) {
         self.inner.workspace_poke.notified().await;
+    }
+
+    /// Look at the agents now (after a change from the API).
+    pub(crate) fn poke_agents(&self) {
+        self.inner.agent_poke.notify_one();
+    }
+
+    pub(crate) async fn agents_poked(&self) {
+        self.inner.agent_poke.notified().await;
     }
 
     /// Broadcast an event to every connected client.

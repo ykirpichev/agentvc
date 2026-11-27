@@ -792,7 +792,10 @@ impl Window {
                 dirs.push((canon(&d), path));
             }
         }
-        dirs.retain(|(g, p)| *g == self.git_dir || p.exists());
+        // Agents' worktrees (see `agent`) are not workspaces.
+        dirs.retain(|(g, p)| {
+            *g == self.git_dir || (p.exists() && !g.join(crate::agent::AGENT_MARKER).exists())
+        });
         dirs
     }
 

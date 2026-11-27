@@ -56,6 +56,11 @@ struct Cli {
     /// Only answer reads from the hosted UI; review actions stay local.
     #[arg(long, requires = "cloud")]
     cloud_read_only: bool,
+    /// Let the hosted page start, answer and land agents on this machine
+    /// (they run code here). Off by default: relayed calls can only read
+    /// agents.
+    #[arg(long, requires = "cloud")]
+    allow_remote_agents: bool,
 }
 
 /// The machine token for `--cloud`: the file, else `$AGENTVC_CLOUD_TOKEN`.
@@ -119,6 +124,7 @@ async fn main() -> ExitCode {
                 url: url.clone(),
                 token,
                 read_only: cli.cloud_read_only,
+                allow_agents: cli.allow_remote_agents,
             }),
             Err(e) => return fail(cli.json, "cloud_token", e),
         },

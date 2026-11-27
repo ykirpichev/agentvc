@@ -64,6 +64,12 @@ pub enum Event {
         request_id: String,
         workspace: String,
     },
+    /// An agent's record changed (state, step, question, result);
+    /// refetch `/api/agents`.
+    AgentChanged {
+        agent: String,
+        state: agentvc_core::agent::AgentState,
+    },
     /// The client fell behind and missed events; it should refetch.
     Resync,
 }
