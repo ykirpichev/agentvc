@@ -10,6 +10,9 @@
 //! - `POST /api/reviews/submit {target, to: "agent"|"github"|"both"|"none"}`:
 //!   the drafts become one review; `{review, threads, delivery, agent}`.
 //! - `POST /api/reviews/discard {target}`: delete all your drafts there.
+//! - `POST /api/comments/sync {target}`: bring in the branch's GitHub PR
+//!   review threads and push local replies and states (#170); `no_pr` when
+//!   it has none.
 //!
 //! Event: `comments_changed {targets}` whenever the store changes, from
 //! here or from the CLI, an agent's MCP call or its hook.
@@ -42,6 +45,7 @@ pub(crate) fn routes() -> Router<AppState> {
         .route("/comments/{id}/reply", post(reply))
         .route("/comments/{id}/resolve", post(resolve))
         .route("/comments/{id}/reopen", post(reopen))
+        .route("/comments/sync", post(sync))
         .route("/reviews/submit", post(submit))
         .route("/reviews/discard", post(discard_all))
 }
@@ -265,6 +269,28 @@ async fn submit(
     let out = blocking(move || comments::submit(&dir, &target, to, &me, Some(&exe))).await?;
     changed(&st, &[key]);
     st.poke_agents();
+    Ok(Json(out))
+}
+
+#[derive(Deserialize)]
+struct SyncBody {
+    target: String,
+}
+
+async fn sync(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    body: Result<Json<SyncBody>, JsonRejection>,
+) -> ApiResult<comments::github::Synced> {
+    local_or_allowed(&headers)?;
+    let b = json_body(body)?;
+    let target = parse(&b.target)?;
+    let dir = st.workdir().to_path_buf();
+    let key = target.key();
+    let out = blocking(move || comments::github::sync(&dir, &target)).await?;
+    if !out.imported.is_empty() || !out.updated.is_empty() || !out.pushed.is_empty() {
+        changed(&st, &[key]);
+    }
     Ok(Json(out))
 }
 

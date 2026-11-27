@@ -1,8 +1,8 @@
 # Review comments
 
 Comment on any line of a diff, collect the comments into a review, and send it to
-the agent working on that branch (#165). Threads follow their lines as the branch
-moves on.
+the agent working on that branch (#165) or its GitHub PR. Threads follow their
+lines as the branch moves on.
 
 ## In the review UI
 
@@ -55,6 +55,27 @@ A review sent while an agent works reaches it at its next tool call: the
 inbox`) hands it over as context, once. If the agent stops before that, the review
 starts its next turn.
 
+## GitHub
+
+A branch with a PR (from `agentvc pr` or `agentvc stack submit`) has its review
+threads on GitHub too:
+
+- **Also on PR #N** in the review bar (or `comment send --github`) posts the drafts
+  as one PR review: a line comment where the lines are in the PR's diff, the rest
+  (and comments on the whole change) in the review's text with the quoted lines.
+  It goes to GitHub first; when that fails nothing is sent.
+- A branch page with an open PR syncs when it opens and every two minutes (or
+  `agentvc comment sync [BRANCH]`): review threads written on GitHub come in
+  (author `github:LOGIN`, pinned to their lines), and so do replies and
+  resolutions on threads that are there.
+- Replies, resolves and reopens made here go to the GitHub thread right away. An
+  agent's reply carries "_Posted by agentvc for agent agN._". When a push fails
+  (offline, no token) the thread says "not on GitHub yet" and the next sync tries
+  again. `addressed` stays open on GitHub: only a person resolves.
+
+The token is the one `agentvc pr` uses (`GITHUB_TOKEN`, `GH_TOKEN` or
+`gh auth token`).
+
 ## CLI
 
 ```sh
@@ -64,11 +85,14 @@ agentvc comment ls [my-branch|ag3] [--open] [--drafts] [--here]
 agentvc comment reply c4 "Done in the last commit"
 agentvc comment resolve c4                         # agents: --as-agent marks it addressed
 agentvc comment send my-branch --agent             # your drafts, as one review
+agentvc comment send my-branch --github            # ...posted on the branch's PR too
+agentvc comment sync my-branch                     # pull from / push to its PR
 ```
 
 Every command takes `--json`. The API is `GET/POST /api/comments`,
 `POST /api/comments/{id}/reply|resolve|reopen`, `DELETE /api/comments/{id}` (a
-draft) and `POST /api/reviews/submit {target, to: "agent"|"none"}`.
+draft), `POST /api/reviews/submit {target, to: "agent"|"github"|"both"|"none"}` and
+`POST /api/comments/sync {target}`.
 
 Comments live with the space (`$AGENTVC_HOME/spaces/<id>/comments.json`), so every
 checkout of the repo on this machine sees the same threads.

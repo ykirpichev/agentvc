@@ -119,7 +119,19 @@ export function ThreadView({ t, readOnly, showWhere = false }: { t: CommentThrea
         </button>
         <span className={`cstate cstate-${t.state}`}>{STATE_WORD[t.state]}</span>
         {t.outdated && <span className="cstate cstate-outdated" title="The lines it was written on are gone from the file">outdated</span>}
-        {t.source === 'github' && <span className="cstate cstate-gh">GitHub</span>}
+        {t.github &&
+          (t.github.url ? (
+            <a className="cstate cstate-gh" href={t.github.url} target="_blank" rel="noreferrer" title={t.source === 'github' ? 'Written on GitHub' : `On PR #${t.github.pr}`}>
+              GitHub
+            </a>
+          ) : (
+            <span className="cstate cstate-gh">GitHub</span>
+          ))}
+        {t.github?.error && (
+          <span className="cthread-gherr" title={t.github.error}>
+            not on GitHub yet
+          </span>
+        )}
         {(showWhere || t.outdated) && <span className="mono cthread-where">{where}</span>}
         <span className="cthread-meta muted">
           {folded ? `${who(authorOf(t))} · ` : ''}
@@ -192,31 +204,37 @@ export function ReviewBar({
   threads,
   agent,
   readOnly,
+  pr,
 }: {
   target: CommentTarget
   threads: CommentThread[]
   agent?: Agent | null
   readOnly?: boolean
+  /** The branch's open GitHub PR: offer to post the review there too. */
+  pr?: number
 }) {
   const toast = useToast()
   const { refresh } = useLive()
   const [busy, setBusy] = useState(false)
+  const [toGithub, setToGithub] = useState(false)
   const drafts = threads.filter((t) => t.state === 'pending')
   const open = threads.filter((t) => t.state === 'open' || t.state === 'addressed')
   if (readOnly || (drafts.length === 0 && open.length === 0)) return null
   const send = async (toAgent: boolean) => {
     setBusy(true)
     try {
-      const r = await api.submitReview(target, toAgent ? 'agent' : 'none')
+      const gh = toGithub && pr !== undefined
+      const r = await api.submitReview(target, toAgent ? (gh ? 'both' : 'agent') : gh ? 'github' : 'none')
       const n = plural(r.threads.length, 'comment')
+      const onPr = r.review.github_review ? ` Also posted as a review of PR #${pr}.` : ''
       toast.ok(
-        r.delivery === 'prompt'
+        (r.delivery === 'prompt'
           ? `Sent ${n} to ${r.agent?.id ?? 'the agent'}; it started working on them.`
           : r.delivery === 'queued'
             ? `Sent ${n}. ${r.agent?.id ?? 'The agent'} is working and gets them at its next step.`
             : r.delivery === 'waiting'
               ? `Sent ${n}. No agent works on this yet; the next one gets them.`
-              : `Posted ${n}.`,
+              : `Posted ${n}.`) + onPr,
         { undo: false },
       )
     } catch (e) {
@@ -246,6 +264,11 @@ export function ReviewBar({
         <>
           <b>{plural(drafts.length, 'comment')} not sent</b>
           <span className="creview-acts">
+            {pr !== undefined && (
+              <label className="creview-gh" title={`Post them as one review of PR #${pr} too: line comments where the lines are in its diff, the rest in the review's text`}>
+                <input type="checkbox" checked={toGithub} onChange={(e) => setToGithub(e.target.checked)} disabled={busy} /> Also on PR #{pr}
+              </label>
+            )}
             {canAgent && (
               <button type="button" className="btn btn-primary" disabled={busy} onClick={() => void send(true)} title={`${agent!.title} (${agent!.id}) gets them as its next prompt, or at its next step while it works`}>
                 Send to {agent!.id}

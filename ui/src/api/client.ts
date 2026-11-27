@@ -45,6 +45,7 @@ import type {
   WorkspaceAgentSettings,
   PermissionsReport,
   CommentThread,
+  CommentSync,
   CommentTarget,
   NewComment,
   SubmittedReview,
@@ -213,6 +214,7 @@ export const api = {
     }),
   /** Blame at any browse ref: git's for commits and working trees, the attempt's for versions. */
   blameAt: (r: string, path: string) => get<Blame>('/blame', { ref: r, path }),
+  syncComments: (target: CommentTarget) => post<CommentSync>('/comments/sync', { target }),
 }
 
 export const ref = {

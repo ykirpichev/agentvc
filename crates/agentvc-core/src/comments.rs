@@ -39,6 +39,8 @@ use crate::export::HostRepo;
 use crate::space::now;
 use crate::stack::Window;
 
+pub mod github;
+
 /// Version of `comments.json`.
 pub const STORE_VERSION: u32 = 1;
 /// Lines of context kept on each side of an anchor.
@@ -240,8 +242,11 @@ pub struct Comment {
 }
 
 /// A thread on GitHub (#170).
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GithubLink {
+    /// `owner/name`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo: Option<String>,
     pub pr: u64,
     /// The review thread's node id (for resolving it).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -251,6 +256,13 @@ pub struct GithubLink {
     pub comment: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
+    /// Resolved on GitHub, when last seen there; `None` for a comment in a
+    /// review's body (not a thread there).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved: Option<bool>,
+    /// Why the last push to GitHub failed; the next sync tries again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -907,6 +919,10 @@ pub fn reply(cwd: &Path, id: &str, body: &str, author: &str) -> Result<Thread> {
         t.updated_at = at;
         Ok(t.clone())
     })?;
+    if t.github.is_some() {
+        github::push_soon(cwd, &t);
+        t = get(cwd, id)?;
+    }
     reanchor(cwd, std::slice::from_mut(&mut t));
     Ok(t)
 }
@@ -948,6 +964,10 @@ fn set_state(cwd: &Path, id: &str, to: State, by: &str) -> Result<Thread> {
         t.updated_at = now();
         Ok(t.clone())
     })?;
+    if t.github.is_some() {
+        github::push_soon(cwd, &t);
+        t = get(cwd, id)?;
+    }
     reanchor(cwd, std::slice::from_mut(&mut t));
     Ok(t)
 }
@@ -1114,6 +1134,29 @@ pub fn submit(
     } else {
         None
     };
+    // GitHub first: when it fails, nothing is sent.
+    let posted = if to.github {
+        let pr = github::pr_of(cwd, target)?;
+        let mut drafts = list(
+            cwd,
+            &Filter {
+                target: Some(target.clone()),
+                pending: true,
+                ..Default::default()
+            },
+        )?;
+        drafts.retain(|t| t.state == State::Pending && t.author() == by);
+        if drafts.is_empty() {
+            return Err(err_with(
+                "no_drafts",
+                format!("no comments to send on {}", target.key()),
+                json!({ "target": target.key() }),
+            ));
+        }
+        Some(github::post_review(cwd, &pr, &drafts, by)?)
+    } else {
+        None
+    };
     let at = now();
     let review = change(&file, |s| {
         let ids: Vec<String> = s
@@ -1136,7 +1179,7 @@ pub fn submit(
             t.review = Some(rid.clone());
             t.updated_at = at;
         }
-        let r = Review {
+        let mut r = Review {
             id: rid,
             target: target.clone(),
             threads: ids,
@@ -1149,6 +1192,9 @@ pub fn submit(
             delivered_via: None,
             github_review: None,
         };
+        if let Some(p) = &posted {
+            github::record(s, &mut r, p);
+        }
         s.reviews.push(r.clone());
         Ok(r)
     })?;
@@ -1752,6 +1798,255 @@ mod tests {
                 end: None,
             });
             assert_eq!(add(&work, &req).unwrap_err().code(), "no_branch");
+        }
+
+        /// A fake of the GitHub calls review sync makes.
+        #[derive(Default)]
+        struct Fake {
+            head: String,
+            log: Vec<(String, String, Value)>,
+            /// Comments of the posted review, as GitHub numbers them.
+            posted: Vec<Value>,
+            first_resolved: bool,
+            second_resolved: bool,
+        }
+
+        fn fake_github(state: std::sync::Arc<std::sync::Mutex<Fake>>) -> String {
+            use std::io::{BufRead, BufReader, Read, Write};
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let base = format!("http://{}", listener.local_addr().unwrap());
+            std::thread::spawn(move || {
+                for stream in listener.incoming() {
+                    let mut stream = stream.unwrap();
+                    let mut reader = BufReader::new(stream.try_clone().unwrap());
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap() == 0 {
+                        continue;
+                    }
+                    let mut parts = line.split_whitespace();
+                    let method = parts.next().unwrap().to_string();
+                    let path = parts.next().unwrap().to_string();
+                    let mut len = 0;
+                    loop {
+                        let mut h = String::new();
+                        reader.read_line(&mut h).unwrap();
+                        if h.trim().is_empty() {
+                            break;
+                        }
+                        if let Some((k, v)) = h.split_once(':') {
+                            if k.eq_ignore_ascii_case("content-length") {
+                                len = v.trim().parse().unwrap();
+                            }
+                        }
+                    }
+                    let mut body = vec![0; len];
+                    reader.read_exact(&mut body).unwrap();
+                    let body: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+                    let mut f = state.lock().unwrap();
+                    f.log.push((method.clone(), path.clone(), body.clone()));
+                    let pr = "/repos/acme/widget/pulls/7";
+                    let reply = match (method.as_str(), path.as_str()) {
+                        ("GET", p) if p == pr => json!({ "head": { "sha": f.head } }),
+                        ("GET", p) if p.starts_with(&format!("{pr}/files")) => json!([{
+                            "filename": "a.txt",
+                            "patch": "@@ -3,6 +3,9 @@ line 2\n line 3\n",
+                        }]),
+                        ("POST", p) if p == format!("{pr}/reviews") => {
+                            f.posted = body["comments"]
+                                .as_array()
+                                .unwrap()
+                                .iter()
+                                .enumerate()
+                                .map(|(i, c)| {
+                                    json!({ "id": 9001 + i as u64, "path": c["path"],
+                                            "body": c["body"], "html_url": "https://gh/r9001" })
+                                })
+                                .collect();
+                            json!({ "id": 500, "html_url": "https://gh/review500" })
+                        }
+                        ("GET", p) if p.starts_with(&format!("{pr}/reviews/500/comments")) => {
+                            Value::from(f.posted.clone())
+                        }
+                        ("POST", p) if p.ends_with("/comments/9001/replies") => {
+                            json!({ "id": 9200 })
+                        }
+                        ("POST", "/graphql")
+                            if body["query"].as_str().unwrap().contains("mutation") =>
+                        {
+                            let q = body["query"].as_str().unwrap();
+                            f.first_resolved = q.contains(" resolveReviewThread");
+                            json!({ "data": {} })
+                        }
+                        ("POST", "/graphql") => json!({ "data": { "repository": { "pullRequest": {
+                            "reviewThreads": { "nodes": [
+                                { "id": "T1", "isResolved": f.first_resolved, "path": "a.txt", "line": 7,
+                                  "diffSide": "RIGHT", "comments": { "nodes": [
+                                    { "databaseId": 9001, "author": { "login": "t" },
+                                      "body": "no todo!() here", "createdAt": "2026-11-27T10:00:00Z" },
+                                    { "databaseId": 9100, "author": { "login": "ana" },
+                                      "body": "agreed", "createdAt": "2026-11-27T10:05:00Z" },
+                                ] } },
+                                { "id": "T2", "isResolved": f.second_resolved, "path": "a.txt",
+                                  "line": 6, "startLine": 6, "diffSide": "RIGHT",
+                                  "comments": { "nodes": [
+                                    { "databaseId": 9300, "author": { "login": "ana" },
+                                      "body": "name this better", "url": "https://gh/r9300",
+                                      "createdAt": "2026-11-27T11:00:00Z" },
+                                ] } },
+                            ] } } } } }),
+                        _ => json!({ "message": "not found" }),
+                    };
+                    drop(f);
+                    let reply = reply.to_string();
+                    write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",
+                        reply.len()
+                    )
+                    .unwrap();
+                }
+            });
+            base
+        }
+
+        #[test]
+        fn reviews_go_to_the_pr_and_come_back() {
+            let (_t, work, ws) = repo();
+            let feat = Target::branch(&ws, "feat");
+            let mut w = Window::open(&work).unwrap();
+            w.state
+                .branches
+                .iter_mut()
+                .find(|b| b.name == "feat")
+                .unwrap()
+                .pr = Some(7);
+            w.save().unwrap();
+            git(
+                &work,
+                &[
+                    "remote",
+                    "set-url",
+                    "origin",
+                    "https://github.com/acme/widget.git",
+                ],
+            );
+            let state = std::sync::Arc::new(std::sync::Mutex::new(Fake {
+                head: w.branch_tip("feat").unwrap(),
+                ..Default::default()
+            }));
+            *github::TEST_API.lock().unwrap() = Some(fake_github(state.clone()));
+
+            // Line 7 is in the PR's diff, line 1 is not: it goes in the body.
+            let a = add_on(&work, &feat, 7, true);
+            let b = add_on(&work, &feat, 1, true);
+            let s = submit(
+                &work,
+                &feat,
+                Deliver {
+                    agent: false,
+                    github: true,
+                },
+                "human:t",
+                None,
+            )
+            .unwrap();
+            assert_eq!(s.review.github_review, Some(500));
+            {
+                let f = state.lock().unwrap();
+                let (_, _, req) = f
+                    .log
+                    .iter()
+                    .find(|(m, p, _)| m == "POST" && p.ends_with("/reviews"))
+                    .unwrap();
+                assert_eq!(req["event"], "COMMENT");
+                assert_eq!(req["commit_id"], f.head.as_str());
+                assert_eq!(req["comments"].as_array().unwrap().len(), 1);
+                assert_eq!(req["comments"][0]["line"], 7);
+                assert_eq!(req["comments"][0]["side"], "RIGHT");
+                let body = req["body"].as_str().unwrap();
+                assert!(body.contains("**a.txt:1**"), "{body}");
+                assert!(body.contains("> `line 1`"), "{body}");
+            }
+            let a = get(&work, &a.id).unwrap();
+            let link = a.github.clone().unwrap();
+            assert_eq!(link.comment, Some(9001));
+            assert_eq!(a.comments[0].github_id, Some(9001));
+            let b = get(&work, &b.id).unwrap();
+            assert_eq!(b.github.as_ref().unwrap().comment, None);
+            assert_eq!(
+                b.github.as_ref().unwrap().url.as_deref(),
+                Some("https://gh/review500")
+            );
+
+            // Sync: ana's reply on our thread, and her own new thread.
+            let out = github::sync(&work, &feat).unwrap();
+            assert_eq!(out.updated, vec![a.id.clone()]);
+            assert_eq!(out.imported.len(), 1, "{out:?}");
+            let a = get(&work, &a.id).unwrap();
+            assert_eq!(a.github.as_ref().unwrap().thread.as_deref(), Some("T1"));
+            assert_eq!(a.comments.len(), 2);
+            assert_eq!(a.comments[1].author, "github:ana");
+            let new = get(&work, &out.imported[0]).unwrap();
+            assert_eq!(new.source, "github");
+            assert_eq!(new.author(), "github:ana");
+            assert_eq!(new.anchor.as_ref().unwrap().lines, vec!["fn added() {"]);
+            assert_eq!(new.current, Some(Position { start: 6, end: 6 }));
+            // Syncing again changes nothing.
+            let again = github::sync(&work, &feat).unwrap();
+            assert!(
+                again.imported.is_empty() && again.updated.is_empty(),
+                "{again:?}"
+            );
+
+            // A reply here goes to the GitHub thread, an agent's with a footer.
+            let a = reply(&work, &a.id, "fixed", "agent:ag1").unwrap();
+            assert_eq!(a.comments[2].github_id, Some(9200));
+            assert!(a.github.as_ref().unwrap().error.is_none());
+            {
+                let f = state.lock().unwrap();
+                let (_, _, req) = f
+                    .log
+                    .iter()
+                    .find(|(_, p, _)| p.ends_with("/replies"))
+                    .unwrap();
+                assert_eq!(req["body"], "fixed\n\n_Posted by agentvc for agent ag1._");
+            }
+            // An agent marks it addressed: still open on GitHub.
+            let a = resolve(&work, &a.id, "agent:ag1").unwrap();
+            assert_eq!(a.state, State::Addressed);
+            let mutations = |f: &Fake| {
+                f.log
+                    .iter()
+                    .filter(|(_, p, b)| {
+                        p == "/graphql" && b["query"].as_str().unwrap().contains("mutation")
+                    })
+                    .map(|(_, _, b)| b.clone())
+                    .collect::<Vec<_>>()
+            };
+            assert!(mutations(&state.lock().unwrap()).is_empty());
+            // A person resolves it: resolved there too.
+            let a = resolve(&work, &a.id, "human:t").unwrap();
+            assert_eq!(a.state, State::Resolved);
+            let m = mutations(&state.lock().unwrap());
+            assert_eq!(m.len(), 1);
+            assert!(m[0]["query"]
+                .as_str()
+                .unwrap()
+                .contains("resolveReviewThread"));
+            assert_eq!(m[0]["variables"]["id"], "T1");
+            assert_eq!(a.github.as_ref().unwrap().resolved, Some(true));
+
+            // Resolved on GitHub: resolved here at the next sync.
+            state.lock().unwrap().second_resolved = true;
+            let out = github::sync(&work, &feat).unwrap();
+            assert_eq!(out.updated, vec![new.id.clone()]);
+            assert_eq!(get(&work, &new.id).unwrap().state, State::Resolved);
+            // Reopened on GitHub: open here again.
+            state.lock().unwrap().first_resolved = false;
+            let out = github::sync(&work, &feat).unwrap();
+            assert_eq!(out.updated, vec![a.id.clone()]);
+            assert_eq!(get(&work, &a.id).unwrap().state, State::Open);
+            *github::TEST_API.lock().unwrap() = None;
         }
     }
 }
