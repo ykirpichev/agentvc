@@ -52,6 +52,9 @@ pub struct Config {
     pub actor: String,
     /// How often to refresh open PRs from GitHub; `None` never does.
     pub pr_poll: Option<Duration>,
+    /// In a git repository with no space yet, create one (`agentvcd` in any
+    /// repo with stacks). Off for library users and tests by default.
+    pub init_if_missing: bool,
 }
 
 impl Config {
@@ -61,6 +64,7 @@ impl Config {
             poll_interval: Duration::from_millis(500),
             actor: "human".into(),
             pr_poll: None,
+            init_if_missing: false,
         }
     }
 }
@@ -86,7 +90,18 @@ impl AppState {
     /// Open the space containing `config.dir` and start the event poller.
     /// Must be called inside a Tokio runtime.
     pub fn start(config: &Config) -> agentvc_core::Result<AppState> {
-        let space = Space::discover(&config.dir)?;
+        let space = match Space::discover(&config.dir) {
+            // A plain git repository (stacks only, nothing initialized yet):
+            // start a space at its top so the UI has somewhere to live. It
+            // takes well under a second and ignores git-ignored files.
+            Err(agentvc_core::Error::NoSpace(_)) if config.init_if_missing => {
+                match git_toplevel(&config.dir) {
+                    Some(top) => Space::init(&top)?,
+                    None => return Err(agentvc_core::Error::NoSpace(config.dir.clone())),
+                }
+            }
+            r => r?,
+        };
         let workdir = space.workdir().to_path_buf();
         let (tx, _) = broadcast::channel(1024);
         let watcher = events::Watcher::new(&space)?;
@@ -178,12 +193,24 @@ fn spawn_pr_poller(state: AppState, every: Duration) {
             tokio::time::sleep(every).await;
             let workdir = state.workdir().to_path_buf();
             let res = tokio::task::spawn_blocking(move || {
-                let space = Space::discover(&workdir)?;
-                if space.open_prs()?.is_empty() || agentvc_core::github::token().is_err() {
+                if agentvc_core::github::token().is_err() {
                     return Ok::<_, agentvc_core::Error>((0, None));
                 }
+                // Stack PRs of every workspace (checks, review), then the
+                // space's attempt PRs.
+                let stacks = match agentvc_core::workspace::refresh_prs(&workdir) {
+                    Ok(n) => n,
+                    Err(e @ agentvc_core::Error::RateLimited { .. }) => return Ok((0, Some(e))),
+                    Err(_) => 0,
+                };
+                let Ok(space) = Space::discover(&workdir) else {
+                    return Ok((stacks, None));
+                };
+                if space.open_prs()?.is_empty() {
+                    return Ok((stacks, None));
+                }
                 let (done, err) = agentvc_core::feedback::refresh_open(&space);
-                Ok((done.len(), err))
+                Ok((stacks + done.len(), err))
             })
             .await;
             if let Ok(Ok((n, err))) = res {
@@ -199,6 +226,19 @@ fn spawn_pr_poller(state: AppState, every: Duration) {
             }
         }
     });
+}
+
+/// The top of the git worktree containing `dir`.
+fn git_toplevel(dir: &Path) -> Option<PathBuf> {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .ok()?;
+    out.status
+        .success()
+        .then(|| PathBuf::from(String::from_utf8_lossy(&out.stdout).trim()))
 }
 
 /// The full application: API, events and UI.

@@ -5,14 +5,14 @@ import { useState } from 'react'
 import { useParams } from 'react-router'
 import { api, ref } from '../api/client'
 import { useLive } from '../api/live'
-import type { ConflictHunk, HunkTake, WorkspaceInfo, WsConflicts, WsOp } from '../api/types'
+import type { ConflictHunk, HunkTake, PrBrief, WorkspaceInfo, WsConflicts, WsOp } from '../api/types'
 import { useResource } from '../api/useResource'
 import { ErrorNote, Skeleton } from '../components/bits'
 import { HunkList } from '../components/ConflictResolver'
 import { DiffView } from '../components/DiffView'
 import { undoIn } from '../components/stackEdit'
 import { useToast } from '../components/Toaster'
-import { HELP, shortSha, WORDS } from '../core/words'
+import { HELP, prWords, shortSha, WORDS } from '../core/words'
 import { plural, timeAgo } from '../lib/format'
 
 export function BranchReview() {
@@ -33,9 +33,14 @@ export function BranchReview() {
     try {
       const r = await api.stackEdit(workspace, op, keep)
       const stoppedAt = r.result?.conflict?.branch
+      const mergeStop = r.result?.stopped
+      if (mergeStop) {
+        toast.ok(`Merged ${r.result?.merged?.length ?? 0}, then stopped at ${mergeStop.branch}: ${mergeStop.message}`, { undo: false })
+        return
+      }
       if (stoppedAt) toast.ok(`Restacking ${stoppedAt} stopped on a clash. Pick what each place should say below.`, { undo: false })
       else if (r.outcome === 'queued') toast.ok(`Queued: ${r.reason ?? 'an agent is working there'}. It applies when the agent stops.`, { undo: false })
-      else toast.ok(done, { undo: op.op === 'checkout' ? false : undoIn(workspace, done) })
+      else toast.ok(done, { undo: op.op === 'checkout' || op.op === 'merge' ? false : undoIn(workspace, done) })
     } catch (e) {
       toast.error(e)
     } finally {
@@ -56,6 +61,9 @@ export function BranchReview() {
     )
 
   const readOnly = w.kind === 'remote'
+  // This branch and the stacked branches below it: what Merge lands.
+  let below = 0
+  for (let at: typeof b | undefined = b; at; at = w.branches.find((x) => x.name === at?.parent)) below++
   const d = detail.data
   return (
     <div className="page rv">
@@ -96,7 +104,21 @@ export function BranchReview() {
           {b.pr && (
             <div className="act">
               <span className="bbadge bbadge-pr">PR #{b.pr.number}</span>
-              <span className="act-help">{b.pr.state ?? 'open'}</span>
+              <span className="act-help">{prLine(b.pr.state, b.pr.status)}</span>
+            </div>
+          )}
+          {b.pr && (b.pr.state === 'open' || b.pr.state === null) && !stopped && (
+            <div className="act">
+              <button
+                type="button"
+                className="btn"
+                disabled={busy || b.pr.status?.checks === 'fail' || b.pr.status?.review === 'changes_requested'}
+                onClick={() => void run({ op: 'merge', branch: b.name }, `Merged up to ${b.name}.`)}
+              >
+                {WORDS.merge}
+                {below > 1 ? ` ${below} PRs` : ''}
+              </button>
+              <span className="act-help">{HELP.merge(below)}</span>
             </div>
           )}
         </div>
@@ -216,4 +238,15 @@ function StackConflicts({ w }: { w: WorkspaceInfo }) {
       )}
     </section>
   )
+}
+
+/** What the PR needs, in a sentence, for the branch page. */
+function prLine(state: string | null, st?: PrBrief | null): string {
+  const w = prWords(state, st)
+  if (!st) return w?.label ?? state ?? 'open'
+  const parts = [w?.label ?? state ?? 'open']
+  if (st.checks === 'fail' && st.failing?.length) parts.push(`failing: ${st.failing.join(', ')}`)
+  if (st.unresolved > 0) parts.push(plural(st.unresolved, 'open thread'))
+  parts.push(`checked ${timeAgo(st.at)}`)
+  return parts.join(' · ')
 }

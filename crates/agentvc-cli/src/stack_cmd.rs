@@ -28,6 +28,9 @@ pub enum StackCmd {
         /// Also list other windows' stacks (read-only).
         #[arg(long)]
         all: bool,
+        /// Fetch each PR's checks and review from GitHub first.
+        #[arg(long)]
+        prs: bool,
     },
     /// Create a branch on top of the current one (or on trunk) and commit
     /// the staged changes to it.
@@ -233,6 +236,29 @@ pub enum StackCmd {
         #[arg(long)]
         keep_conflicts: bool,
     },
+    /// Merge this stack's PRs on GitHub from the bottom up to --branch (default:
+    /// the current one). Each must be pushed, ready, mergeable, with passing
+    /// checks and no change requests; after each merge the rest is synced and
+    /// re-submitted onto the trunk. Stops at the first PR that isn't ready
+    /// (usually `checks_pending` after the re-submit): run it again then.
+    Merge {
+        #[arg(long)]
+        branch: Option<String>,
+        /// squash (default), merge or rebase.
+        #[arg(long)]
+        method: Option<String>,
+        /// GitHub repository as owner/name (default: from the remote URL).
+        #[arg(long)]
+        repo: Option<String>,
+        /// Only say whether the bottom PR could merge now.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Continue a stack published from another machine (by `stack submit`):
+    /// fetch its branches, create or fast-forward them here and track them in
+    /// this window. TARGET is a workspace id or name (its whole stack) or a
+    /// branch (that branch's stack). Run it again to pull later pushes.
+    Get { target: String },
     /// Check out a branch of this window by name (or the trunk, detached).
     Checkout { branch: String },
     /// After resolving a restack conflict: `git rebase --continue`, then
@@ -306,6 +332,35 @@ fn branch_line(b: &BranchInfo) -> String {
     );
     if let Some(pr) = b.pr {
         s += &format!("  #{pr}");
+        match b.pr_state.as_deref() {
+            Some("merged") => s += " merged",
+            Some("closed") => s += " closed",
+            Some("draft") => s += " draft",
+            _ => {}
+        }
+        if let Some(st) = &b.pr_status {
+            s += match st.checks.as_str() {
+                "pass" => "  checks pass",
+                "fail" => "  checks FAIL",
+                "pending" => "  checks running",
+                _ => "",
+            };
+            s += match st.review.as_str() {
+                "approved" => ", approved",
+                "changes_requested" => ", changes requested",
+                _ => "",
+            };
+            if st.unresolved > 0 {
+                s += &format!(
+                    ", {} open thread{}",
+                    st.unresolved,
+                    if st.unresolved == 1 { "" } else { "s" }
+                );
+            }
+            if st.mergeable == Some(false) {
+                s += ", conflicts with its base";
+            }
+        }
     }
     if b.depth == 0 {
         match b.parent_kind {
@@ -501,7 +556,13 @@ fn dispatch(cwd: &Path, cmd: StackCmd) -> anyhow::Result<(Value, String)> {
                 format!("this window stacks on {}", w.base_ref()),
             )
         }
-        StackCmd::Log { all } => {
+        StackCmd::Log { all, prs } => {
+            if prs {
+                // Writes the stack: hold its lock (but apply no queued edits).
+                let _l = workspace::lock(&w.git_dir)?;
+                w = Window::open(cwd)?;
+                w.refresh_prs(None)?;
+            }
             let l = w.log(all)?;
             let text = log_text(&l);
             (json!(l), text)
@@ -781,6 +842,55 @@ fn dispatch(cwd: &Path, cmd: StackCmd) -> anyhow::Result<(Value, String)> {
             }
             text += &restack_text(&r.restack);
             (json!(r), text)
+        }
+        StackCmd::Merge {
+            branch,
+            method,
+            repo,
+            dry_run,
+        } => {
+            let r = w.merge_stack(&agentvc_core::stack::MergeOptions {
+                branch,
+                method,
+                repo,
+                dry_run,
+            })?;
+            let mut text = String::new();
+            for m in &r.merged {
+                text += &format!("merged {} (#{})\n", m.branch, m.number);
+            }
+            if dry_run && r.ready {
+                if let Some((b, _)) = r.statuses.last() {
+                    text += &format!("{b} is ready to merge\n");
+                }
+            }
+            if let Some(s) = &r.stopped {
+                text += &format!("stopped at {} [{}]: {}\n", s.branch, s.code, s.message);
+            } else if !dry_run {
+                text += "the stack is merged up to there\n";
+            }
+            (json!(r), text)
+        }
+        StackCmd::Get { target } => {
+            drop(w);
+            let (ws, r) = workspace::get(cwd, &target)?;
+            let mut text = String::new();
+            for t in &r.tracked {
+                let how = if r.created.contains(&t.name) {
+                    "created"
+                } else if r.updated.contains(&t.name) {
+                    "fast-forwarded"
+                } else {
+                    "up to date"
+                };
+                text += &format!("{} on {} ({how})\n", t.name, t.parent);
+            }
+            text += &format!(
+                "tracking {} branch{} from workspace {ws}",
+                r.tracked.len(),
+                if r.tracked.len() == 1 { "" } else { "es" }
+            );
+            (json!({ "workspace": ws, "result": r }), text)
         }
         StackCmd::Checkout { branch } => {
             w.settle()?;

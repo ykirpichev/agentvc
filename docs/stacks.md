@@ -65,17 +65,19 @@ agentvc stack restack                    # carries on with the branches above
 | Command | Does |
 | --- | --- |
 | `stack init [--trunk B] [--remote R]` | Set the trunk (detected from `origin/HEAD`) |
-| `stack log [--all]` | This window's branches with commits, PRs, `needs restack`; `--all` adds other windows read-only |
+| `stack log [--all] [--prs]` | This window's branches with commits, PRs, `needs restack`; `--all` adds other windows read-only; `--prs` fetches each PR's checks and review first |
 | `stack create [name] [-m msg] [-a] [-i]` | Branch on the current one (or the trunk), commit staged work; name from the message if omitted. `--insert` puts it between the current branch and its children |
 | `stack modify [-a] [-m msg] [-c]` | Amend (or `-c` add a commit), restack the branches above |
 | `stack restack [--branch B] [--keep-conflicts]` | Replay branches onto their parents' tips |
 | `stack sync [--no-fetch] [--keep-merged]` | Fetch trunk, drop merged branches, restack |
 | `stack adopt B [--parent P] [--no-chain]` | Track existing branches: B and the untracked branches below it; parents from Graphite's `refs/branch-metadata` or git history |
 | `stack submit [--branch B \| --all] [--draft] [--force] [--no-pr]` | Push with a lease; one PR per branch with its parent as base; the stack listed in every PR body; new PRs get the `agentvc:no-restack` label |
+| `stack merge [--branch B] [--method squash\|merge\|rebase] [--dry-run]` | Merge the PRs on GitHub from the bottom up to B (default: current); stops at the first that isn't ready |
 | `stack move B --onto P` | Re-parent B (and its upstack) onto P or the trunk; only B's own commits move |
 | `stack rename B NEW` | Rename B; branches on it follow (its PR is forgotten, submit opens a new one) |
 | `stack delete B` | Delete B and its commits; branches on it move to its parent without them |
 | `stack squash [-m msg]` | Squash the current branch into one commit, restack above |
+| `stack get TARGET` | Continue a stack published from another machine: TARGET is its workspace id or name, or a branch in it |
 | `stack give B --to DIR` | Hand B and the branches above it to the window at DIR |
 | `stack untrack B` | Stop tracking B; branches above keep its commits |
 | `stack fold` | Fold the current branch into its parent; branches on it move to the parent |
@@ -122,11 +124,13 @@ showing them as a stack.
 | `gt continue` / `gt abort` | `agentvc stack continue` / `abort` |
 | `gt sync` | `agentvc stack sync` (never moves local `main`) |
 | `gt submit --stack` | `agentvc stack submit` |
+| `gt merge` (merge the stack) | `agentvc stack merge` |
 | `gt log` / `gt ls` | `agentvc stack log` (`--all` for every window) |
 | `gt checkout B` | `agentvc stack checkout B` |
 | `gt up` / `down` / `top` / `bottom` | same names |
 | `gt track` / `untrack` | `agentvc stack adopt` / `untrack` |
 | `gt undo` | `agentvc stack undo` |
+| `gt get` | `agentvc stack get` |
 
 `stack undo` keeps the last 50 changing commands per worktree
 (`<git-dir>/agentvc/stack-undo.json`), including edits made from the review
@@ -147,6 +151,30 @@ left alone.
 
 New PRs get the `agentvc:no-restack` label, so the restack Action
 (`.github/workflows/restack.yml`) leaves them to `stack sync` in their window.
+
+### Checks, review and merging
+
+`agentvc stack log --prs` fetches each open PR's checks, review decision,
+open review threads and mergeability, records them in the stack and shows
+them on each row (`#12  checks pass, approved`). The daemon refreshes them
+for every workspace every 5 minutes, and the review UI's branch tree shows
+the same as a badge (`#12 · checks fail`).
+
+`agentvc stack merge` merges the PRs on GitHub from the bottom of the stack
+up to `--branch` (default: the current branch), squash by default. Each PR
+must be pushed (local tip = PR head), out of draft, mergeable, with passing
+checks and no change requests. After each merge it runs `sync` (the merged
+branch leaves the stack, the rest restacks onto the trunk), re-submits the
+rest so the next PR targets the trunk, then deletes the merged branch on the
+remote. The re-submit usually restarts the next PR's checks, so the command
+stops there with `stopped.code` `checks_pending`; run it again when they
+pass. It never waits. When nothing could merge it fails with the reason as
+the error code: `checks_pending`, `checks_failed`, `changes_requested`,
+`pr_draft`, `not_mergeable`, `blocked` (branch protection), `not_pushed`,
+`no_pr`, `pr_closed`, `merge_failed`; `--dry-run` only says whether the
+bottom PR is ready. The branch page in the review UI has a Merge button that
+does the same (`{"op": "merge", "branch": "..."}` on
+`POST /api/workspaces/{id}/stack`).
 
 `sync` also drops branches whose PR GitHub reports merged (when a token is
 available and the local branch is what was pushed), so a PR that was edited on
@@ -186,6 +214,15 @@ a per-workspace lock (`stack_locked` after 10 s), so edits never interleave.
 `refs/agentvc/workspaces/<id>`; `agentvc workspace ls --remote` on another
 machine fetches those and lists them read-only (`remote_workspace` on edits).
 `--no-publish` skips it; a remote that refuses `refs/agentvc/*` only warns.
+
+To keep working on such a stack on the laptop, run `agentvc stack get
+<workspace or branch>` in a worktree there: it fetches the branches, creates
+them (or moves them to the remote tips) and tracks them in that window with
+the published parents and PRs. A branch name brings that branch's whole
+stack. Run it again to pick up later pushes; a local branch is replaced only
+while it has no commits of its own (else `branch_diverged`, nothing changes).
+Then `stack submit` from the laptop pushes with the usual lease. Codes:
+`same_machine` (use `give`), `no_workspace`, `ambiguous`, `branch_diverged`.
 
 `ls --json` gives, per branch: `workspace`, `parent`, `parent_kind`
 (`trunk|stack|other_window|branch`), `parent_workspace`, `parent_rev`, `tip`,

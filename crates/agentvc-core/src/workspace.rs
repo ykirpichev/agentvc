@@ -349,6 +349,10 @@ pub enum Op {
     },
     /// Undo that workspace's latest stack command (`agentvc stack undo`).
     Undo,
+    /// Merge the stack's PRs up to `branch` on GitHub (`agentvc stack merge`).
+    Merge {
+        branch: String,
+    },
 }
 
 impl Op {
@@ -357,7 +361,8 @@ impl Op {
             Op::Move { branch, .. }
             | Op::Rename { branch, .. }
             | Op::Delete { branch }
-            | Op::Checkout { branch } => Some(branch),
+            | Op::Checkout { branch }
+            | Op::Merge { branch } => Some(branch),
             Op::Restack { branch } => branch.as_deref(),
             Op::Sync | Op::Undo => None,
         }
@@ -374,6 +379,7 @@ impl Op {
             Op::Sync => "sync".into(),
             Op::Checkout { branch } => format!("checkout {branch}"),
             Op::Undo => "undo".into(),
+            Op::Merge { branch } => format!("merge --branch {branch}"),
         }
     }
 }
@@ -513,6 +519,10 @@ fn run_op(w: &mut Window, op: &Op, keep: bool) -> Result<Value> {
             Ok(json!({ "checked_out": w.switch(branch)? }))
         }
         Op::Undo => Ok(json!(crate::stackundo::undo(w, None)?)),
+        Op::Merge { branch } => Ok(json!(w.merge_stack(&crate::stack::MergeOptions {
+            branch: Some(branch.clone()),
+            ..Default::default()
+        })?)),
         Op::Sync => {
             let s = w.sync(true, true, keep)?;
             if s.restack.conflict.is_some() {
@@ -643,6 +653,33 @@ pub fn edit_with(
         reason: None,
         result: Some(v),
     })
+}
+
+/// Refresh the PR checks and review of every local workspace's stack, so
+/// `workspace ls` and the review UI show them (the daemon's PR poller).
+/// Returns how many PRs were refreshed. Skips a workspace whose stack is
+/// locked by a command in progress.
+pub fn refresh_prs(cwd: &Path) -> Result<usize> {
+    let here = Window::open(cwd)?;
+    let mut n = 0;
+    for l in locals(&here)? {
+        let Ok(w) = Window::open(&l.path) else {
+            continue;
+        };
+        let open =
+            w.state.branches.iter().any(|b| {
+                b.pr.is_some() && !matches!(b.pr_state.as_deref(), Some("merged" | "closed"))
+            });
+        if !open {
+            continue;
+        }
+        let Ok(_lock) = lock(&l.git_dir) else {
+            continue;
+        };
+        let mut w = Window::open(&l.path)?;
+        n += w.refresh_prs(None)?.len();
+    }
+    Ok(n)
 }
 
 /// Apply the edits queued for the workspace containing `cwd`, oldest first.
@@ -815,6 +852,10 @@ pub struct PrRef {
     /// `open`, `draft`, `closed` or `merged`, as last seen; `None` if never
     /// looked up.
     pub state: Option<String>,
+    /// Checks and review as last fetched (`stack log --prs`, `stack merge`,
+    /// the daemon's PR poller).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<crate::stack::PrBrief>,
 }
 
 /// One branch of a workspace's stack: everything a graph row needs.
@@ -993,6 +1034,7 @@ pub fn list(cwd: &Path, space: Option<&Space>, remote: bool) -> Result<Workspace
                     pr: b.pr.map(|number| PrRef {
                         number,
                         state: tracked.and_then(|t| t.pr_state.clone()),
+                        status: tracked.and_then(|t| t.pr_status.clone()),
                     }),
                     attempt: link.as_ref().map(|l| l.0),
                     task: link.as_ref().and_then(|l| l.1),
@@ -1100,6 +1142,111 @@ pub fn publish(cwd: &Path) -> Result<Published> {
         commit,
         remote: w.state.remote.clone(),
     })
+}
+
+/// `agentvc stack get TARGET`: pick up a stack another machine published
+/// (`stack submit` / `workspace publish`) in the worktree at `cwd`. TARGET is
+/// a published workspace's id or name (its whole stack), or a branch in one
+/// (that branch's stack: the branches below and above it).
+pub fn get(cwd: &Path, target: &str) -> Result<(String, crate::stack::GetResult)> {
+    let mut w = Window::open(cwd)?;
+    if w.state.remote.is_empty() {
+        return Err(ws_err("no_remote", "this repo has no remote to fetch from"));
+    }
+    let spec = format!("+{PUBLISH_PREFIX}*:{REMOTE_PREFIX}*");
+    w.repo
+        .git(
+            &["fetch", "--quiet", "--prune", &w.state.remote, &spec],
+            None,
+        )
+        .map_err(|e| {
+            ws_err(
+                "no_remote",
+                format!("fetching published workspaces failed: {e}"),
+            )
+        })?;
+    let refs = w
+        .repo
+        .git(
+            &["for-each-ref", "--format=%(refname)", REMOTE_PREFIX],
+            None,
+        )
+        .unwrap_or_default();
+    let mut found: Vec<(Record, State, Vec<String>)> = Vec::new();
+    for r in refs.lines().filter(|l| !l.is_empty()) {
+        let show = |f: &str| w.repo.git(&["show", &format!("{r}:{f}")], None).ok();
+        let (Some(rec), Some(state)) = (
+            show("workspace.json").and_then(|t| serde_json::from_str::<Record>(&t).ok()),
+            show("stack.json").and_then(|t| serde_json::from_str::<State>(&t).ok()),
+        ) else {
+            continue;
+        };
+        let names: Vec<String> = if rec.id == target || rec.name == target {
+            state.branches.iter().map(|b| b.name.clone()).collect()
+        } else if state.branches.iter().any(|b| b.name == target) {
+            // The branch's stack: down to the trunk, and everything above.
+            let parent = |n: &str| {
+                state
+                    .branches
+                    .iter()
+                    .find(|b| b.name == n)
+                    .map(|b| b.parent.clone())
+            };
+            let mut root = target.to_string();
+            while let Some(p) =
+                parent(&root).filter(|p| state.branches.iter().any(|b| &b.name == p))
+            {
+                root = p;
+            }
+            let mut set = vec![root];
+            let mut i = 0;
+            while i < set.len() {
+                let kids: Vec<String> = state
+                    .branches
+                    .iter()
+                    .filter(|b| b.parent == set[i] && !set.contains(&b.name))
+                    .map(|b| b.name.clone())
+                    .collect();
+                set.extend(kids);
+                i += 1;
+            }
+            set
+        } else {
+            continue;
+        };
+        found.push((rec, state, names));
+    }
+    // This machine's own workspaces publish too: skip them unless nothing
+    // else matches (then `give` is the tool).
+    let mine: Vec<String> = locals(&w)?.into_iter().map(|l| l.record.id).collect();
+    let (remote_found, local_found): (Vec<_>, Vec<_>) = found
+        .into_iter()
+        .partition(|(r, _, _)| !mine.contains(&r.id));
+    let mut found = remote_found;
+    if found.is_empty() && !local_found.is_empty() {
+        return Err(ws_err_with(
+            "same_machine",
+            format!("{target} is in a workspace on this machine; hand it over with `agentvc stack give`"),
+            json!({ "target": target }),
+        ));
+    }
+    match found.len() {
+        0 => Err(ws_err_with(
+            "no_workspace",
+            format!("no published workspace or branch {target}; publish it with `agentvc stack submit` or `agentvc workspace publish` on that machine"),
+            json!({ "target": target }),
+        )),
+        1 => {
+            let (rec, state, names) = found.remove(0);
+            let r = w.get_published(&state, &names)?;
+            Ok((rec.id, r))
+        }
+        _ => Err(ws_err_with(
+            "ambiguous",
+            format!("{target} matches several published workspaces: {}; give a workspace id", found.iter().map(|f| f.0.id.clone()).collect::<Vec<_>>().join(", ")),
+            json!({ "workspaces": found.iter().map(|f| f.0.id.clone()).collect::<Vec<_>>() }),
+        )),
+    }
 }
 
 /// Fetch the published workspaces and list the ones not on this machine's
@@ -1217,6 +1364,7 @@ fn remote_branches(w: &Window, id: &str, s: &State, base: Option<&str>) -> Vec<W
                 pr: b.pr.map(|number| PrRef {
                     number,
                     state: b.pr_state.clone(),
+                    status: b.pr_status.clone(),
                 }),
                 attempt: None,
                 task: None,
@@ -2073,5 +2221,76 @@ mod tests {
                 ..
             })
         ));
+    }
+    #[test]
+    fn get_continues_a_published_stack_on_another_machine() {
+        let f = setup();
+        stack_with(&f.w1, &["g1", "g2"]);
+        git(&f.w1, &["push", "-q", "origin", "g1", "g2"]);
+        let p = publish(&f.w1).unwrap();
+        let root = f.w1.parent().unwrap().to_path_buf();
+        git(
+            &root,
+            &[
+                "clone",
+                "-q",
+                root.join("origin.git").to_str().unwrap(),
+                "laptop",
+            ],
+        );
+        let laptop = root.join("laptop");
+        git(&laptop, &["config", "user.name", "t"]);
+        git(&laptop, &["config", "user.email", "t@t"]);
+
+        // By branch: its whole stack comes along, parents as published.
+        let (ws, r) = get(&laptop, "g2").unwrap();
+        assert_eq!(ws, p.workspace);
+        let names: Vec<_> = r
+            .tracked
+            .iter()
+            .map(|t| (t.name.as_str(), t.parent.as_str()))
+            .collect();
+        assert_eq!(names, vec![("g1", "main"), ("g2", "g1")]);
+        assert_eq!(r.created, vec!["g1", "g2"]);
+        let w = Window::open(&laptop).unwrap();
+        assert_eq!(
+            w.branch_tip("g2"),
+            Window::open(&f.w1).unwrap().branch_tip("g2")
+        );
+        assert!(w
+            .log(false)
+            .unwrap()
+            .branches
+            .iter()
+            .all(|b| !b.needs_restack));
+
+        // The desktop pushes more; get again fast-forwards.
+        let mut d = Window::open(&f.w1).unwrap();
+        fs::write(f.w1.join("g2.txt"), "more\n").unwrap();
+        d.modify(None, true, false, false).unwrap();
+        git(&f.w1, &["push", "-q", "-f", "origin", "g2"]);
+        publish(&f.w1).unwrap();
+        // An amend there replaces the laptop's copy, which has no work of
+        // its own.
+        let (_, r) = get(&laptop, &p.workspace).unwrap();
+        assert_eq!(r.updated, vec!["g2"]);
+        assert_eq!(
+            Window::open(&laptop).unwrap().branch_tip("g2"),
+            Window::open(&f.w1).unwrap().branch_tip("g2")
+        );
+        // Work made on the laptop is never thrown away.
+        git(&laptop, &["switch", "-q", "g2"]);
+        fs::write(laptop.join("lap.txt"), "l\n").unwrap();
+        git(&laptop, &["add", "."]);
+        git(&laptop, &["commit", "-q", "-m", "laptop work"]);
+        fs::write(f.w1.join("g2.txt"), "again\n").unwrap();
+        d.modify(None, true, false, false).unwrap();
+        git(&f.w1, &["push", "-q", "-f", "origin", "g2"]);
+        publish(&f.w1).unwrap();
+        assert_eq!(get(&laptop, "g2").unwrap_err().code(), "branch_diverged");
+
+        // The same machine's own workspace: that is what `give` is for.
+        assert_eq!(get(&f.w2, "g1").unwrap_err().code(), "same_machine");
+        assert_eq!(get(&laptop, "nope").unwrap_err().code(), "no_workspace");
     }
 }

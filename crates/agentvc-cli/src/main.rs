@@ -925,6 +925,17 @@ struct Out {
     text: String,
 }
 
+/// What a restore left out of the other machine's settings (#97).
+fn dropped_note(dropped: &[String]) -> String {
+    if dropped.is_empty() {
+        return String::new();
+    }
+    format!(
+        "\nLeft out the settings of the machine that saved it: {}. Set your own with `agentvc config`",
+        dropped.join("; ")
+    )
+}
+
 fn main() -> ExitCode {
     // Windows gives the main thread 1 MiB of stack, which the parser and the
     // larger commands overflow in debug builds; run on a thread with room.
@@ -962,10 +973,13 @@ fn real_main() -> ExitCode {
             }
         }
         Err(e) => {
-            let (code, message, details) = match e.downcast_ref::<Error>() {
+            let (code, mut message, details) = match e.downcast_ref::<Error>() {
                 Some(ce) => (ce.code(), ce.to_string(), ce.details()),
                 None => ("error", format!("{e:#}"), None),
             };
+            if code == "disk_full" {
+                message = format!("{message}\n{}", agentvc_core::error::DISK_FULL_HINT);
+            }
             if as_json {
                 let mut err = json!({ "code": code, "message": message });
                 if let (Value::Object(m), Some(Value::Object(d))) = (&mut err, details) {
@@ -1152,6 +1166,7 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
                 list(&r.incomplete)
             );
         }
+        text += &dropped_note(&r.settings_dropped);
         return Ok(Out {
             text,
             json: json!({ "workdir": space.workdir(), "restore": r, "prepare": prepare }),
@@ -1180,7 +1195,7 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
         return Ok(Out {
             text: format!(
                 "Rebuilt space {} from {} ({}): {} tasks, {} attempts, {} snapshots\n\
-                 Views written for open attempts: {}",
+                 Views written for open attempts: {}{}",
                 r.space_id,
                 r.remote,
                 &r.commit[..12],
@@ -1191,7 +1206,8 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
                     "none".into()
                 } else {
                     views.join(", ")
-                }
+                },
+                dropped_note(&r.settings_dropped)
             ),
             json: json!({ "workdir": space.workdir(), "clone": r, "prepare": prepare }),
         });
@@ -2995,6 +3011,24 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
                 json: json!({ "pr": r }),
             };
             add_sync(&mut out, sync);
+            // Cloud sessions have a small disk allowance: once the PR is out,
+            // drop the views of closed attempts (their history stays, #100).
+            if std::env::var_os("CLAUDE_CODE_REMOTE").is_some() {
+                let opts = agentvc_core::gc::GcOptions {
+                    no_pack: true,
+                    keep_views_days: Some(0),
+                    ..Default::default()
+                };
+                if let Ok(g) = agentvc_core::gc::gc(&space, &opts) {
+                    if g.bytes_freed > 0 {
+                        out.text += &format!(
+                            "\nfreed {} MB of closed attempts' views (cloud session)",
+                            g.bytes_freed / 1_000_000
+                        );
+                    }
+                    out.json["gc"] = json!(g);
+                }
+            }
             out
         }
     })

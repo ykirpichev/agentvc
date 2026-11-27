@@ -818,3 +818,15 @@
   min-width: 0;
   text-overflow: ellipsis;
 }
+.bbadge-pr-bad {
+  color: #fff;
+  background: var(--conf);
+}
+.bbadge-pr-ok,
+.bbadge-pr-win {
+  color: var(--passed);
+  background: var(--passed-bg);
+}
+.bbadge-pr-run {
+  color: var(--accent-text);
+}

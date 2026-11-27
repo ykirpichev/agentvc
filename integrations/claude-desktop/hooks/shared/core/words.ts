@@ -2,7 +2,7 @@
 // Cursor, Claude Code) says the same thing. The UI speaks git and GitHub;
 // agentvc's own terms (attempt, promote, take) stay in the CLI and docs.
 
-import type { AgentSummary, Attempt, ConflictHunk, Status } from '../api/types'
+import type { AgentSummary, Attempt, ConflictHunk, PrBrief, Status } from '../api/types'
 import { actorName, count, money } from '../lib/format'
 
 export const WORDS = {
@@ -25,6 +25,7 @@ export const WORDS = {
   checkout: 'Check out',
   restack: 'Restack',
   resolve: 'Resolve conflicts',
+  merge: 'Merge',
 } as const
 
 /** One line under each action saying what it does, in plain words. */
@@ -43,7 +44,30 @@ export const HELP = {
   moveBranch: 'Moves this branch, with the branches above it, onto another branch or onto main. A clash stops the move here so you can settle it.',
   restack: 'Its parent changed. Replays this branch, and the branches above it, onto the parent\'s new tip.',
   resolve: 'Pick what each place should say, then continue.',
+  merge: (n: number) =>
+    n > 1
+      ? `Merges the ${n} pull requests up to this one on GitHub, bottom first. After each, the rest moves onto main; it stops when the next one's checks are still running.`
+      : 'Merges this pull request on GitHub and moves the branches above it onto main.',
 } as const
+
+/** A PR's state with a tone: `label` for sentences, `short` for the badge
+ * next to `#N` in the narrow branch tree. */
+export function prWords(
+  state: string | null,
+  st?: PrBrief | null,
+): { label: string; short: string; tone: 'ok' | 'bad' | 'run' | 'win' | 'mute' } | null {
+  if (state === 'merged') return { label: 'merged', short: 'merged', tone: 'win' }
+  if (state === 'closed') return { label: 'closed', short: 'closed', tone: 'mute' }
+  if (state === 'draft') return { label: 'draft', short: 'draft', tone: 'mute' }
+  if (!st) return null
+  if (st.checks === 'fail') return { label: 'checks fail', short: 'fails', tone: 'bad' }
+  if (st.review === 'changes_requested') return { label: 'changes requested', short: 'changes', tone: 'bad' }
+  if (st.mergeable === false) return { label: 'conflicts with its base', short: 'conflicts', tone: 'bad' }
+  if (st.checks === 'pending') return { label: 'checks running', short: 'running', tone: 'run' }
+  if (st.review === 'approved') return { label: 'approved', short: '✓ approved', tone: 'ok' }
+  if (st.checks === 'pass') return { label: 'checks pass', short: '✓', tone: 'ok' }
+  return null
+}
 
 /** How a version is named: who made it, e.g. `claude · opus`. */
 export function versionName(a: Pick<Attempt, 'actor' | 'model'>): string {

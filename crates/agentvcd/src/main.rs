@@ -36,6 +36,11 @@ struct Cli {
     /// Print machine-readable JSON instead of text.
     #[arg(long)]
     json: bool,
+    /// Fail in a git repository that has no agentvc space yet, instead of
+    /// creating one (`agentvc init --no-prepare`; under a second, git-ignored
+    /// files are skipped).
+    #[arg(long)]
+    no_init: bool,
     /// Reviewer name recorded on actions taken in the UI, as `human:<name>`.
     /// Defaults to `git config user.name`, then `$USER`.
     #[arg(long, value_name = "NAME")]
@@ -105,6 +110,7 @@ async fn main() -> ExitCode {
     let mut config = Config::new(&cli.dir);
     config.poll_interval = Duration::from_millis(cli.poll_ms.max(50));
     config.actor = reviewer(&cli.dir, cli.user);
+    config.init_if_missing = !cli.no_init;
     config.pr_poll = (cli.pr_poll_secs > 0).then(|| Duration::from_secs(cli.pr_poll_secs.max(30)));
 
     let cloud = match &cli.cloud {

@@ -528,10 +528,22 @@ export interface WsBranch {
   current: boolean
   depth: number
   children: string[]
-  pr: { number: number; state: string | null } | null
+  pr: { number: number; state: string | null; status?: PrBrief } | null
   attempt: number | null
   task: number | null
   status: string | null
+}
+
+/** A stack PR's checks and review as last fetched (`stack log --prs`, the daemon's poller). */
+export interface PrBrief {
+  checks: 'pass' | 'fail' | 'pending' | 'none'
+  failing?: string[]
+  review: 'approved' | 'changes_requested' | 'none'
+  unresolved: number
+  mergeable: boolean | null
+  mergeable_state?: string
+  head: string | null
+  at: number
 }
 
 export type WsOp =
@@ -541,6 +553,7 @@ export type WsOp =
   | { op: 'delete'; branch: string }
   | { op: 'checkout'; branch: string }
   | { op: 'undo' }
+  | { op: 'merge'; branch: string }
 
 export interface WsRequest {
   id: string
@@ -587,7 +600,7 @@ export interface WsEditOutcome {
   workspace: string
   reason?: string
   /** With `keep_conflicts`, a restack that stopped says where. */
-  result?: { conflict?: { branch: string; paths: string[] } | null }
+  result?: { conflict?: { branch: string; paths: string[] } | null; merged?: { branch: string; number: number }[]; stopped?: { branch: string; code: string; message: string } | null }
 }
 
 /** A restack stopped on a conflict in a workspace. Hunks are from the branch's side: `ours` is the branch. */
