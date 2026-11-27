@@ -731,7 +731,7 @@ pub fn edit_with(
 pub fn refresh_prs(cwd: &Path) -> Result<usize> {
     let here = Window::open(cwd)?;
     let mut n = 0;
-    for l in locals(&here)? {
+    for l in space_locals(&here)? {
         let Ok(w) = Window::open(&l.path) else {
             continue;
         };
@@ -788,7 +788,12 @@ pub fn drain_locked(cwd: &Path) -> Result<Vec<Request>> {
 /// Cancel a queued request, in whichever workspace of the repo holds it.
 pub fn cancel(cwd: &Path, request_id: &str) -> Result<Request> {
     let here = Window::open(cwd)?;
-    for (git_dir, _) in here.worktrees() {
+    let (_, sib) = crate::checkouts::space_and_siblings(&here);
+    let mut dirs = here.worktrees();
+    for (sw, _) in sibling_locals(&sib) {
+        dirs.extend(sw.worktrees());
+    }
+    for (git_dir, _) in dirs {
         let file = requests_dir(&git_dir).join(format!("{request_id}.json"));
         if !file.exists() {
             continue;
@@ -810,7 +815,7 @@ pub fn cancel(cwd: &Path, request_id: &str) -> Result<Request> {
     }
     Err(ws_err_with(
         "no_request",
-        format!("no request {request_id} in this repo's workspaces"),
+        format!("no request {request_id} in this space's workspaces"),
         json!({ "request_id": request_id }),
     ))
 }
@@ -835,12 +840,22 @@ pub struct Local {
     pub git_dir: PathBuf,
     pub path: PathBuf,
     pub kind: Kind,
+    /// The main worktree of the checkout (clone) it belongs to.
+    pub checkout: PathBuf,
+    /// It belongs to another checkout of the same space (#160), not to the
+    /// repo it was looked up from.
+    pub other_checkout: bool,
 }
 
 /// Every workspace of the repo `w` belongs to, records created as needed.
 pub fn locals(w: &Window) -> Result<Vec<Local>> {
     let mut out: Vec<Local> = Vec::new();
-    for (i, (git_dir, path)) in w.worktrees().into_iter().enumerate() {
+    let trees = w.worktrees();
+    let checkout = trees
+        .first()
+        .map(|(_, p)| p.clone())
+        .unwrap_or_else(|| w.path().to_path_buf());
+    for (i, (git_dir, path)) in trees.into_iter().enumerate() {
         let taken: Vec<String> = out.iter().map(|l| l.record.name.clone()).collect();
         let record = ensure_record(&git_dir, &path, &taken)?;
         out.push(Local {
@@ -848,20 +863,59 @@ pub fn locals(w: &Window) -> Result<Vec<Local>> {
             git_dir,
             path,
             kind: if i == 0 { Kind::Main } else { Kind::Worktree },
+            checkout: checkout.clone(),
+            other_checkout: false,
         });
     }
     Ok(out)
 }
 
-/// The local workspace `target` names: an id, a name, or a directory.
+/// The workspaces of the other checkouts on this machine in the same space
+/// as `w` (#160), each with the window of its checkout.
+fn sibling_locals(siblings: &[PathBuf]) -> Vec<(Window, Vec<Local>)> {
+    let mut out = Vec::new();
+    for p in siblings {
+        let Ok(sw) = Window::open(p) else { continue };
+        let Ok(mut ls) = locals(&sw) else { continue };
+        for l in &mut ls {
+            l.other_checkout = true;
+        }
+        out.push((sw, ls));
+    }
+    out
+}
+
+/// Every workspace of the space `w` belongs to on this machine: its own
+/// repo's first, then those of the other checkouts in its space (#160).
+pub fn space_locals(w: &Window) -> Result<Vec<Local>> {
+    let mut all = locals(w)?;
+    let (_, sib) = crate::checkouts::space_and_siblings(w);
+    for (_, ls) in sibling_locals(&sib) {
+        all.extend(ls);
+    }
+    Ok(all)
+}
+
+/// The workspace `target` names, in this repo or another checkout of its
+/// space on this machine: an id, a name, or a directory. This repo's
+/// workspaces win when a name is ambiguous.
 pub fn find_local(w: &Window, target: &str) -> Result<Local> {
-    let all = locals(w)?;
     let as_path = canon(Path::new(target));
-    all.iter()
-        .find(|l| l.record.id == target)
-        .or_else(|| all.iter().find(|l| l.record.name == target))
-        .or_else(|| all.iter().find(|l| canon(&l.path) == as_path))
-        .cloned()
+    let pick = |all: &[Local]| -> Option<Local> {
+        all.iter()
+            .find(|l| l.record.id == target)
+            .or_else(|| all.iter().find(|l| l.record.name == target))
+            .or_else(|| all.iter().find(|l| canon(&l.path) == as_path))
+            .cloned()
+    };
+    let own = locals(w)?;
+    let found = pick(&own).or_else(|| {
+        let (_, sib) = crate::checkouts::space_and_siblings(w);
+        sibling_locals(&sib)
+            .into_iter()
+            .find_map(|(_, ls)| pick(&ls))
+    });
+    found
         .ok_or_else(|| {
             let remote = w.repo.rev(&format!("{REMOTE_PREFIX}{target}")).is_some();
             if remote {
@@ -874,7 +928,7 @@ pub fn find_local(w: &Window, target: &str) -> Result<Local> {
                 ws_err_with(
                     "no_workspace",
                     format!(
-                        "no workspace {target} in this repo; `agentvc workspace ls` lists them"
+                        "no workspace {target} in this repo or its space; `agentvc workspace ls` lists them"
                     ),
                     json!({ "workspace": target }),
                 )
@@ -982,6 +1036,11 @@ pub struct WorkspaceInfo {
     pub branches: Vec<WsBranch>,
     /// Edits asked of it (queued ones and recent history).
     pub requests: Vec<Request>,
+    /// The main worktree of the checkout (clone) it belongs to (#160).
+    pub checkout: PathBuf,
+    /// It belongs to another checkout of this space on this machine.
+    #[serde(default)]
+    pub other_checkout: bool,
     /// How agents started here run (`agentvc workspace agents`).
     pub agent_settings: crate::agent::AgentSettings,
 }
@@ -989,6 +1048,9 @@ pub struct WorkspaceInfo {
 #[derive(Clone, Debug, Serialize)]
 pub struct WorkspaceList {
     pub here: Option<String>,
+    /// The space this checkout belongs to (#160): workspaces of every
+    /// checkout in it on this machine are listed.
+    pub space: Option<String>,
     pub workspaces: Vec<WorkspaceInfo>,
 }
 
@@ -1036,30 +1098,61 @@ fn unmerged_files(dir: &Path) -> usize {
 /// fetched and listed too.
 pub fn list(cwd: &Path, space: Option<&Space>, remote: bool) -> Result<WorkspaceList> {
     let here = Window::open(cwd)?;
-    let all = locals(&here)?;
+    let own = locals(&here)?;
+    let (space_name, sib) = crate::checkouts::space_and_siblings(&here);
+    let mut groups: Vec<(Vec<Local>, Option<&Space>)> = vec![(own.clone(), space)];
+    for (_, ls) in sibling_locals(&sib) {
+        groups.push((ls, None));
+    }
     let running: Vec<i64> = space
         .and_then(|s| s.runs(true).ok())
         .map(|r| r.into_iter().map(|r| r.attempt_id).collect())
         .unwrap_or_default();
-    // Branch -> owning workspace id, for parents in other workspaces.
-    let mut owner: HashMap<String, String> = HashMap::new();
-    for l in &all {
-        if let Ok(Some(s)) = read_state(&l.git_dir) {
-            for b in s.branches {
-                owner.insert(b.name, l.record.id.clone());
-            }
-        }
-    }
     let mut out = Vec::new();
     let mut here_id = None;
-    for l in &all {
+    for (all, space) in &groups {
+        let space = *space;
+        // Branch -> owning workspace id, for parents in other workspaces of
+        // the same checkout (branches do not cross clones).
+        let mut owner: HashMap<String, String> = HashMap::new();
+        for l in all {
+            if let Ok(Some(s)) = read_state(&l.git_dir) {
+                for b in s.branches {
+                    owner.insert(b.name, l.record.id.clone());
+                }
+            }
+        }
+        list_group(all, space, &running, &owner, &here, &mut here_id, &mut out)?;
+    }
+    if remote {
+        let mut rest = remote_workspaces(&here, &own)?;
+        rest.retain(|r| !out.iter().any(|o| o.id == r.id));
+        out.extend(rest);
+    }
+    Ok(WorkspaceList {
+        here: here_id,
+        space: space_name,
+        workspaces: out,
+    })
+}
+
+fn list_group(
+    all: &[Local],
+    space: Option<&Space>,
+    running: &[i64],
+    owner: &HashMap<String, String>,
+    here: &Window,
+    here_id: &mut Option<String>,
+    out: &mut Vec<WorkspaceInfo>,
+) -> Result<()> {
+    for l in all {
         let w = match Window::open(&l.path) {
             Ok(w) => w,
             Err(_) => continue,
         };
         let is_here = l.git_dir == here.git_dir;
         if is_here {
-            here_id = Some(l.record.id.clone());
+            *here_id = Some(l.record.id.clone());
         }
         let log = w.log(false)?;
         let base = log.base.clone();
@@ -1072,7 +1165,7 @@ pub fn list(cwd: &Path, space: Option<&Space>, remote: bool) -> Result<Workspace
             .branches
             .iter()
             .map(|b| {
-                let link = space.and_then(|s| attempt_link(s, &b.name, &running));
+                let link = space.and_then(|s| attempt_link(s, &b.name, running));
                 let behind = match (&b.tip, &base) {
                     (Some(t), Some(base)) => count(&w.repo, &format!("{t}..{base}")),
                     _ => 0,
@@ -1135,16 +1228,12 @@ pub fn list(cwd: &Path, space: Option<&Space>, remote: bool) -> Result<Workspace
             pending: log.pending.clone(),
             branches,
             requests: requests(&l.git_dir),
+            checkout: l.checkout.clone(),
+            other_checkout: l.other_checkout,
             agent_settings: w.state.agents.clone(),
         });
     }
-    if remote {
-        out.extend(remote_workspaces(&here, &all)?);
-    }
-    Ok(WorkspaceList {
-        here: here_id,
-        workspaces: out,
-    })
+    Ok(())
 }
 
 // ---- publishing -------------------------------------------------------------
@@ -1383,6 +1472,8 @@ fn remote_workspaces(w: &Window, locals: &[Local]) -> Result<Vec<WorkspaceInfo>>
             pending: None,
             branches,
             requests: Vec::new(),
+            checkout: rec.path.clone(),
+            other_checkout: false,
             agent_settings: state.map(|s| s.agents).unwrap_or_default(),
         });
     }
@@ -1464,6 +1555,19 @@ pub struct Fingerprints {
 /// `for-each-ref` plus a few small file reads per workspace.
 pub fn fingerprints(cwd: &Path) -> Result<Fingerprints> {
     let w = Window::open(cwd)?;
+    let mut out = Fingerprints::default();
+    let own = locals(&w)?;
+    fingerprint_checkout(&w, own, &mut out);
+    // The other checkouts of the space (#160), from the registry alone:
+    // this runs every poll.
+    let sib = crate::checkouts::registered_siblings(&w);
+    for (sw, ls) in sibling_locals(&sib) {
+        fingerprint_checkout(&sw, ls, &mut out);
+    }
+    Ok(out)
+}
+
+fn fingerprint_checkout(w: &Window, all: Vec<Local>, out: &mut Fingerprints) {
     let refs = w
         .repo
         .git(
@@ -1477,8 +1581,7 @@ pub fn fingerprints(cwd: &Path) -> Result<Fingerprints> {
         )
         .unwrap_or_default();
     let tips: HashMap<&str, &str> = refs.lines().filter_map(|l| l.split_once(' ')).collect();
-    let mut out = Fingerprints::default();
-    for l in locals(&w)? {
+    for l in all {
         let mut h = Sha1::new();
         let file = |p: PathBuf| fs::read(p).unwrap_or_default();
         h.update(file(state_path(&l.git_dir)));
@@ -1505,7 +1608,6 @@ pub fn fingerprints(cwd: &Path) -> Result<Fingerprints> {
                 .insert(r.id.clone(), (l.record.id.clone(), r.status, r.reason));
         }
     }
-    Ok(out)
 }
 
 // ---- one branch of a workspace ---------------------------------------------

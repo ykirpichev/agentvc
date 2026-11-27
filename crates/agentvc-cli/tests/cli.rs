@@ -2115,3 +2115,99 @@ fn annotate_and_check_show_up_in_show_and_log() {
     let text = String::from_utf8_lossy(&text.stdout).into_owned();
     assert!(text.contains("lint:fail tests:pass? $0.42"), "{text}");
 }
+
+/// `agentvc` with a private `$AGENTVC_HOME`, so the checkouts registry is
+/// the test's own.
+fn agentvc_home(home: &Path, dir: &Path, args: &[&str]) -> Value {
+    let out = Command::cargo_bin("agentvc")
+        .unwrap()
+        .env("AGENTVC_HOME", home)
+        .env("GIT_AUTHOR_NAME", "t")
+        .env("GIT_AUTHOR_EMAIL", "t@t")
+        .env("GIT_COMMITTER_NAME", "t")
+        .env("GIT_COMMITTER_EMAIL", "t@t")
+        .arg("--json")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .output()
+        .unwrap();
+    serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
+        panic!(
+            "bad json from {args:?}: {e}\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        )
+    })
+}
+
+#[test]
+fn clones_of_one_repo_share_a_space_of_workspaces() {
+    let tmp = tempdir();
+    let home = tmp.path().join("home");
+    let origin = tmp.path().join("origin.git");
+    git(
+        tmp.path(),
+        &["init", "--quiet", "--bare", "-b", "main", "origin.git"],
+    );
+    let seed = tmp.path().join("seed");
+    git(tmp.path(), &["clone", "--quiet", "origin.git", "seed"]);
+    fs::write(seed.join("README"), "hi\n").unwrap();
+    git(&seed, &["add", "-A"]);
+    git(&seed, &["commit", "--quiet", "-m", "init"]);
+    git(&seed, &["push", "--quiet", "origin", "HEAD:main"]);
+    let a = tmp.path().join("mono-1");
+    let b = tmp.path().join("mono-2");
+    for d in ["mono-1", "mono-2"] {
+        git(tmp.path(), &["clone", "--quiet", "origin.git", d]);
+    }
+    fs::write(a.join("a.txt"), "a\n").unwrap();
+    let r = agentvc_home(&home, &a, &["stack", "create", "feat-a", "-a", "-m", "a"]);
+    assert_eq!(r["ok"], true, "{r}");
+    fs::write(b.join("b.txt"), "b\n").unwrap();
+    let r = agentvc_home(&home, &b, &["stack", "create", "feat-b", "-a", "-m", "b"]);
+    assert_eq!(r["ok"], true, "{r}");
+
+    // Both checkouts join the space named after their remote.
+    let s = agentvc_home(&home, &b, &["workspace", "space"]);
+    let want = origin
+        .canonicalize()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    assert_eq!(s["space"], want.as_str(), "{s}");
+    assert_eq!(s["source"], "remote");
+    let l = agentvc_home(&home, &a, &["workspace", "ls"]);
+    assert_eq!(l["space"], want.as_str(), "{l}");
+    let ws = l["workspaces"].as_array().unwrap();
+    assert_eq!(ws.len(), 2, "{l}");
+    let (mine, theirs) = (&ws[0], &ws[1]);
+    assert_eq!(mine["here"], true);
+    assert_eq!(mine["other_checkout"], false);
+    assert_eq!(theirs["other_checkout"], true);
+    assert_eq!(theirs["name"], "mono-2");
+    assert_eq!(theirs["branches"][0]["name"], "feat-b");
+    let bid = theirs["id"].as_str().unwrap().to_string();
+
+    // Edits reach the other checkout's stack.
+    let r = agentvc_home(
+        &home,
+        &a,
+        &["stack", "rename", "feat-b", "feat-b2", "--workspace", &bid],
+    );
+    assert_eq!(r["ok"], true, "{r}");
+    assert_eq!(git(&b, &["branch", "--show-current"]), "feat-b2");
+
+    // Branches do not cross clones.
+    let r = agentvc_home(&home, &a, &["stack", "give", "feat-a", "--to", &bid]);
+    assert_eq!(r["error"]["code"], "other_checkout", "{r}");
+
+    // A checkout can leave for a space of its own.
+    let s = agentvc_home(&home, &b, &["workspace", "space", "solo"]);
+    assert_eq!(s["space"], "solo");
+    assert_eq!(s["source"], "config");
+    let l = agentvc_home(&home, &a, &["workspace", "ls"]);
+    assert_eq!(l["workspaces"].as_array().unwrap().len(), 1, "{l}");
+    let s = agentvc_home(&home, &b, &["workspace", "space", "--reset"]);
+    assert_eq!(s["checkouts"].as_array().unwrap().len(), 1, "{s}");
+}

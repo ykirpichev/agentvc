@@ -590,12 +590,18 @@ export interface WorkspaceInfo {
   pending: { branch: string; onto: string } | null
   branches: WsBranch[]
   requests: WsRequest[]
+  /** Main worktree of the checkout (clone) it belongs to. */
+  checkout: string
+  /** In another checkout (folder) of this space on this machine. */
+  other_checkout: boolean
   /** How agents started here run; empty fields fall back to the repo's defaults. */
   agent_settings?: AgentSettings
 }
 
 export interface WorkspaceList {
   here: string | null
+  /** The space this checkout belongs to: every checkout of it on this machine is listed. */
+  space: string | null
   workspaces: WorkspaceInfo[]
 }
 

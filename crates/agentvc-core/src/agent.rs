@@ -433,6 +433,32 @@ fn root_of(cwd: &Path) -> Result<PathBuf> {
     Ok(agents_root(&Window::open(cwd)?.common_dir))
 }
 
+/// The repo agent `a` works in: its workspace's, which can be another
+/// checkout of the space than `cwd`'s (#160).
+fn agent_window(cwd: &Path, a: &Agent) -> Result<Window> {
+    let here = Window::open(cwd)?;
+    match workspace::find_local(&here, &a.workspace) {
+        Ok(l) if l.other_checkout => Window::open(&l.path),
+        _ => Ok(here),
+    }
+}
+
+/// The agent stores of every checkout in the space of `w` on this machine
+/// (#160): its own first.
+fn space_roots(w: &Window) -> Vec<PathBuf> {
+    let mut out = vec![agents_root(&w.common_dir)];
+    let (_, sib) = crate::checkouts::space_and_siblings(w);
+    for p in sib {
+        if let Ok(sw) = Window::open(&p) {
+            let r = agents_root(&sw.common_dir);
+            if !out.contains(&r) {
+                out.push(r);
+            }
+        }
+    }
+    out
+}
+
 fn read_agent(dir: &Path) -> Result<Agent> {
     let path = dir.join(RECORD);
     let text = fs::read_to_string(&path).at(&path)?;
@@ -544,30 +570,49 @@ fn parse_agent_id(id: &str) -> Result<u64> {
 }
 
 /// The directory of agent `id` in the repo containing `cwd`.
+/// The directory of agent `id` in the repo containing `cwd`, or in another
+/// checkout of its space on this machine (#160).
 pub fn agent_dir(cwd: &Path, id: &str) -> Result<PathBuf> {
     let n = parse_agent_id(id)?;
-    let dir = root_of(cwd)?.join(format!("ag{n}"));
-    if !dir.join(RECORD).exists() {
-        return Err(Error::NotFound {
+    let own = root_of(cwd)?.join(format!("ag{n}"));
+    if own.join(RECORD).exists() {
+        return Ok(own);
+    }
+    let w = Window::open(cwd)?;
+    space_roots(&w)
+        .into_iter()
+        .map(|r| r.join(format!("ag{n}")))
+        .find(|d| d.join(RECORD).exists())
+        .ok_or_else(|| Error::NotFound {
             kind: "agent",
             id: format!("ag{n}"),
-        });
-    }
-    Ok(dir)
+        })
 }
 
-fn new_agent_dir(root: &Path) -> Result<(String, PathBuf)> {
+/// A new agent directory in `root`, numbered past every agent in `roots`
+/// too, so ids stay unique across the checkouts of a space.
+fn new_agent_dir(root: &Path, roots: &[PathBuf]) -> Result<(String, PathBuf)> {
     fs::create_dir_all(root).at(root)?;
-    let mut n = fs::read_dir(root)
-        .at(root)?
-        .flatten()
-        .filter_map(|e| {
-            e.file_name()
-                .to_str()?
-                .strip_prefix("ag")?
-                .parse::<u64>()
-                .ok()
-        })
+    let highest = |r: &Path| -> u64 {
+        fs::read_dir(r)
+            .map(|rd| {
+                rd.flatten()
+                    .filter_map(|e| {
+                        e.file_name()
+                            .to_str()?
+                            .strip_prefix("ag")?
+                            .parse::<u64>()
+                            .ok()
+                    })
+                    .max()
+                    .unwrap_or(0)
+            })
+            .unwrap_or(0)
+    };
+    let mut n = roots
+        .iter()
+        .map(|r| highest(r))
+        .chain([highest(root)])
         .max()
         .unwrap_or(0);
     loop {
@@ -866,7 +911,7 @@ pub fn start(cwd: &Path, req: &StartRequest) -> Result<Agent> {
     }
 
     let root = agents_root(&w.common_dir);
-    let (id, dir) = new_agent_dir(&root)?;
+    let (id, dir) = new_agent_dir(&root, &space_roots(&here))?;
     let title = title_of(prompt);
     let branch = match req.mode {
         Mode::Revise => format!("agentvc/{id}"),
@@ -1063,10 +1108,10 @@ pub struct AgentList {
 /// Every agent of the repo containing `cwd`.
 pub fn list(cwd: &Path, all: bool) -> Result<AgentList> {
     let w = Window::open(cwd)?;
-    let root = agents_root(&w.common_dir);
+    let roots = space_roots(&w);
     let here = workspace::machine();
     let mut windows: std::collections::HashMap<String, Option<Window>> = Default::default();
-    let locals = workspace::locals(&w).unwrap_or_default();
+    let locals = workspace::space_locals(&w).unwrap_or_default();
     let mut tips = |a: &Agent| -> Option<String> {
         let win = windows.entry(a.workspace.clone()).or_insert_with(|| {
             locals
@@ -1081,12 +1126,18 @@ pub fn list(cwd: &Path, all: bool) -> Result<AgentList> {
             win.branch_tip(&a.start.branch)
         }
     };
-    let mut agents = Vec::new();
-    if let Ok(rd) = fs::read_dir(&root) {
+    let mut agents: Vec<Agent> = Vec::new();
+    for root in &roots {
+        let Ok(rd) = fs::read_dir(root) else { continue };
         for e in rd.flatten() {
             let dir = e.path();
             let Ok(a) = read_agent(&dir) else { continue };
             if !all && a.state.is_closed() {
+                continue;
+            }
+            // Agents made before checkouts shared a space can share an id;
+            // this checkout's own win.
+            if agents.iter().any(|x| x.id == a.id) {
                 continue;
             }
             agents.push(refresh(&dir, a, &here, &mut tips));
@@ -1405,7 +1456,7 @@ pub fn land(cwd: &Path, id: &str) -> Result<(Agent, EditOutcome)> {
             json!({ "state": a.state }),
         ));
     }
-    let w = Window::open(cwd)?;
+    let w = agent_window(cwd, &a)?;
     let tip = w.branch_tip(&a.branch).ok_or_else(|| {
         agent_err(
             "no_branch",
@@ -1475,7 +1526,7 @@ pub fn discard(cwd: &Path, id: &str) -> Result<Agent> {
     if a.state.is_active() {
         let _ = stop(cwd, id);
     }
-    let w = Window::open(cwd)?;
+    let w = agent_window(cwd, &a)?;
     remove_worktree(&w, &a);
     let _ = w.repo.git(&["branch", "-D", &a.branch], None);
     update(&dir, |a| {

@@ -775,7 +775,21 @@ fn dispatch(cwd: &Path, cmd: StackCmd) -> anyhow::Result<(Value, String)> {
             let to = if path.is_dir() {
                 path
             } else {
-                workspace::find_local(&w, &to.to_string_lossy())?.path
+                let l = workspace::find_local(&w, &to.to_string_lossy())?;
+                if l.other_checkout {
+                    // Branches do not cross clones (#160).
+                    return Err(agentvc_core::Error::Stack {
+                        code: "other_checkout",
+                        message: format!(
+                            "workspace {} is in another checkout ({}); push the branch and `agentvc stack get` it there",
+                            l.record.name,
+                            l.checkout.display()
+                        ),
+                        details: None,
+                    }
+                    .into());
+                }
+                l.path
             };
             // The receiving stack is changed too: hold its lock.
             let other = Window::open(&to)?;

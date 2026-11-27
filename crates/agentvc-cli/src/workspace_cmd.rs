@@ -3,6 +3,7 @@
 
 use std::path::Path;
 
+use agentvc_core::checkouts;
 use agentvc_core::stack::Window;
 use agentvc_core::workspace::{self, Activity, Kind, RequestStatus, WorkspaceInfo};
 use agentvc_core::Space;
@@ -73,6 +74,17 @@ pub enum WorkspaceCmd {
     /// Push this workspace's record and stack as refs/agentvc/workspaces/<id>
     /// so other machines list it (`ls --remote`).
     Publish,
+    /// Show or set the space this checkout belongs to. Checkouts (clones)
+    /// of one space on this machine list and edit each other's workspaces.
+    /// By default the space is the remote's URL, so clones of one repo join
+    /// it on their own.
+    Space {
+        /// The space's name; `none` joins no space.
+        name: Option<String>,
+        /// Go back to the default (the remote's URL).
+        #[arg(long, conflicts_with = "name")]
+        reset: bool,
+    },
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -170,14 +182,58 @@ fn ws_text(w: &WorkspaceInfo) -> String {
     t
 }
 
+/// `agentvc workspace space`: the checkout's space and the checkouts in it.
+fn space_cmd(cwd: &Path, name: Option<String>, reset: bool) -> anyhow::Result<(Value, String)> {
+    let w = Window::open(cwd)?;
+    if reset {
+        checkouts::set_space(&w, None)?;
+    } else if let Some(n) = &name {
+        checkouts::set_space(&w, Some(n))?;
+    }
+    let (space, source) = checkouts::space_of(&w);
+    let (_, siblings) = checkouts::space_and_siblings(&w);
+    let me = checkouts::main_path(&w);
+    let text = match &space {
+        Some(s) => {
+            let mut t = format!(
+                "space {s} ({})\n  * {}\n",
+                match source {
+                    checkouts::Source::Config => "set here",
+                    _ => "from the remote's URL",
+                },
+                me.display()
+            );
+            for p in &siblings {
+                t += &format!("    {}\n", p.display());
+            }
+            t
+        }
+        None => "this checkout joins no space; `agentvc workspace space NAME` joins one\n".into(),
+    };
+    Ok((
+        json!({ "space": space, "source": source, "checkout": me, "checkouts": siblings }),
+        text,
+    ))
+}
+
 pub fn run(cwd: &Path, cmd: WorkspaceCmd) -> anyhow::Result<(Value, String)> {
     Ok(match cmd {
         WorkspaceCmd::Ls { remote } => {
             let space = Space::discover(cwd).ok();
             let l = workspace::list(cwd, space.as_ref(), remote)?;
-            let text = l.workspaces.iter().map(ws_text).collect::<String>();
+            let mut text = String::new();
+            let mut last: Option<&Path> = None;
+            let several = l.workspaces.iter().any(|w| w.other_checkout);
+            for w in &l.workspaces {
+                if several && w.kind != Kind::Remote && last != Some(w.checkout.as_path()) {
+                    text += &format!("checkout {}\n", w.checkout.display());
+                    last = Some(w.checkout.as_path());
+                }
+                text += &ws_text(w);
+            }
             (json!(l), text)
         }
+        WorkspaceCmd::Space { name, reset } => space_cmd(cwd, name, reset)?,
         WorkspaceCmd::Name { name } => {
             let r = workspace::set_name(cwd, &name)?;
             let text = format!("this workspace is {} ({})", r.name, r.id);

@@ -136,6 +136,11 @@ async fn main() -> ExitCode {
         Ok(s) => s,
         Err(e) => return fail(cli.json, e.code(), e.to_string()),
     };
+    // Join this checkout's space (#160), so the other checkouts of it on this
+    // machine show up here and this one in theirs.
+    let space_name = agentvc_core::stack::Window::open(state.workdir())
+        .ok()
+        .and_then(|w| agentvc_core::checkouts::register(&w));
     let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, cli.port));
     let listener = match tokio::net::TcpListener::bind(addr).await {
         Ok(l) => l,
@@ -146,7 +151,7 @@ async fn main() -> ExitCode {
     if cli.json {
         println!(
             "{}",
-            json!({ "ok": true, "url": url, "workdir": state.workdir(), "actor": state.actor(), "cloud": cli.cloud })
+            json!({ "ok": true, "url": url, "workdir": state.workdir(), "actor": state.actor(), "space": space_name, "cloud": cli.cloud })
         );
     } else {
         println!(

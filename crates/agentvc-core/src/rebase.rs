@@ -278,10 +278,24 @@ impl Space {
         let Ok(repo) = HostRepo::open(self.workdir()) else {
             return Ok(None);
         };
-        let Ok(tree) = repo.git(
-            &["rev-parse", "--verify", "-q", &format!("{commit}^{{tree}}")],
-            None,
-        ) else {
+        let tree_of = |r: &HostRepo| -> Option<String> {
+            r.git(
+                &["rev-parse", "--verify", "-q", &format!("{commit}^{{tree}}")],
+                None,
+            )
+            .ok()
+        };
+        // A commit of another checkout of this space (#160) is not in this
+        // repo: read it from there.
+        let own = tree_of(&repo);
+        let found = own.map(|t| (repo, t)).or_else(|| {
+            let w = crate::stack::Window::open(self.workdir()).ok()?;
+            crate::checkouts::registered_siblings(&w)
+                .into_iter()
+                .filter_map(|p| HostRepo::open(&p).ok())
+                .find_map(|r| tree_of(&r).map(|t| (r, t)))
+        });
+        let Some((repo, tree)) = found else {
             return Ok(None);
         };
         let mut git = CatFile::start(&repo)?;
