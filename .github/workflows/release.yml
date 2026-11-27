@@ -3,8 +3,8 @@ name: Release
 # One release of everything a person needs to use agentvc day to day:
 #
 # - agentvc + agentvcd (review UI built in) for macOS, Linux and Windows,
-# - the VS Code / Cursor extension (.vsix, also published to Open VSX for
-#   Cursor and VSCodium; the VS Code Marketplace when VSCE_PAT works),
+# - the VS Code / Cursor extension (.vsix; published to Open VSX and the
+#   VS Code Marketplace only when the run asks for it),
 # - the Claude Code plugins as zips (they also install straight from this
 #   repository's plugin marketplace).
 #
@@ -18,6 +18,10 @@ on:
       version:
         description: "Version to release, e.g. 0.2.0"
         required: true
+      publish_extension:
+        description: "Also publish the .vsix to Open VSX / the VS Code Marketplace"
+        type: boolean
+        default: false
   push:
     tags: ["v*"]
 
@@ -139,7 +143,10 @@ jobs:
           gh release upload "$tag" dist/* --clobber
 
   publish-extension:
-    # After the release exists, so a registry failure never blocks it.
+    # Opt-in (the run's publish_extension box): for now the extension is
+    # installed from the release's .vsix only. After the release exists, so a
+    # registry failure never blocks it.
+    if: ${{ inputs.publish_extension == true }}
     needs: [release]
     runs-on: ubuntu-latest
     steps:
