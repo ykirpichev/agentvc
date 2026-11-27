@@ -158,6 +158,20 @@ impl Server {
             Err(tools::BadArgs(msg)) => failure("bad_args", &msg),
         };
         let is_error = out.get("ok") != Some(&Value::Bool(true));
+        if name == "approve" {
+            // Claude Code's permission prompt tool contract: one text block
+            // holding the decision, nothing else. When asking failed, deny.
+            let decision = out.get("decision").cloned().unwrap_or_else(|| {
+                let why = out
+                    .pointer("/error/message")
+                    .and_then(Value::as_str)
+                    .unwrap_or("agentvc could not ask the person");
+                json!({ "behavior": "deny", "message": why })
+            });
+            return Ok(json!({
+                "content": [{ "type": "text", "text": decision.to_string() }],
+            }));
+        }
         Ok(json!({
             "content": [{ "type": "text", "text": out.to_string() }],
             "structuredContent": out,
@@ -347,6 +361,21 @@ mod tests {
             json!({"jsonrpc":"2.0","id":2,"method":"initialize","params":{"protocolVersion":"1999-01-01"}}),
         );
         assert_eq!(r["result"]["protocolVersion"], PROTOCOL_VERSIONS[0]);
+    }
+
+    #[test]
+    fn approve_answers_with_one_decision_block() {
+        // The agentvc binary is missing here, so asking fails: deny.
+        let s = server();
+        let r = call(
+            &s,
+            json!({"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"approve","arguments":{"tool_name":"Bash","input":{"command":"ls"},"tool_use_id":"t1"}}}),
+        );
+        let content = r["result"]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 1);
+        assert!(r["result"].get("structuredContent").is_none());
+        let d: Value = serde_json::from_str(content[0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(d["behavior"], "deny");
     }
 
     #[test]

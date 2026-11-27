@@ -356,6 +356,20 @@ pub enum Op {
     /// Push every branch of the stack and open or update one PR per branch
     /// (`agentvc stack submit --all`).
     Submit,
+    /// Track an existing branch as a child of `parent` (an agent's result
+    /// landing as a new branch).
+    Adopt {
+        branch: String,
+        parent: String,
+    },
+    /// Move `branch` from `base` to `commit`, a descendant of it, and
+    /// restack the branches above (an agent's result landing as a new
+    /// version of `branch`).
+    Revise {
+        branch: String,
+        commit: String,
+        base: String,
+    },
 }
 
 impl Op {
@@ -365,7 +379,9 @@ impl Op {
             | Op::Rename { branch, .. }
             | Op::Delete { branch }
             | Op::Checkout { branch }
-            | Op::Merge { branch } => Some(branch),
+            | Op::Merge { branch }
+            | Op::Adopt { branch, .. }
+            | Op::Revise { branch, .. } => Some(branch),
             Op::Restack { branch } => branch.as_deref(),
             Op::Sync | Op::Undo | Op::Submit => None,
         }
@@ -384,6 +400,10 @@ impl Op {
             Op::Undo => "undo".into(),
             Op::Merge { branch } => format!("merge --branch {branch}"),
             Op::Submit => "submit --all".into(),
+            Op::Adopt { branch, parent } => format!("adopt {branch} --parent {parent}"),
+            Op::Revise { branch, commit, .. } => {
+                format!("revise {branch} --to {}", &commit[..commit.len().min(10)])
+            }
         }
     }
 }
@@ -531,6 +551,47 @@ fn run_op(w: &mut Window, op: &Op, keep: bool) -> Result<Value> {
             all: true,
             ..Default::default()
         })?)),
+        Op::Adopt { branch, parent } => Ok(json!(w.adopt(branch, Some(parent), false)?)),
+        Op::Revise {
+            branch,
+            commit,
+            base,
+        } => {
+            w.settle()?;
+            if !w.tracks(branch) {
+                return Err(ws_err_with(
+                    "not_in_stack",
+                    format!("branch {branch} is not in this workspace's stack"),
+                    json!({ "branch": branch }),
+                ));
+            }
+            let tip = w.branch_tip(branch).ok_or_else(|| {
+                ws_err_with(
+                    "no_branch",
+                    format!("branch {branch} is gone"),
+                    json!({ "branch": branch }),
+                )
+            })?;
+            if tip != *base {
+                return Err(ws_err_with(
+                    "branch_moved",
+                    format!("{branch} changed since the agent started; start a new agent from it or land as a new branch"),
+                    json!({ "branch": branch, "tip": tip, "base": base }),
+                ));
+            }
+            if w.current_branch().as_deref() == Some(branch.as_str()) {
+                w.repo
+                    .git(&["merge", "--ff-only", "--quiet", commit], None)?;
+            } else {
+                w.repo.git(
+                    &["update-ref", &format!("refs/heads/{branch}"), commit, &tip],
+                    None,
+                )?;
+            }
+            let mut scope = w.upstack(branch);
+            scope.remove(branch);
+            restacked(w.restack(Some(&scope), keep)?)
+        }
         Op::Sync => {
             let s = w.sync(true, true, keep)?;
             if s.restack.conflict.is_some() {

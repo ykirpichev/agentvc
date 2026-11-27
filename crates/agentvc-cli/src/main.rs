@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use std::process::{ExitCode, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
+mod agent_cmd;
 mod stack_cmd;
 mod workspace_cmd;
 
@@ -204,6 +205,13 @@ enum Cmd {
     /// until its agent stops).
     #[command(subcommand)]
     Workspace(workspace_cmd::WorkspaceCmd),
+    /// Coding agents started on a workspace's stack: start one on a branch
+    /// with a prompt, see which need you, answer, review and land them.
+    #[command(subcommand)]
+    Agent(agent_cmd::AgentCmd),
+    /// Supervise one agent turn (started by `agent start` and `agent reply`).
+    #[command(hide = true)]
+    AgentWorker { dir: PathBuf },
     /// Conflict tools: see how resolution strategies handle real conflicts.
     #[command(subcommand)]
     Conflicts(ConflictsCmd),
@@ -1306,6 +1314,18 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
         let (json, text) = workspace_cmd::run(&cwd, c)?;
         return Ok(Out { json, text });
     }
+    if let Cmd::Agent(c) = cli.cmd {
+        let (json, text) = agent_cmd::run(&cwd, c)?;
+        return Ok(Out { json, text });
+    }
+    if let Cmd::AgentWorker { dir } = cli.cmd {
+        let a = agentvc_core::agent::work(&dir, &std::env::current_exe()?)?;
+        let text = format!("{}: {}", a.id, agent_cmd::state_word(a.state));
+        return Ok(Out {
+            json: json!({ "agent": a }),
+            text,
+        });
+    }
     let space = Space::discover(&cwd)?;
     let current = || -> anyhow::Result<i64> { Ok(space.attempt_for_path(&cwd)?.id) };
 
@@ -1426,7 +1446,9 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
         | Cmd::Import { .. }
         | Cmd::Restack { .. }
         | Cmd::Stack(_)
-        | Cmd::Workspace(_) => unreachable!(),
+        | Cmd::Workspace(_)
+        | Cmd::Agent(_)
+        | Cmd::AgentWorker { .. } => unreachable!(),
         Cmd::GitHook { event: _ } => {
             let r = space.record_git_commit(&cwd)?;
             Out {

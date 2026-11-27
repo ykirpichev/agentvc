@@ -1,6 +1,7 @@
 //! Core of agentvc: the store, the task/attempt/snapshot model and
 //! copy-on-write views. See `docs/design.md`.
 
+pub mod agent;
 pub mod annotate;
 pub mod blame;
 pub mod bridge;

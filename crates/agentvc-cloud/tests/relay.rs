@@ -181,6 +181,7 @@ fn daemon(dir: &std::path::Path, url: &str, token: &str, read_only: bool) -> age
             url: url.into(),
             token: token.into(),
             read_only,
+            allow_agents: false,
         },
     );
     st
