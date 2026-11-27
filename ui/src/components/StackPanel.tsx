@@ -12,7 +12,8 @@ import { useResource } from '../api/useResource'
 import { thisWorkspace } from '../core/embed'
 import { canMoveBranch } from '../core/graph'
 import { branchLink, selectionFromPath, taskLink, useGo } from '../core/links'
-import { mainAhead, needsSync, stackRows, trunkName, windowState } from '../core/stack'
+import { mainAhead, needsSync, stackGraph, trunkName, windowState } from '../core/stack'
+import { LANE, StackLines } from './StackLines'
 import { prWords, shortSha } from '../core/words'
 import { plural } from '../lib/format'
 import { BRANCH_MIME, useStackEdit } from './stackEdit'
@@ -134,7 +135,8 @@ function WindowStack({
   const sel = selectionFromPath(useLocation().pathname)
   const live = useMemo(() => w.branches.filter((b) => !merged(b)), [w])
   const gone = w.branches.length - live.length
-  const rows = useMemo(() => stackRows({ branches: live }), [live])
+  const g = useMemo(() => stackGraph({ branches: live }), [live])
+  const rows = g.rows
   const readOnly = w.kind === 'remote'
   const stopped = w.pending !== null || w.branches.some((b) => b.conflicts > 0)
   const ahead = mainAhead(w)
@@ -219,13 +221,12 @@ function WindowStack({
       ) : null}
       {w.state === 'agent_running' && <div className="sp-note">An agent is working here; changes wait until it stops.</div>}
 
-      <div className="sp-rows" role="tree" aria-label={`${w.name} branches`}>
+      <div className="sp-rows" role="tree" aria-label={`${w.name} branches`} style={{ ['--gutter' as string]: `${g.lanes * LANE}px` }}>
 
-        {rows.map(({ branch: b, lane }) => (
+        {rows.map(({ branch: b }) => (
           <BranchRow
             key={b.name}
             b={b}
-            lane={lane}
             tries={b.task !== null ? (tries.get(b.task) ?? 0) : 0}
             onTries={() => b.task !== null && go(taskLink(b.task))}
             movable={!readOnly && !stopped}
@@ -249,12 +250,11 @@ function WindowStack({
         ))}
         {(rows.length > 0 || w.base) && (
           <div className={`sp-row sp-trunk ${over === w.trunk ? 'drop' : ''}`} {...dropOn(w.trunk)} title={w.base ? `${w.base_ref} · ${shortSha(w.base)}` : w.base_ref}>
-            <span className="sp-gutter" aria-hidden>
-              <i className="sp-dot sp-dot-trunk" />
-            </span>
+            <span className="sp-gutter" aria-hidden />
             <span className="sp-name">{trunk}</span>
           </div>
         )}
+        {(rows.length > 0 || w.base) && <StackLines g={g} rowH={28} dot={(i) => `${rows[i]!.branch.current ? 'cur' : ''} ${rows[i]!.branch.conflicts > 0 ? 'bad' : ''}`} />}
       </div>
 
       {gone > 0 && <div className="sp-note">{`${gone} merged branch${gone === 1 ? '' : 'es'} hidden. Sync drops ${gone === 1 ? 'it' : 'them'}.`}</div>}
@@ -295,7 +295,6 @@ function WindowStack({
 
 function BranchRow({
   b,
-  lane,
   tries,
   onTries,
   movable,
@@ -309,7 +308,6 @@ function BranchRow({
   onCheckout,
 }: {
   b: WsBranch
-  lane: number
   /** Agent tries for the task this branch was made from; a chip when there are several. */
   tries: number
   onTries: () => void
@@ -329,7 +327,6 @@ function BranchRow({
       role="treeitem"
       aria-selected={selected}
       className={`sp-row ${b.current ? 'cur' : ''} ${selected ? 'sel' : ''} ${dragging ? 'dragging' : ''} ${over ? 'drop' : ''}`}
-      style={{ paddingLeft: `${8 + lane * 16}px` }}
       draggable={movable}
       onDragStart={onDragStart}
       onDragEnd={onDragEnd}
@@ -338,9 +335,7 @@ function BranchRow({
       {...drop}
       title={`${b.name} · ${plural(b.commits, 'commit')} on ${b.parent}\nClick to open · double-click to check out · drag onto a branch or main to move`}
     >
-      <span className="sp-gutter" aria-hidden>
-        <i className={`sp-dot ${b.current ? 'sp-dot-cur' : ''} ${b.conflicts > 0 ? 'sp-dot-bad' : ''}`} />
-      </span>
+      <span className="sp-gutter" aria-hidden />
       <span className="sp-name">
         {b.name}
         {b.current && <span className="sp-sub">you're here</span>}
