@@ -6,7 +6,8 @@ import { api } from '../api/client'
 import type { WorkspaceInfo } from '../api/types'
 import { useResource } from '../api/useResource'
 import { branchLink } from '../core/links'
-import { mainAhead, stackRows, trunkName, windowState } from '../core/stack'
+import { mainAhead, stackGraph, trunkName, windowState } from '../core/stack'
+import { LANE, StackLines } from './StackLines'
 import { prWords } from '../core/words'
 import './stack.css'
 
@@ -29,7 +30,8 @@ export function WorkspacesOverview() {
 
 function Card({ w }: { w: WorkspaceInfo }) {
   const live = w.branches.filter((b) => b.pr?.state !== 'merged')
-  const rows = stackRows({ branches: live })
+  const g = stackGraph({ branches: live })
+  const rows = g.rows
   const st = windowState(w)
   const ahead = mainAhead(w)
   return (
@@ -44,13 +46,14 @@ function Card({ w }: { w: WorkspaceInfo }) {
       {rows.length === 0 ? (
         <p className="muted wo-none">No unmerged branches.</p>
       ) : (
-        <ol className="wo-stack">
-          {rows.map(({ branch: b, lane }) => {
+        <ol className="wo-stack" style={{ ['--gutter' as string]: `${g.lanes * LANE}px` }}>
+          <StackLines g={g} rowH={30} dot={(i) => `${rows[i]!.branch.current ? 'cur' : ''} ${rows[i]!.branch.conflicts > 0 ? 'bad' : ''}`} />
+          {rows.map(({ branch: b }) => {
             const pr = b.pr ? prWords(b.pr.state, b.pr.status) : null
             return (
-              <li key={b.name} style={{ paddingLeft: `${lane * 14}px` }}>
+              <li key={b.name}>
                 <Link to={branchLink(w.id, b.name)} className={`wo-branch ${b.current ? 'cur' : ''}`}>
-                  <i className={`sp-dot ${b.current ? 'sp-dot-cur' : ''} ${b.conflicts > 0 ? 'sp-dot-bad' : ''}`} />
+                  <span className="wo-gutter" aria-hidden />
                   <span className="sp-name">{b.name}</span>
                   <span className="muted wo-meta">
                     {b.commits} commit{b.commits === 1 ? '' : 's'}
@@ -68,7 +71,7 @@ function Card({ w }: { w: WorkspaceInfo }) {
             )
           })}
           <li className="wo-trunk">
-            <i className="sp-dot sp-dot-trunk" />
+            <span className="wo-gutter" aria-hidden />
             <span className="sp-name">{trunkName(w)}</span>
             {ahead > 0 && (
               <span className="sp-warn wo-meta">

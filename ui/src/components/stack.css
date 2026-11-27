@@ -561,5 +561,72 @@
   white-space: nowrap;
 }
 .wo-branch .sp-name {
-  flex: 0 1 auto;
+  flex: none;
+}
+
+/* ---- stack lines (StackLines) ---- */
+.sp-rows,
+.wo-stack {
+  position: relative;
+}
+.sl {
+  position: absolute;
+  top: 0;
+  pointer-events: none;
+  overflow: visible;
+}
+.sp-rows > .sl {
+  left: 13px;
+}
+.wo-stack > .sl {
+  left: 6px;
+}
+.sl-line {
+  fill: none;
+  stroke: var(--line);
+  stroke-width: 2;
+}
+.sl-dot {
+  fill: var(--surface);
+  stroke: var(--muted);
+  stroke-width: 2;
+}
+.sl-dot.cur {
+  fill: var(--accent);
+  stroke: var(--accent);
+}
+.sl-dot.bad {
+  stroke: var(--failed);
+}
+.sl-dot.cur.bad {
+  fill: var(--failed);
+}
+.sl-trunk {
+  fill: var(--trunk);
+}
+.sp-rows > .sp-row {
+  height: 28px;
+  min-height: 0;
+  box-sizing: border-box;
+}
+.wo-stack > li {
+  height: 30px;
+}
+.wo-stack .wo-branch,
+.wo-stack .wo-trunk {
+  height: 30px;
+  box-sizing: border-box;
+}
+.sp-rows > .sp-row {
+  grid-template-columns: var(--gutter, 14px) minmax(0, 1fr) auto;
+}
+.sp-rows > .sp-row .sp-gutter::before {
+  display: none;
+}
+.wo-gutter {
+  flex: none;
+  width: var(--gutter, 14px);
+}
+.wo-stack {
+  gap: 0;
 }
