@@ -445,6 +445,29 @@
   color: var(--conf);
   background: var(--promoted-bg);
 }
+.rv-facts {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.rv-facts-line {
+  margin: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  font-size: 13px;
+}
+.rv-facts-path {
+  font-size: 12px;
+}
+.rv-note {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-2);
+  max-width: 80ch;
+  white-space: pre-wrap;
+}
 .rv-prompt {
   margin: 0;
   color: var(--text-2);

@@ -101,6 +101,8 @@ pub(crate) const UID_TABLES: &[&str] = &[
     "runs",
     "exports",
     "git_bases",
+    "annotations",
+    "checks",
     "operations",
 ];
 
@@ -116,6 +118,10 @@ const REFS: &[(&str, &str, &str)] = &[
     ("exports", "snapshot_id", "snapshots"),
     ("git_bases", "attempt_id", "attempts"),
     ("git_bases", "snapshot_id", "snapshots"),
+    ("annotations", "attempt_id", "attempts"),
+    ("checks", "attempt_id", "attempts"),
+    ("checks", "snapshot_id", "snapshots"),
+    ("checks", "reused_from", "checks"),
 ];
 
 /// Columns that describe this machine, not the space: never compared.

@@ -166,6 +166,31 @@ in its metadata; a3 is not touched and can still be abandoned later. The PR body
 lists a3 under **Contributors**. In the review UI, Compare shows "Take into aN" on each
 changed file of the other columns (aN is the focused column); the MCP tool is `take`.
 
+### Test results and agent metadata (#10, #11, #103)
+
+`agentvc check aN -- <cmd>` snapshots the view, runs the command there and records the
+result on that snapshot: pass or fail, exit code, duration, test counts (from cargo test
+or pytest output, or `--junit 'target/**/*.xml'`) and the last 40 lines of output (the
+whole log stays in `.agentvc/checks/cN.log`). An open attempt is marked passed or failed
+(`--no-mark` leaves it); a promoted one keeps its status. The same tree and command reuse
+the earlier result, from any attempt (`cached`), unless `--force`. `--name lint` records
+other checks next to `tests`. `agentvc run --check` records its check the same way.
+
+A result belongs to a tree. When the attempt changes afterwards (an edit, a review fix, a
+`rebase` onto a newer main), `show`, the PR body and the review UI call it stale ("Tests
+passed before the latest changes"), so run the check again on the rebased head before
+`pr`. That works on a promoted attempt.
+
+`agentvc annotate aN --model m --cost-usd 0.42 --tokens-in N --tokens-out N --note "..."
+--transcript path|url` records what the agent cost and said. Each call adds a row; `show`,
+`log` and the PR body sum cost and tokens. Claude Code runs record tokens and the
+transcript path by themselves at the end of each turn (Stop hook), and
+`claude -p --output-format json` adds the cost. The model shows in the PR body, so in
+this repository use a family name such as `opus`, not a version. The MCP tools are `annotate` and `check`.
+
+`agentvc log` shows both after each attempt (`tests:pass $0.42`, `?` when stale), and
+`log --meta tests=pass` filters on recorded checks.
+
 ### Asking the history: filtered log and blame (#73)
 
 `agentvc log` takes filters that combine with AND and then prints flat rows (`--json`:
@@ -205,7 +230,9 @@ thread goes idle. Use your thread's own push branch wherever `<branch>` appears.
      with `--settings` itself, since cloud sessions ignore `settings.local.json` (#57).
    - your own edits: `agentvc fork --task tN --actor agent:claude-code` (or `--from aN` to
      continue a winner), then edit only under `$(agentvc path aN)`, run builds and tests
-     there, and `agentvc snapshot aN --meta tests=pass` after each step that works.
+     there, and `agentvc check aN -- cargo test --workspace` after each step that works
+     (it snapshots, runs the tests and records the result; see "Test results and agent
+     metadata" below).
    - git works inside views (see "Git inside a view" below): `git status`, `git diff`,
      `git log`, `git blame`, pre-commit hooks and IDE git panels. A `git commit` there is
      fine too; it is recorded as a snapshot. Never `git push` from a view: ship with `agentvc pr`.
@@ -216,7 +243,8 @@ thread goes idle. Use your thread's own push branch wherever `<branch>` appears.
 5. **Ship:** once per thread, `agentvc config pr.branch <branch>` and add any required
    commit trailers with `agentvc config pr.trailer "Key: value" --add`. Then
    `agentvc promote aX`, `agentvc rebase aX` (always, it's a no-op when main hasn't moved),
-   `agentvc pr aX`. Run fmt, clippy and tests in the view first. `GITHUB_TOKEN` is set in
+   `agentvc check aX -- cargo test --workspace` (a rebase makes the old result stale),
+   `agentvc pr aX`. Run fmt and clippy in the view first. `GITHUB_TOKEN` is set in
    cloud sessions. Exporting to the branch checked out in the main checkout (the usual case
    in a thread) moves that checkout along; no detach or `--force` needed.
 6. **PR body:** keep agentvc's generated body; put required attribution lines and your

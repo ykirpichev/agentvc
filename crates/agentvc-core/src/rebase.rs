@@ -1129,7 +1129,8 @@ pub fn rebase(space: &Space, attempt_id: i64, opts: &RebaseOptions) -> Result<Re
         insert_snapshot(space, attempt_id, &current, "pre-rebase", None)?;
     }
     let mut meta = serde_json::json!({ "onto": onto, "onto_ref": onto_ref, "from": from });
-    if keep {
+    // Only conflicts that were left (#103): a clean rebase has none.
+    if keep && !merge.conflicts.is_empty() {
         meta["conflicts"] = serde_json::json!(merge.conflicts);
     }
     if !resolved.is_empty() {

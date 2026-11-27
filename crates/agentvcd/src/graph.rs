@@ -57,6 +57,26 @@ struct GraphAttempt {
     /// version (`rebase --onto aN`).
     #[serde(skip_serializing_if = "Option::is_none")]
     stacked_on: Option<StackedOn>,
+    /// The latest recorded test result (`agentvc check`, or `run --check`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tests: Option<TestsRef>,
+    /// Model, cost, tokens, notes and transcripts (`agentvc annotate`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    agent: Option<agentvc_core::annotate::AgentSummary>,
+}
+
+#[derive(Serialize)]
+struct TestsRef {
+    /// The check's name, usually `tests`.
+    name: String,
+    passed: bool,
+    /// Recorded on an older state than the version's latest (e.g. before a
+    /// rebase): run it again.
+    stale: bool,
+    /// The snapshot it ran on.
+    snapshot: i64,
+    /// `pass · 120 passed · 2m 03s`.
+    summary: String,
 }
 
 #[derive(Serialize)]
@@ -82,8 +102,23 @@ async fn graph(State(st): State<AppState>) -> ApiResult<Graph> {
 fn build(s: &Space) -> agentvc_core::Result<Graph> {
     let upstream = s.upstream_branch().unwrap_or_else(|| "HEAD".to_string());
 
+    let mut checks = s.all_check_status()?;
+    let mut agents = s.agent_summaries()?;
     let mut attempts = Vec::new();
     for attempt in s.attempts(None)? {
+        // `tests` when there is one, else the newest check of any name.
+        let tests = checks.remove(&attempt.id).and_then(|mut by| {
+            by.remove(agentvc_core::check::DEFAULT_NAME)
+                .or_else(|| by.into_values().max_by_key(|c| c.check.id))
+                .map(|c| TestsRef {
+                    summary: c.check.line(),
+                    name: c.check.name,
+                    passed: c.check.passed,
+                    stale: c.stale,
+                    snapshot: c.check.snapshot_id,
+                })
+        });
+        let agent = agents.remove(&attempt.id);
         let head = match s.head_snapshot(attempt.id) {
             Ok(h) => Some(h),
             Err(Error::NotFound { .. }) => None,
@@ -121,6 +156,8 @@ fn build(s: &Space) -> agentvc_core::Result<Graph> {
             conflicts,
             pr,
             stacked_on: None,
+            tests,
+            agent,
         });
     }
 

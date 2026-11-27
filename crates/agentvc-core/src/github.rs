@@ -168,6 +168,30 @@ fn attempt_meta(space: &Space, attempt: i64) -> Result<BTreeMap<String, String>>
             }
         }
     }
+    // Recorded checks (#11) win over hand-written `tests=` metadata, and say
+    // when they were run on an older tree (e.g. before a rebase, #103).
+    for (name, st) in space.check_status(attempt)? {
+        meta.insert(name, st.text());
+    }
+    // Agent metadata (#10).
+    let agent = space.agent_summary(attempt)?;
+    if let Some(c) = agent.cost_usd {
+        meta.insert("cost".into(), crate::annotate::format_cost(c));
+    }
+    if let (Some(i), Some(o)) = (agent.tokens_in, agent.tokens_out) {
+        meta.insert(
+            "tokens".into(),
+            format!(
+                "{} in / {} out",
+                crate::annotate::format_count(i),
+                crate::annotate::format_count(o)
+            ),
+        );
+    }
+    if !agent.notes.is_empty() {
+        let notes: Vec<&str> = agent.notes.iter().map(|n| n.text.as_str()).collect();
+        meta.insert("notes".into(), notes.join("; "));
+    }
     Ok(meta)
 }
 
@@ -1069,6 +1093,82 @@ mod tests {
             "main",
         );
         assert_eq!(e.code(), "git");
+    }
+
+    #[test]
+    fn pr_body_reads_checks_and_annotations() {
+        use crate::space::ForkRequest;
+
+        let tmp = crate::testutil::tempdir();
+        std::fs::write(tmp.path().join("main.rs"), "fn main() {}\n").unwrap();
+        let space = Space::init(tmp.path()).unwrap();
+        let task = space.create_task("t", None).unwrap();
+        let id = space
+            .fork(&ForkRequest {
+                task_id: Some(task.id),
+                actor: "agent".into(),
+                ..Default::default()
+            })
+            .unwrap()
+            .attempt
+            .id;
+        space
+            .annotate(
+                id,
+                &crate::annotate::AnnotateRequest {
+                    actor: "agent".into(),
+                    cost_usd: Some(1.5),
+                    tokens_in: Some(20_000),
+                    tokens_out: Some(1500),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let opts = crate::check::CheckOptions {
+            actor: "agent".into(),
+            name: "tests".into(),
+            command: "echo 'test result: ok. 9 passed; 0 failed; 0 ignored'".into(),
+            junit: vec![],
+            force: false,
+            mark: true,
+        };
+        space.run_check(id, &opts).unwrap();
+        space.set_status(id, Status::Promoted, None).unwrap();
+        let body = |space: &Space| {
+            let snap = space.head_snapshot(id).unwrap();
+            let exp = ExportResult {
+                export_id: 1,
+                attempt: id,
+                snapshot: snap.clone(),
+                branch: "agentvc/test".into(),
+                commit: "0123456789abcdef".into(),
+                parent: None,
+                tree: snap.tree.clone(),
+                replaced: None,
+                checkout_updated: false,
+                objects_copied: 0,
+                hooks: vec![],
+                story: Vec::new(),
+            };
+            pr_body(space, &space.attempt(id).unwrap(), &exp).unwrap()
+        };
+        let b = body(&space);
+        assert!(b.contains("- Tests: pass · 9 passed · "), "{b}");
+        assert!(b.contains("- Cost: $1.50"), "{b}");
+        assert!(b.contains("- tokens: 20k in / 1.5k out"), "{b}");
+
+        // A promoted attempt that changed (a rebase, a review fix) says its
+        // result is stale, and can be checked again (#103).
+        // (Promote unmounts an overlay view; it comes back on use.)
+        let a = space.attempt(id).unwrap();
+        space.ensure_view(&a).unwrap();
+        std::fs::write(a.view_path.join("main.rs"), "fn main() { x() }\n").unwrap();
+        space.snapshot(id, "rebase", None).unwrap();
+        let b = body(&space);
+        assert!(b.contains("before the latest changes (stale)"), "{b}");
+        let r = space.run_check(id, &opts).unwrap();
+        assert!(!r.cached && r.status == Status::Promoted);
+        assert!(!body(&space).contains("stale"));
     }
 
     #[test]

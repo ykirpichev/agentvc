@@ -2008,3 +2008,110 @@ fn pr_refresh_brings_checks_reviews_comments_and_the_merge_back() {
     assert_eq!(v["refreshed"], serde_json::json!([]));
     PR_MERGED.store(false, std::sync::atomic::Ordering::SeqCst);
 }
+
+#[test]
+fn annotate_and_check_show_up_in_show_and_log() {
+    let tmp = tempdir();
+    let w = tmp.path();
+    fs::write(w.join("a.txt"), "one\n").unwrap();
+    agentvc(w, &["init"]);
+    agentvc(w, &["task", "new", "demo"]);
+    let v = agentvc(w, &["fork", "--task", "t1", "--actor", "agent:claude"]);
+    let view = v["fork"]["attempt"]["view_path"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // From inside the view the agent records as itself.
+    let v = agentvc(
+        Path::new(&view),
+        &[
+            "annotate",
+            "--model",
+            "opus",
+            "--cost-usd",
+            "0.3",
+            "--tokens-in",
+            "1000",
+            "--tokens-out",
+            "200",
+            "--note",
+            "first pass",
+        ],
+    );
+    assert_eq!(v["annotation"]["actor"], "agent:claude");
+    agentvc(
+        w,
+        &[
+            "annotate",
+            "a2",
+            "--cost-usd",
+            "0.12",
+            "--transcript",
+            "https://example.com/t/1",
+        ],
+    );
+    let v = agentvc(w, &["annotate", "a2"]);
+    assert_eq!(v["error"]["code"], "bad_annotation");
+
+    let v = agentvc(
+        w,
+        &[
+            "check",
+            "a2",
+            "--",
+            "echo",
+            "test result: ok. 7 passed; 0 failed; 0 ignored",
+        ],
+    );
+    assert_eq!(v["check"]["passed"], true, "{v}");
+    assert_eq!(v["check"]["tests"]["passed"], 7);
+    assert_eq!(v["status"], "passed");
+    assert_eq!(v["cached"], false);
+    let v = agentvc(
+        w,
+        &[
+            "check",
+            "a2",
+            "--",
+            "echo",
+            "test result: ok. 7 passed; 0 failed; 0 ignored",
+        ],
+    );
+    assert_eq!(v["cached"], true);
+
+    let v = agentvc(w, &["show", "a2"]);
+    assert!((v["agent"]["cost_usd"].as_f64().unwrap() - 0.42).abs() < 1e-9);
+    assert_eq!(v["agent"]["tokens_in"], 1000);
+    assert_eq!(v["agent"]["notes"][0]["text"], "first pass");
+    assert_eq!(v["agent"]["transcripts"][0], "https://example.com/t/1");
+    assert_eq!(v["attempt"]["model"], "opus");
+    assert_eq!(v["checks"][0]["stale"], false);
+
+    // A check result is metadata for `log`: `--meta tests=pass`.
+    let v = agentvc(w, &["log", "--meta", "tests=pass"]);
+    assert_eq!(v["rows"][0]["id"], 2);
+    assert!((v["rows"][0]["cost_usd"].as_f64().unwrap() - 0.42).abs() < 1e-9);
+
+    // After a change, the result is stale until checked again.
+    fs::write(Path::new(&view).join("a.txt"), "two\n").unwrap();
+    agentvc(w, &["snapshot", "a2"]);
+    let v = agentvc(w, &["show", "a2"]);
+    assert_eq!(v["checks"][0]["stale"], true);
+    let v = agentvc(
+        w,
+        &["check", "a2", "--name", "lint", "--no-mark", "--", "exit 3"],
+    );
+    assert_eq!(v["check"]["exit_code"], 3);
+    assert_eq!(v["status"], "passed");
+
+    let text = Command::cargo_bin("agentvc")
+        .unwrap()
+        .arg("-C")
+        .arg(w)
+        .args(["log"])
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&text.stdout).into_owned();
+    assert!(text.contains("lint:fail tests:pass? $0.42"), "{text}");
+}

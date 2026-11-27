@@ -190,6 +190,24 @@ export interface CheckResult {
   passed: boolean
   exit_code: number | null
   snapshot: number
+  /** The check's name (`tests` unless named otherwise); absent for old run checks. */
+  name?: string
+  /** Recorded on an older state than the version's latest (e.g. before an update from main). */
+  stale?: boolean
+  /** `pass · 120 passed · 2m 03s`. */
+  summary?: string
+}
+
+/** What `agentvc annotate` (and the Claude Code hooks) recorded about the agent. */
+export interface AgentSummary {
+  models: string[]
+  cost_usd: number | null
+  tokens_in: number | null
+  tokens_out: number | null
+  notes: { text: string; actor: string; created_at: Timestamp }[]
+  /** Paths or URLs. */
+  transcripts: string[]
+  annotations: number
 }
 
 export interface AttemptStats {
@@ -204,6 +222,7 @@ export interface AttemptStats {
   run_ms: number | null
   summary: string | null
   last_activity: Timestamp
+  agent?: AgentSummary
 }
 
 export type InboxReason = 'ready_to_pick' | 'failed' | 'checks_failed' | 'changes_requested'
@@ -429,6 +448,10 @@ export interface GraphAttempt {
   pr: { number: number; url: string; state: 'open' | 'closed' | 'merged' | null } | null
   /** Stacked onto another version: that version and the snapshot of it this one is on. */
   stacked_on?: { attempt: number; snapshot: number }
+  /** The latest recorded test result (`agentvc check`, or `run --check`). */
+  tests?: { name: string; passed: boolean; stale: boolean; snapshot: number; summary: string }
+  /** Model, cost, tokens, notes and transcripts (`agentvc annotate`). */
+  agent?: AgentSummary
 }
 
 export interface Graph {

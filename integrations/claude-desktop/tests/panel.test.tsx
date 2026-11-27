@@ -128,6 +128,33 @@ test('pressing a version shows its actions, each with what it does, and its diff
   await ui.unmount()
 })
 
+test('a version shows its recorded tests, cost and notes', async ($, on) => {
+  const clock = mock.clock(on)
+  engine(on)
+  const base = FIXTURE['/api/graph'] as { attempts: { attempt: { id: number } }[] }
+  const graph = {
+    ...base,
+    attempts: base.attempts.map(g =>
+      g.attempt.id === 2
+        ? {
+            ...g,
+            tests: { name: 'tests', passed: true, stale: true, snapshot: 3, summary: 'pass · 12 passed · 3s' },
+            agent: { models: [], cost_usd: 0.42, tokens_in: 120000, tokens_out: 8000, notes: [{ text: 'tried the easy fix first', actor: 'agent:claude', created_at: 1 }], transcripts: [], annotations: 2 },
+          }
+        : g,
+    ),
+  }
+  daemon(on, { gets: { '/api/graph': graph } })
+  await $.session.start({ cwd: HERE, surface: 'desktop', isInteractive: true })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await ui.press({ key: rowKey.version(2) })
+  await clock.settle()
+  expect(await ui.find({ type: 'Text', text: 'Tests passed before the latest changes · $0.42 · 128k tokens' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'tried the easy fix first' })).toBeDefined()
+  await ui.unmount()
+})
+
 test('Rebase onto… picks a target by press, previews, then rebases', async ($, on) => {
   const clock = mock.clock(on)
   const toasts = engine(on)

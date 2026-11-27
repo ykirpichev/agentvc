@@ -66,6 +66,8 @@ pub(crate) const TABLES: &[&str] = &[
     "git_bases",
     "story_changes",
     "conflicts",
+    "annotations",
+    "checks",
     "operations",
 ];
 /// Metadata keys that describe this machine's sync state, not the space.
@@ -1006,6 +1008,31 @@ mod tests {
         space
             .snapshot(win.id, "manual", Some(json!({ "tests": "pass" })))
             .unwrap();
+        // Agent metadata and test results travel too (#10, #11).
+        space
+            .annotate(
+                win.id,
+                &crate::annotate::AnnotateRequest {
+                    actor: "agent:a".into(),
+                    cost_usd: Some(0.5),
+                    note: Some("fast".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        space
+            .run_check(
+                win.id,
+                &crate::check::CheckOptions {
+                    actor: "agent:a".into(),
+                    name: "tests".into(),
+                    command: "true".into(),
+                    junit: vec![],
+                    force: false,
+                    mark: false,
+                },
+            )
+            .unwrap();
         // Tags travel with the space (#74).
         space
             .create_tag(
@@ -1045,7 +1072,22 @@ mod tests {
             .iter()
             .map(|a| serde_json::to_value(space.snapshots(a.id).unwrap()).unwrap())
             .collect();
-        json!({ "tasks": space.tasks().unwrap(), "attempts": attempts, "snapshots": snaps })
+        let mut checks = serde_json::to_value(space.all_check_status().unwrap()).unwrap();
+        for by_name in checks.as_object_mut().unwrap().values_mut() {
+            for c in by_name.as_object_mut().unwrap().values_mut() {
+                c.as_object_mut().unwrap().remove("id");
+            }
+        }
+        let mut agents = serde_json::to_value(space.agent_summaries().unwrap()).unwrap();
+        for a in agents.as_object_mut().unwrap().values_mut() {
+            a["notes"].as_array_mut().unwrap().iter_mut().for_each(|n| {
+                n.as_object_mut().unwrap().remove("created_at");
+            });
+        }
+        json!({
+            "tasks": space.tasks().unwrap(), "attempts": attempts, "snapshots": snaps,
+            "checks": checks, "agents": agents,
+        })
     }
 
     #[test]
