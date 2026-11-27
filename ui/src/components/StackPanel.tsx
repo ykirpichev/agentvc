@@ -55,14 +55,17 @@ export function StackPanel({ tasks }: { tasks: TaskSummary[] | undefined }) {
     list.find((w) => w.branches.length > 0) ??
     list[0]
   const others = list.filter((w) => w !== shown && (w.branches.length > 0 || w.pending || w.state === 'agent_running'))
-  const work = (tasks ?? []).filter((t) => t.attempts.total - t.attempts.abandoned > 0 && t.attempts.promoted === 0)
+  // Tasks whose tries belong to a branch show on that branch; the rest are listed below.
+  const onBranch = new Set(list.flatMap((w) => w.branches.map((b) => b.task).filter((t): t is number => t !== null)))
+  const tries = new Map((tasks ?? []).map((t) => [t.id, t.attempts.total - t.attempts.abandoned]))
+  const work = (tasks ?? []).filter((t) => !onBranch.has(t.id) && t.attempts.total - t.attempts.abandoned > 0 && t.attempts.promoted === 0)
 
   if (ws.error && !work.length) return <div className="sp sp-empty muted">No stacks here: {ws.error.message}</div>
   if (!ws.data && !ws.error) return <div className="sp sp-empty muted">Loading…</div>
 
   return (
     <div className="sp">
-      {shown && <WindowStack w={shown} mine={shown === here} windows={list} onPick={pick} />}
+      {shown && <WindowStack w={shown} mine={shown === here} windows={list} tries={tries} onPick={pick} />}
 
       {others.length > 0 && (
         <section className="sp-sec" aria-label="Other windows">
@@ -114,11 +117,14 @@ function WindowStack({
   w,
   mine,
   windows,
+  tries,
   onPick,
 }: {
   w: WorkspaceInfo
   mine: boolean
   windows: WorkspaceInfo[]
+  /** Open tries per task, for the "N tries" chip on a branch made from one. */
+  tries: Map<number, number>
   onPick: (id: string) => void
 }) {
   const go = useGo()
@@ -220,6 +226,8 @@ function WindowStack({
             key={b.name}
             b={b}
             lane={lane}
+            tries={b.task !== null ? (tries.get(b.task) ?? 0) : 0}
+            onTries={() => b.task !== null && go(taskLink(b.task))}
             movable={!readOnly && !stopped}
             selected={sel?.kind === 'branch' && sel.workspace === w.id && sel.name === b.name}
             dragging={drag === b.name}
@@ -285,6 +293,8 @@ function WindowStack({
 function BranchRow({
   b,
   lane,
+  tries,
+  onTries,
   movable,
   selected,
   dragging,
@@ -297,6 +307,9 @@ function BranchRow({
 }: {
   b: WsBranch
   lane: number
+  /** Agent tries for the task this branch was made from; a chip when there are several. */
+  tries: number
+  onTries: () => void
   movable: boolean
   selected: boolean
   dragging: boolean
@@ -331,6 +344,19 @@ function BranchRow({
       </span>
       <span className="sp-chips">
         {b.status === 'running' && <span className="sp-chip sp-chip-run">agent</span>}
+        {tries > 1 && (
+          <button
+            type="button"
+            className="sp-chip sp-chip-pr sp-chip-btn"
+            title="Compare the agent tries for this branch"
+            onClick={(e) => {
+              e.stopPropagation()
+              onTries()
+            }}
+          >
+            {tries} tries
+          </button>
+        )}
         {b.conflicts > 0 && <span className="sp-chip sp-chip-bad">clash</span>}
         {b.parent_kind === 'other_window' && <span className="sp-chip sp-chip-mute">on {b.parent_workspace ?? 'another window'}</span>}
         {b.pr && (

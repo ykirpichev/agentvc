@@ -36,15 +36,18 @@ and *Your change*; Continue carries on, Cancel puts every branch back.
 stack change, and every change's toast has Undo too. Click a branch to open
 it, double-click to check it out, drag it onto another branch or onto main to
 move it. Under the stack, **Other windows** lists each other window in one
-line, and **Agent work** lists tasks whose agent versions are still open.
+line, and **Agent work** lists tasks whose agent tries are still open; a task
+made into a branch shows as an **N tries** chip on that branch instead. There
+are no tabs: Ctrl+K jumps anywhere, including **Find** (search and blame).
 
 A branch page shows where it sits, its PR state, **Check out**, **Merge** (the
 PRs up to it) and **More** (move onto, rename, delete), then its commits and
 diff. `src/core/stack.ts` orders and summarizes a stack for every surface.
 
-Tasks and their versions (`/review/t/N`, `/review/v/N`) keep their pages:
-*Choose this version*, *Update from main*, *Open PR*, *Discard*, conflicts
-and the changed files.
+A task (`/review/t/N`) lists its agent **tries**, each named by the first
+line of what it did, with **Use this** on each, and the two best side by side
+(view only). A try (`/review/v/N`) keeps *Use this*, *Update from main*,
+*Open PR*, *Discard*, its conflicts and changed files. `/live` redirects home.
 
 The UI speaks git and GitHub (version, choose, update from main, open PR);
 `src/core/words.ts` keeps those words in one place, `src/core/graph.ts` lays
@@ -71,7 +74,7 @@ shows it in its review tab; the host can send `agentvc.navigate` and
 | `src/components/` | Shell, command palette, shortcut overlay, diff view, shared bits |
 | `src/core/` | Shared by every surface: words, graph layout, next step, links |
 | `src/pages/Review.tsx` | The review screen's panes (home, task, version, main commit) |
-| `src/pages/` | Inbox, Tasks, Task (attempt tree), Compare (2 to 4 attempts side by side), Attempt (file diffs), Live |
+| `src/pages/` | Review (home, task tries, try), BranchReview (a stack branch), Compare (2 to 4 tries side by side), Attempt (file diffs), Find |
 | `src/lib/align.ts` | Patience line diff and the multi-way alignment behind Compare |
 | `src/components/ReviewActions.tsx` | Pick winner, abandon and mark, with their dialogs |
 

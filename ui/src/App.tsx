@@ -5,7 +5,6 @@ import { Shell } from './components/Shell'
 import { AttemptPage } from './pages/AttemptPage'
 import { Compare } from './pages/Compare'
 import { Find } from './pages/Find'
-import { Live } from './pages/Live'
 import { CommitReview, ReviewHome, TaskReview, VersionReview } from './pages/Review'
 
 export function App() {
@@ -24,7 +23,7 @@ export function App() {
         <Route path="tasks/:id" element={<ToTaskReview />} />
         <Route path="attempts/:id" element={<AttemptPage />} />
         <Route path="compare" element={<Compare />} />
-        <Route path="live" element={<Live />} />
+        <Route path="live" element={<Navigate to="/review" replace />} />
         <Route path="find" element={<Find />} />
         <Route
           path="*"
