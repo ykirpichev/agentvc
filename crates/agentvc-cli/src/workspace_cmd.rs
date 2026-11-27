@@ -74,15 +74,55 @@ pub enum WorkspaceCmd {
     /// Push this workspace's record and stack as refs/agentvc/workspaces/<id>
     /// so other machines list it (`ls --remote`).
     Publish,
-    /// Show or set the space this checkout belongs to. Checkouts (clones)
-    /// of one space on this machine list and edit each other's workspaces.
-    /// By default the space is the remote's URL, so clones of one repo join
-    /// it on their own.
+    /// Make a new workspace in this space: a worktree of this checkout, or
+    /// with --clone a fresh clone (own folder, own build) that joins the
+    /// same space. Says which space it joined.
+    New {
+        /// Folder for it; must not exist or be empty.
+        folder: std::path::PathBuf,
+        /// Its name (unique in the space). Defaults to the folder's name.
+        #[arg(long)]
+        name: Option<String>,
+        /// Clone the remote into the folder instead of adding a worktree.
+        #[arg(long)]
+        clone: bool,
+    },
+    /// Same as `agentvc space join`: show or set the space this checkout
+    /// belongs to.
+    #[command(hide = true)]
     Space {
         /// The space's name; `none` joins no space.
         name: Option<String>,
         /// Go back to the default (the remote's URL).
         #[arg(long, conflicts_with = "name")]
+        reset: bool,
+    },
+}
+
+/// `agentvc space`: the project that humans and agents work on together,
+/// and its workspaces.
+#[derive(Subcommand)]
+pub enum SpaceCmd {
+    /// This checkout's space and every workspace in it, by machine and
+    /// folder (the default).
+    Show,
+    /// Every space with a checkout on this machine.
+    Ls,
+    /// Show or set the space's name (what people call it; its id stays).
+    Name {
+        name: Option<String>,
+        /// Back to the default name (the last part of its key).
+        #[arg(long, conflicts_with = "name")]
+        reset: bool,
+    },
+    /// Show or set which space this checkout belongs to. Checkouts (clones)
+    /// of one space list and edit each other's workspaces. By default it is
+    /// the remote's URL, so clones of one repo join it on their own.
+    Join {
+        /// The space's key; `none` joins no space.
+        key: Option<String>,
+        /// Go back to the default (the remote's URL).
+        #[arg(long, conflicts_with = "key")]
         reset: bool,
     },
 }
@@ -97,6 +137,15 @@ fn short(s: &str) -> &str {
     &s[..10.min(s.len())]
 }
 
+/// `~/src/mono-2 on mac`: where a workspace lives.
+fn where_text(w: &WorkspaceInfo) -> String {
+    format!("{} on {}", w.folder, w.machine)
+}
+
+fn space_line(s: &checkouts::SpaceRef) -> String {
+    format!("space {} ({}, {})", s.name, s.id, s.key)
+}
+
 fn ws_text(w: &WorkspaceInfo) -> String {
     let mut t = format!(
         "{}{} {} ({}){}  {}\n",
@@ -104,9 +153,9 @@ fn ws_text(w: &WorkspaceInfo) -> String {
         w.name,
         w.id,
         match w.kind {
-            Kind::Main => "main worktree".to_string(),
-            Kind::Worktree => "worktree".to_string(),
-            Kind::Remote => format!("on {}", w.machine),
+            Kind::Main => "main worktree",
+            Kind::Worktree => "worktree",
+            Kind::Remote => "published",
         },
         match w.state {
             Activity::AgentRunning => format!(
@@ -119,7 +168,7 @@ fn ws_text(w: &WorkspaceInfo) -> String {
             ),
             Activity::Idle => String::new(),
         },
-        w.path.display(),
+        where_text(w),
     );
     if w.branches.is_empty() {
         t += "    (no stack)\n";
@@ -182,8 +231,8 @@ fn ws_text(w: &WorkspaceInfo) -> String {
     t
 }
 
-/// `agentvc workspace space`: the checkout's space and the checkouts in it.
-fn space_cmd(cwd: &Path, name: Option<String>, reset: bool) -> anyhow::Result<(Value, String)> {
+/// `agentvc space join`: the checkout's space and the checkouts in it.
+fn join_cmd(cwd: &Path, name: Option<String>, reset: bool) -> anyhow::Result<(Value, String)> {
     let w = Window::open(cwd)?;
     if reset {
         checkouts::set_space(&w, None)?;
@@ -196,7 +245,7 @@ fn space_cmd(cwd: &Path, name: Option<String>, reset: bool) -> anyhow::Result<(V
     let text = match &space {
         Some(s) => {
             let mut t = format!(
-                "space {s} ({})\n  * {}\n",
+                "space key {s} ({})\n  * {}\n",
                 match source {
                     checkouts::Source::Config => "set here",
                     _ => "from the remote's URL",
@@ -208,10 +257,16 @@ fn space_cmd(cwd: &Path, name: Option<String>, reset: bool) -> anyhow::Result<(V
             }
             t
         }
-        None => "this checkout joins no space; `agentvc workspace space NAME` joins one\n".into(),
+        None => "this checkout joins no space; `agentvc space join KEY` joins one\n".into(),
     };
     Ok((
-        json!({ "space": space, "source": source, "checkout": me, "checkouts": siblings }),
+        json!({
+            "space": space,
+            "space_info": checkouts::describe(&w),
+            "source": source,
+            "checkout": me,
+            "checkouts": siblings,
+        }),
         text,
     ))
 }
@@ -221,7 +276,10 @@ pub fn run(cwd: &Path, cmd: WorkspaceCmd) -> anyhow::Result<(Value, String)> {
         WorkspaceCmd::Ls { remote } => {
             let space = Space::discover(cwd).ok();
             let l = workspace::list(cwd, space.as_ref(), remote)?;
-            let mut text = String::new();
+            let mut text = match &l.space_info {
+                Some(s) => format!("{}\n", space_line(s)),
+                None => String::new(),
+            };
             let mut last: Option<&Path> = None;
             let several = l.workspaces.iter().any(|w| w.other_checkout);
             for w in &l.workspaces {
@@ -233,7 +291,32 @@ pub fn run(cwd: &Path, cmd: WorkspaceCmd) -> anyhow::Result<(Value, String)> {
             }
             (json!(l), text)
         }
-        WorkspaceCmd::Space { name, reset } => space_cmd(cwd, name, reset)?,
+        WorkspaceCmd::Space { name, reset } => join_cmd(cwd, name, reset)?,
+        WorkspaceCmd::New {
+            folder,
+            name,
+            clone,
+        } => {
+            let kind = if clone {
+                workspace::NewKind::Clone
+            } else {
+                workspace::NewKind::Worktree
+            };
+            let c = workspace::create(cwd, &folder, name.as_deref(), kind)?;
+            let text = format!(
+                "workspace {} ({}) at {} on {}\n{}\n",
+                c.workspace.name,
+                c.workspace.id,
+                c.folder,
+                c.workspace.machine,
+                match &c.space {
+                    Some(s) => format!("joined {}", space_line(s)),
+                    None =>
+                        "joined no space (no remote); `agentvc space join KEY` joins one".into(),
+                }
+            );
+            (json!(c), text)
+        }
         WorkspaceCmd::Name { name } => {
             let r = workspace::set_name(cwd, &name)?;
             let text = format!("this workspace is {} ({})", r.name, r.id);
@@ -351,4 +434,140 @@ pub fn run(cwd: &Path, cmd: WorkspaceCmd) -> anyhow::Result<(Value, String)> {
             (json!(p), text)
         }
     })
+}
+
+/// `agentvc space ...`.
+pub fn run_space(cwd: &Path, cmd: Option<SpaceCmd>) -> anyhow::Result<(Value, String)> {
+    Ok(match cmd.unwrap_or(SpaceCmd::Show) {
+        SpaceCmd::Show => show_space(cwd)?,
+        SpaceCmd::Ls => {
+            let here = Window::open(cwd).ok().and_then(|w| {
+                checkouts::register(&w);
+                checkouts::describe(&w)
+            });
+            let all = checkouts::known_spaces();
+            let mut text = String::new();
+            for k in &all {
+                let mine = here.as_ref().map(|h| h.id == k.space.id).unwrap_or(false);
+                text += &format!(
+                    "{}{} {}  {}\n",
+                    if mine { "* " } else { "  " },
+                    k.space.name,
+                    k.space.id,
+                    k.space.key
+                );
+                for c in &k.checkouts {
+                    text += &format!("    {}\n", workspace::tilde(c));
+                }
+            }
+            if all.is_empty() {
+                text = "no spaces on this machine yet\n".into();
+            }
+            (
+                json!({ "here": here.map(|h| h.id), "machine": workspace::machine(), "spaces": all }),
+                text,
+            )
+        }
+        SpaceCmd::Name { name, reset } => {
+            let w = Window::open(cwd)?;
+            let s = if reset || name.is_some() {
+                checkouts::set_name(&w, name.as_deref())?
+            } else {
+                checkouts::describe(&w).ok_or_else(|| agentvc_core::Error::Stack {
+                    code: "no_space",
+                    message: "this checkout joins no space; `agentvc space join KEY` joins one"
+                        .into(),
+                    details: None,
+                })?
+            };
+            (json!({ "space": s }), format!("{}\n", space_line(&s)))
+        }
+        SpaceCmd::Join { key, reset } => join_cmd(cwd, key, reset)?,
+    })
+}
+
+/// `agentvc space show`: the space and its workspaces by machine and folder.
+fn show_space(cwd: &Path) -> anyhow::Result<(Value, String)> {
+    let space = Space::discover(cwd).ok();
+    let l = workspace::list(cwd, space.as_ref(), false)?;
+    let mut text = match &l.space_info {
+        Some(s) => format!("{}\n", space_line(s)),
+        None => "this checkout joins no space; its workspaces:\n".into(),
+    };
+    // machine -> checkout -> workspaces, in list order.
+    let mut groups: Vec<(String, std::path::PathBuf, Vec<&WorkspaceInfo>)> = Vec::new();
+    for w in &l.workspaces {
+        match groups
+            .iter_mut()
+            .find(|(m, c, _)| *m == w.machine && *c == w.checkout)
+        {
+            Some(g) => g.2.push(w),
+            None => groups.push((w.machine.clone(), w.checkout.clone(), vec![w])),
+        }
+    }
+    let mut last_machine = None;
+    let mut checkouts_json = Vec::new();
+    for (m, c, ws) in &groups {
+        if last_machine != Some(m) {
+            text += &format!(
+                "  machine {m}{}\n",
+                if *m == l.machine {
+                    " (this machine)"
+                } else {
+                    ""
+                }
+            );
+            last_machine = Some(m);
+        }
+        let this = ws.first().map(|w| w.this_machine).unwrap_or(false);
+        text += &format!(
+            "    checkout {}\n",
+            if this {
+                workspace::tilde(c)
+            } else {
+                c.display().to_string()
+            }
+        );
+        for w in ws {
+            text += &format!(
+                "      {}{} {}  {}{}{}\n",
+                if w.here { "* " } else { "  " },
+                w.name,
+                w.id,
+                w.folder,
+                if w.user.is_empty() {
+                    String::new()
+                } else {
+                    format!("  ({})", w.user)
+                },
+                match w.state {
+                    Activity::AgentRunning => "  agent running",
+                    Activity::Idle => "",
+                }
+            );
+        }
+        checkouts_json.push(json!({
+            "machine": m,
+            "checkout": c,
+            "workspaces": ws.iter().map(|w| json!({
+                "id": w.id,
+                "name": w.name,
+                "kind": w.kind,
+                "path": w.path,
+                "folder": w.folder,
+                "user": w.user,
+                "state": w.state,
+                "here": w.here,
+            })).collect::<Vec<_>>(),
+        }));
+    }
+    Ok((
+        json!({
+            "space": l.space_info,
+            "machine": l.machine,
+            "here": l.here,
+            "checkouts": checkouts_json,
+        }),
+        text,
+    ))
 }

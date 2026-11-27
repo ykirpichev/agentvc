@@ -604,7 +604,7 @@ function BranchDetail($: $, { el, ui, detail, w, name }: { el: El; ui: AgentvcUi
         </Text>
         <Text dimColor size="caption" wrap="wrap">
           on {b.parent.replace(/^origin\//, '')} · {b.commits} commit{b.commits === 1 ? '' : 's'}
-          {b.current ? " · you're here" : ''} · {w.name}
+          {b.current ? " · you're here" : ''} · {w.name} in {w.folder ?? w.path} on {w.machine}
           {b.pr ? ` · PR #${b.pr.number}${prWords(b.pr.state, b.pr.status) ? ` ${prWords(b.pr.state, b.pr.status)!.label}` : ''}` : ''}
         </Text>
       </Box>

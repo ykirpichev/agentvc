@@ -74,7 +74,7 @@ export async function loadBoard(get: GetJson, cwd: string, nowS: number): Promis
   return {
     isReachable: true,
     error: null,
-    space: space.name,
+    space: space.project?.name ?? space.name,
     graph,
     tasks,
     workspaces,

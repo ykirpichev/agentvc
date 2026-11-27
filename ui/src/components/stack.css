@@ -474,6 +474,40 @@
 .sp-ws-name {
   font-weight: 600;
 }
+.sp-ws-where {
+  flex-basis: 100%;
+  padding-left: 16px;
+  font-size: 11px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+}
+.sp-ws-machine {
+  font-family: var(--font-sans);
+  font-size: 11px;
+}
+.sp-space {
+  padding: 0 12px;
+  margin: 2px 0 -4px;
+}
+.sp-space-label {
+  padding: 0;
+  margin: 0;
+}
+.sp-space-name {
+  font-weight: 600;
+  font-size: 14px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sp-space-meta {
+  font-size: 11px;
+  color: var(--muted);
+}
 .sp-ws-meta {
   flex-basis: 100%;
   padding-left: 16px;
@@ -517,12 +551,42 @@
   font-weight: 600;
   font-size: 15px;
 }
+.wo-where {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin: 4px 0 10px;
+  min-width: 0;
+}
 .wo-path {
+  font-family: var(--font-mono);
   font-size: 11.5px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  margin: 2px 0 10px;
+}
+.wo-machine {
+  font-size: 11.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.wo-machine b {
+  font-weight: 600;
+  color: var(--text);
+}
+.wo-kicker {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-right: 4px;
+  vertical-align: middle;
+}
+.wo-key {
+  font-family: var(--font-mono);
+  font-size: 12px;
 }
 .wo-none {
   margin: 0;

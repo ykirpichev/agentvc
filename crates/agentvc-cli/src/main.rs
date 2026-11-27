@@ -205,6 +205,14 @@ enum Cmd {
     /// until its agent stops).
     #[command(subcommand)]
     Workspace(workspace_cmd::WorkspaceCmd),
+    /// The space: one project that humans and agents work on together. It
+    /// holds workspaces (worktrees and clone folders, on any machine), each
+    /// an isolated place for one agent or person. With no subcommand, shows
+    /// this space and where each of its workspaces lives.
+    Space {
+        #[command(subcommand)]
+        cmd: Option<workspace_cmd::SpaceCmd>,
+    },
     /// Coding agents started on a workspace's stack: start one on a branch
     /// with a prompt, see which need you, answer, review and land them.
     #[command(subcommand)]
@@ -1314,6 +1322,10 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
         let (json, text) = workspace_cmd::run(&cwd, c)?;
         return Ok(Out { json, text });
     }
+    if let Cmd::Space { cmd } = cli.cmd {
+        let (json, text) = workspace_cmd::run_space(&cwd, cmd)?;
+        return Ok(Out { json, text });
+    }
     if let Cmd::Agent(c) = cli.cmd {
         let (json, text) = agent_cmd::run(&cwd, c)?;
         return Ok(Out { json, text });
@@ -1447,6 +1459,7 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
         | Cmd::Restack { .. }
         | Cmd::Stack(_)
         | Cmd::Workspace(_)
+        | Cmd::Space { .. }
         | Cmd::Agent(_)
         | Cmd::AgentWorker { .. } => unreachable!(),
         Cmd::GitHook { event: _ } => {

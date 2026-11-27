@@ -258,10 +258,13 @@ workspace, honoring its lock and queue.
 - By default the space is the checkout's remote URL, normalized
   (`git@github.com:o/r.git` and `https://github.com/o/r` are both
   `github.com/o/r`), so clones of one repo find each other on their own.
-- `agentvc workspace space` shows the space and its checkouts;
-  `agentvc workspace space NAME` joins another space (git config
-  `agentvc.space`); `agentvc workspace space none` joins none;
-  `--reset` goes back to the remote's URL.
+- `agentvc space` shows the space and where each workspace lives;
+  `agentvc space join KEY` joins another space (git config
+  `agentvc.space`); `agentvc space join none` joins none;
+  `--reset` goes back to the remote's URL. See [spaces.md](spaces.md).
+- `agentvc workspace new DIR [--clone] [--name N]` makes a workspace (a
+  worktree, or with `--clone` a separate clone) and says which space it
+  joined.
 - A checkout joins when it is first listed (any `workspace ls`, or its
   daemon starting). The registry is `~/.agentvc/checkouts.json`
   (`$AGENTVC_HOME` overrides `~/.agentvc`); folders that are gone drop out.

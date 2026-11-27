@@ -19,6 +19,20 @@ export interface SpaceInfo {
   name: string
   format_version: number
   daemon_version: string
+  /** The space (project) this checkout belongs to; absent from older daemons. */
+  project?: SpaceRef | null
+  machine?: string
+  folder?: string
+}
+
+/** A space: one project that humans and agents work on together. It holds workspaces. */
+export interface SpaceRef {
+  /** Stable id, the same on every machine. */
+  id: string
+  name: string
+  /** What identifies it: `agentvc.space`, else the remote's URL. */
+  key: string
+  source: 'config' | 'remote' | 'none'
 }
 
 export interface Task {
@@ -577,8 +591,16 @@ export interface WorkspaceInfo {
   id: string
   name: string
   kind: 'main' | 'worktree' | 'remote'
+  /** The machine it lives on. */
   machine: string
+  /** Its folder there. */
   path: string
+  /** `path` for people: `~/...` under the home directory. */
+  folder?: string
+  /** On the machine that listed it. */
+  this_machine?: boolean
+  /** The OS account that created it, when known. */
+  user?: string
   here: boolean
   state: 'idle' | 'agent_running'
   busy?: { since: number; seen: number; by: string | null }
@@ -602,6 +624,10 @@ export interface WorkspaceList {
   here: string | null
   /** The space this checkout belongs to: every checkout of it on this machine is listed. */
   space: string | null
+  /** That space with its id and name. */
+  space_info?: SpaceRef | null
+  /** The machine that listed them. */
+  machine?: string
   workspaces: WorkspaceInfo[]
 }
 

@@ -123,6 +123,36 @@ pub struct Record {
     pub machine: String,
     /// Its directory there.
     pub path: PathBuf,
+    /// The account that created it there (OS user name); empty in records
+    /// written before #162.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub user: String,
+}
+
+/// This process's OS user name, or empty.
+pub fn user() -> String {
+    ["USER", "USERNAME", "LOGNAME"]
+        .iter()
+        .find_map(|k| std::env::var(k).ok().filter(|v| !v.is_empty()))
+        .unwrap_or_default()
+}
+
+/// `path` with the home directory written as `~`, for showing where a
+/// workspace lives.
+pub fn tilde(path: &Path) -> String {
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .filter(|h| !h.is_empty())
+        .map(PathBuf::from);
+    if let Some(h) = home {
+        if let Ok(rest) = path.strip_prefix(&h) {
+            if rest.as_os_str().is_empty() {
+                return "~".into();
+            }
+            return format!("~/{}", rest.to_string_lossy());
+        }
+    }
+    path.to_string_lossy().into_owned()
 }
 
 fn new_id(git_dir: &Path) -> String {
@@ -170,6 +200,7 @@ fn ensure_record(git_dir: &Path, path: &Path, taken: &[String]) -> Result<Record
         created_at: now(),
         machine: machine(),
         path: path.to_path_buf(),
+        user: user(),
     };
     let dir = agentvc_dir(git_dir);
     fs::create_dir_all(&dir).at(&dir)?;
@@ -939,22 +970,17 @@ pub fn find_local(w: &Window, target: &str) -> Result<Local> {
 /// Rename the workspace containing `cwd`.
 pub fn set_name(cwd: &Path, name: &str) -> Result<Record> {
     let name = name.trim();
-    if name.is_empty() || name.contains(['/', '\\']) || name.chars().any(char::is_whitespace) {
-        return Err(ws_err_with(
-            "bad_name",
-            format!("{name:?} is not a workspace name: use letters, digits, - and _"),
-            json!({ "name": name }),
-        ));
-    }
+    check_name(name)?;
     let w = Window::open(cwd)?;
-    let all = locals(&w)?;
+    // Names are unique in the whole space, so they work from any checkout.
+    let all = space_locals(&w)?;
     if all
         .iter()
         .any(|l| l.record.name == name && l.git_dir != w.git_dir)
     {
         return Err(ws_err_with(
             "name_taken",
-            format!("another workspace is already named {name}"),
+            format!("another workspace in this space is already named {name}"),
             json!({ "name": name }),
         ));
     }
@@ -966,6 +992,143 @@ pub fn set_name(cwd: &Path, name: &str) -> Result<Record> {
     rec.name = name.to_string();
     write_record(&w.git_dir, &rec)?;
     Ok(rec)
+}
+
+/// How [`create`] makes a workspace.
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum NewKind {
+    /// `git worktree add`: shares this checkout's git objects.
+    Worktree,
+    /// A fresh clone in its own folder, for builds that cannot run twice in
+    /// one checkout (#160); it joins the same space.
+    Clone,
+}
+
+/// A workspace just made by [`create`].
+#[derive(Clone, Debug, Serialize)]
+pub struct Created {
+    pub workspace: Record,
+    pub kind: NewKind,
+    pub folder: String,
+    /// The space it joined, if any.
+    pub space: Option<crate::checkouts::SpaceRef>,
+}
+
+/// Make a new workspace at `dir` in the space of the checkout containing
+/// `cwd`: a worktree (detached at the stack base) or, with `clone`, a clone
+/// of the same remote that joins the same space. Named `name`, else after
+/// its folder.
+pub fn create(cwd: &Path, dir: &Path, name: Option<&str>, kind: NewKind) -> Result<Created> {
+    let w = Window::open(cwd)?;
+    let dir = if dir.is_absolute() {
+        dir.to_path_buf()
+    } else {
+        canon(cwd).join(dir)
+    };
+    // Tidy `../x` so the folder shown (and recorded) is the real one.
+    let dir = match (dir.parent(), dir.file_name()) {
+        (Some(p), Some(n)) if p.exists() => canon(p).join(n),
+        _ => dir,
+    };
+    if dir.exists()
+        && fs::read_dir(&dir)
+            .map(|mut d| d.next().is_some())
+            .unwrap_or(true)
+    {
+        return Err(ws_err_with(
+            "dir_exists",
+            format!("{} already exists and is not empty", dir.display()),
+            json!({ "path": dir }),
+        ));
+    }
+    if let Some(n) = name {
+        check_name(n)?;
+        if space_locals(&w)?.iter().any(|l| l.record.name == n) {
+            return Err(ws_err_with(
+                "name_taken",
+                format!("another workspace in this space is already named {n}"),
+                json!({ "name": n }),
+            ));
+        }
+    }
+    let dir_s = dir.to_string_lossy().into_owned();
+    let (key, source) = crate::checkouts::space_of(&w);
+    match kind {
+        NewKind::Worktree => {
+            let at = w.base().unwrap_or_else(|| "HEAD".into());
+            w.repo
+                .git(&["worktree", "add", "--detach", &dir_s, &at], None)?;
+        }
+        NewKind::Clone => {
+            let remote = if w.state.remote.is_empty() {
+                "origin"
+            } else {
+                &w.state.remote
+            };
+            let url = w
+                .repo
+                .git(&["remote", "get-url", remote], None)
+                .map_err(|_| {
+                    ws_err_with(
+                        "no_remote",
+                        format!("this checkout has no remote {remote} to clone"),
+                        json!({ "remote": remote }),
+                    )
+                })?;
+            w.repo
+                .git(&["clone", "--origin", remote, url.trim(), &dir_s], None)?;
+        }
+    }
+    let nw = Window::open(&dir)?;
+    if kind == NewKind::Clone && source == crate::checkouts::Source::Config {
+        crate::checkouts::set_space(&nw, key.as_deref().or(Some(crate::checkouts::NONE)))?;
+    }
+    let all = space_locals(&nw)?;
+    let mut rec = all
+        .iter()
+        .find(|l| l.git_dir == nw.git_dir)
+        .map(|l| l.record.clone())
+        .expect("the new workspace is listed");
+    let taken: Vec<&str> = all
+        .iter()
+        .filter(|l| l.git_dir != nw.git_dir)
+        .map(|l| l.record.name.as_str())
+        .collect();
+    let want = match name {
+        Some(n) => n.to_string(),
+        None => {
+            // Folder names can repeat across clones; names may not.
+            let mut n = rec.name.clone();
+            let mut i = 2;
+            while taken.contains(&n.as_str()) {
+                n = format!("{}-{i}", rec.name);
+                i += 1;
+            }
+            n
+        }
+    };
+    if want != rec.name {
+        rec.name = want;
+        write_record(&nw.git_dir, &rec)?;
+    }
+    Ok(Created {
+        folder: tilde(nw.path()),
+        workspace: rec,
+        kind,
+        space: crate::checkouts::describe(&nw),
+    })
+}
+
+fn check_name(name: &str) -> Result<()> {
+    if name.is_empty() || name.contains(['/', '\\']) || name.chars().any(char::is_whitespace) {
+        return Err(ws_err_with(
+            "bad_name",
+            format!("{name:?} is not a workspace name: use letters, digits, - and _"),
+            json!({ "name": name }),
+        ));
+    }
+    Ok(())
 }
 
 /// A pull request as the workspace list shows it.
@@ -1018,8 +1181,17 @@ pub struct WorkspaceInfo {
     pub id: String,
     pub name: String,
     pub kind: Kind,
+    /// The machine it lives on.
     pub machine: String,
+    /// Its folder there.
     pub path: PathBuf,
+    /// [`Self::path`] for people: `~/...` when under the home directory.
+    pub folder: String,
+    /// It is on the machine that listed it (not published from another).
+    pub this_machine: bool,
+    /// Who works there: the OS account that created it, when known.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub user: String,
     /// The workspace `ls` was run from.
     pub here: bool,
     pub state: Activity,
@@ -1048,9 +1220,13 @@ pub struct WorkspaceInfo {
 #[derive(Clone, Debug, Serialize)]
 pub struct WorkspaceList {
     pub here: Option<String>,
-    /// The space this checkout belongs to (#160): workspaces of every
-    /// checkout in it on this machine are listed.
+    /// The key of the space this checkout belongs to (#160): workspaces of
+    /// every checkout in it on this machine are listed.
     pub space: Option<String>,
+    /// That space with its id and name (#162).
+    pub space_info: Option<crate::checkouts::SpaceRef>,
+    /// The machine that listed them.
+    pub machine: String,
     pub workspaces: Vec<WorkspaceInfo>,
 }
 
@@ -1131,7 +1307,9 @@ pub fn list(cwd: &Path, space: Option<&Space>, remote: bool) -> Result<Workspace
     }
     Ok(WorkspaceList {
         here: here_id,
+        space_info: space_name.as_ref().and(crate::checkouts::describe(&here)),
         space: space_name,
+        machine: machine(),
         workspaces: out,
     })
 }
@@ -1211,7 +1389,14 @@ fn list_group(
             id: l.record.id.clone(),
             name: l.record.name.clone(),
             kind: l.kind,
-            machine: l.record.machine.clone(),
+            machine: machine(),
+            folder: tilde(&l.path),
+            this_machine: true,
+            user: if l.record.user.is_empty() {
+                user()
+            } else {
+                l.record.user.clone()
+            },
             path: l.path.clone(),
             here: is_here,
             state: if busy.is_some() {
@@ -1460,6 +1645,9 @@ fn remote_workspaces(w: &Window, locals: &[Local]) -> Result<Vec<WorkspaceInfo>>
             name: rec.name.clone(),
             kind: Kind::Remote,
             machine: rec.machine.clone(),
+            folder: rec.path.to_string_lossy().into_owned(),
+            this_machine: false,
+            user: rec.user.clone(),
             path: rec.path.clone(),
             here: false,
             state: Activity::Idle,

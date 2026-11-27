@@ -68,7 +68,9 @@ Failed, abandoned and passing attempts all stay in history; only the promoted at
 
 | Entity | What it is | Key fields |
 | --- | --- | --- |
-| Space | One content-addressed store on a host, holding many projects | Projects, views, operation log |
+| Space | One project that humans and agents work on together ([spaces.md](spaces.md)); holds workspaces on any number of machines | Id (from its key), name, key (remote URL or `agentvc.space`) |
+| Workspace | An isolated place in a space (a worktree or clone folder on one machine) where one agent or person works without getting in the others' way | Id, name, machine, folder, stack, agent settings |
+| Attempt history | One folder's content-addressed store (`.agentvc/`; `Space` in the code) | Views, snapshots, operation log |
 | Project | A path-scoped history inside the space that evolves independently | Root path, history, release refs, git remote |
 | Task | A unit of intent | Goal, acceptance criteria, owner, budget |
 | Attempt | One line of exploration; can fork from any snapshot of any attempt | Parent snapshot, actor (agent, subagent or human), model, prompt ref, outcome |

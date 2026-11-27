@@ -130,6 +130,14 @@ export interface WorkspaceInfo {
   pending: { branch: string; onto: string } | null
   branches: WsBranch[]
   requests: WsRequest[]
+  /** Main worktree of the checkout (clone) it belongs to. */
+  checkout: string
+  /** In another checkout (folder) of this space on this machine. */
+  other_checkout: boolean
+  /** `path` for people: `~/...` under the home directory. */
+  folder?: string
+  this_machine?: boolean
+  user?: string
 }
 
 // ---- the panel's own state --------------------------------------------------
