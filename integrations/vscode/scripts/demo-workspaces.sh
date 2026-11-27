@@ -3,7 +3,7 @@
 # Usage: demo-workspaces.sh DIR BINDIR [--no-daemon]
 # Then: agentvcd -C DIR/invoices (add --cloud URL to show it on the hosted UI).
 set -e
-D=${1:?dir}; B=${2:?bindir}; AV=$B/agentvc
+D=${1:?dir}; B=$(cd "${2:?bindir}" && pwd); AV=$B/agentvc
 HERE=$(cd "$(dirname "$0")" && pwd)
 pkill -f "agentvcd -C $D" || true
 rm -rf "$D"; mkdir -p "$D"

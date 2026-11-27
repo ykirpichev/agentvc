@@ -19,7 +19,10 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use agentvc_core::agent::{self, Agent, AgentDetail, AgentList, AgentState, Mode, StartRequest};
+use agentvc_core::agent::{
+    self, Agent, AgentDetail, AgentList, AgentSettings, AgentState, Mode, StartRequest,
+    WorkspaceAgentSettings,
+};
 use agentvc_core::workspace::EditOutcome;
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{Path, Query, State};
@@ -46,6 +49,50 @@ pub(crate) fn routes() -> Router<AppState> {
         .route("/agents/{id}/stop", post(stop))
         .route("/agents/{id}/land", post(land))
         .route("/agents/{id}/discard", post(discard))
+        .route(
+            "/workspaces/{id}/agent-settings",
+            get(get_settings).put(put_settings).post(put_settings),
+        )
+}
+
+async fn get_settings(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<WorkspaceAgentSettings> {
+    let dir = st.workdir().to_path_buf();
+    Ok(Json(
+        blocking(move || agent::settings(&dir, Some(&id))).await?,
+    ))
+}
+
+async fn put_settings(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    body: Result<Json<AgentSettings>, JsonRejection>,
+) -> ApiResult<WorkspaceAgentSettings> {
+    local_or_allowed(&headers)?;
+    let b = json_body(body)?;
+    // The hosted service never sets shell commands on this machine.
+    if relayed(&headers) && (b.command.is_some() || b.check.is_some()) {
+        return Err(remote_shell_off());
+    }
+    let dir = st.workdir().to_path_buf();
+    let r = blocking(move || agent::set_settings(&dir, Some(&id), b)).await?;
+    st.poke_workspaces();
+    Ok(Json(r))
+}
+
+fn relayed(h: &HeaderMap) -> bool {
+    h.contains_key(RELAY_HEADER)
+}
+
+fn remote_shell_off() -> ApiError {
+    ApiError::new(
+        StatusCode::FORBIDDEN,
+        "remote_shell_off",
+        "commands and check commands can only be set on this machine, not through the hosted service".into(),
+    )
 }
 
 /// Refuse a relayed call that would run or steer an agent here.
@@ -120,6 +167,8 @@ struct StartBody {
     model: Option<String>,
     check: Option<String>,
     command: Option<String>,
+    runner: Option<String>,
+    permissions: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -134,6 +183,11 @@ async fn start(
 ) -> ApiResult<AgentResponse> {
     local_or_allowed(&headers)?;
     let b = json_body(body)?;
+    // Even with --allow-remote-agents, a relayed start uses the workspace's
+    // runner and check; it never brings shell commands of its own.
+    if relayed(&headers) && (b.command.is_some() || b.check.is_some()) {
+        return Err(remote_shell_off());
+    }
     let dir = st.workdir().to_path_buf();
     let req = StartRequest {
         workspace: b.workspace,
@@ -144,6 +198,8 @@ async fn start(
         model: b.model,
         check: b.check,
         command: b.command,
+        runner: b.runner,
+        permissions: b.permissions,
         exe: agentvc_exe(),
     };
     let a = blocking(move || agent::start(&dir, &req)).await?;

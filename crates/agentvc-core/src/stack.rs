@@ -197,6 +197,9 @@ pub struct State {
     pub branches: Vec<Tracked>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending: Option<Pending>,
+    /// How agents started in this workspace run (`agentvc workspace agents`).
+    #[serde(default, skip_serializing_if = "crate::agent::AgentSettings::is_empty")]
+    pub agents: crate::agent::AgentSettings,
 }
 
 /// A branch moved by restack.
@@ -548,6 +551,7 @@ impl Window {
                     remote,
                     branches: Vec::new(),
                     pending: None,
+                    agents: Default::default(),
                 }
             }
         };
@@ -3058,6 +3062,7 @@ impl Window {
             remote: self.state.remote.clone(),
             branches: Vec::new(),
             pending: None,
+            agents: Default::default(),
         });
         for n in &moving {
             let t = self.state.branches[self.find(n).expect("tracked")].clone();

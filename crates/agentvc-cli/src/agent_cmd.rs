@@ -28,14 +28,21 @@ pub enum AgentCmd {
         revise: bool,
         #[arg(long)]
         model: Option<String>,
-        /// Check command run when the agent stops. Defaults to
-        /// `git config agentvc.agent-check`.
+        /// Check command run when the agent stops. Defaults to the
+        /// workspace's, then `git config agentvc.agent-check`.
         #[arg(long)]
         check: Option<String>,
         /// Run this shell command instead of Claude Code (the prompt is in
         /// $AGENTVC_AGENT_PROMPT).
         #[arg(long)]
         command: Option<String>,
+        /// claude, codex, cursor or command. Defaults to the workspace's
+        /// (`agentvc workspace agents`).
+        #[arg(long)]
+        runner: Option<String>,
+        /// Claude Code: edits, ask or auto. Defaults to the workspace's.
+        #[arg(long)]
+        permissions: Option<String>,
         /// What the agent should do.
         #[arg(required = true, num_args = 1.., trailing_var_arg = true)]
         prompt: Vec<String>,
@@ -143,6 +150,8 @@ pub fn run(cwd: &Path, cmd: AgentCmd) -> anyhow::Result<(Value, String)> {
             model,
             check,
             command,
+            runner,
+            permissions,
             prompt,
         } => {
             let a = agent::start(
@@ -156,6 +165,8 @@ pub fn run(cwd: &Path, cmd: AgentCmd) -> anyhow::Result<(Value, String)> {
                     model,
                     check,
                     command,
+                    runner,
+                    permissions,
                     exe: exe()?,
                 },
             )?;
