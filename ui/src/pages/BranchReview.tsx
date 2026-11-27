@@ -33,13 +33,13 @@ export function BranchReview() {
     setBusy(true)
     try {
       const r = await api.stackEdit(workspace, op, keep)
-      const stoppedAt = r.result?.conflict?.branch
+      const stoppedAt = r.result?.conflict?.branch ?? r.result?.restack?.conflict?.branch
       const mergeStop = r.result?.stopped
       if (mergeStop) {
         toast.ok(`Merged ${r.result?.merged?.length ?? 0}, then stopped at ${mergeStop.branch}: ${mergeStop.message}`, { undo: false })
         return
       }
-      if (stoppedAt) toast.ok(`Restacking ${stoppedAt} stopped on a clash. Pick what each place should say below.`, { undo: false })
+      if (stoppedAt) toast.ok(`${stoppedAt} clashes. Pick what each place should say below.`, { undo: false })
       else if (r.outcome === 'queued') toast.ok(`Queued: ${r.reason ?? 'an agent is working there'}. It applies when the agent stops.`, { undo: false })
       else toast.ok(done, { undo: op.op === 'checkout' || op.op === 'merge' ? false : undoIn(workspace, done) })
     } catch (e) {
@@ -171,7 +171,7 @@ function StackConflicts({ w }: { w: WorkspaceInfo }) {
     try {
       const r = await api.wsResolve(w.id, path, [{ index: h.index, take, text: custom }])
       setLatest(await api.wsConflicts(w.id))
-      toast.ok(r.open.length ? `${path}: resolved. ${plural(r.open.length, 'file')} left.` : 'All places resolved. Press Continue to finish the restack.', { undo: false })
+      toast.ok(r.open.length ? `${path}: resolved. ${plural(r.open.length, 'file')} left.` : 'All clashes resolved. Press Continue.', { undo: false })
     } catch (e) {
       toast.error(e)
     } finally {
@@ -186,10 +186,10 @@ function StackConflicts({ w }: { w: WorkspaceInfo }) {
       setLatest(r.conflicts)
       toast.ok(
         r.outcome === 'aborted'
-          ? 'Restack stopped; the branches are as they were.'
+          ? 'Cancelled; every branch is back as it was.'
           : r.outcome === 'stopped'
             ? `The next step clashes too: ${r.conflicts?.branch ?? ''}. Resolve it below.`
-            : 'Restack finished.',
+            : 'Done; the branches above are updated too.',
         { undo: false },
       )
     } catch (e) {
@@ -200,34 +200,36 @@ function StackConflicts({ w }: { w: WorkspaceInfo }) {
     }
   }
 
+  const branch = c?.branch ?? w.pending?.branch ?? 'this branch'
+  const parent = (c?.parent ?? w.pending?.onto ?? 'its parent').replace(/^origin\//, '')
+  const labels = {
+    theirs: `Now on ${parent}`,
+    ours: `Your change${c?.subject ? ` · “${c.subject}”` : ''}`,
+    useTheirs: `Use ${parent}`,
+    useOurs: 'Use mine',
+  }
   return (
-    <section className="conf-box" aria-label="Restack conflicts">
+    <section className="conf-box" aria-label="Clashes">
       <header>
         <b>
-          Restacking {c?.branch ?? w.pending?.branch} onto {c?.parent ?? 'its parent'} stopped
+          Stopped at {branch}: {open.length > 0 ? `${plural(open.length, 'file')} changed on both sides` : 'all clashes resolved'}
         </b>
-        <span className="muted">
-          {c?.subject ? `at “${c.subject}”. ` : ''}
-          {HELP.resolve}
-        </span>
+        <span className="muted">Pick what each place should say, then continue.</span>
       </header>
       {data.error && <ErrorNote error={data.error} />}
       {!c && !data.error && <Skeleton rows={3} />}
       {c &&
         open.map((f) => (
-          <HunkList key={f.path} path={f.path} hunks={f.hunks} mine={c.branch ?? 'mine'} onChoose={(h, take, text) => choose(f.path, h, take, text)} />
+          <HunkList key={f.path} path={f.path} hunks={f.hunks} mine={branch} labels={labels} onChoose={(h, take, text) => choose(f.path, h, take, text)} />
         ))}
       {c && (
         <footer className="conf-foot">
-          <button type="button" className="btn btn-primary" disabled={busy || open.length > 0} onClick={() => void finish(false)}>
+          <button type="button" className="btn btn-primary" disabled={busy || open.length > 0} onClick={() => void finish(false)} title="Commit the result and carry on with the branches above">
             Continue
           </button>
-          <button type="button" className="btn btn-ghost" disabled={busy} onClick={() => void finish(true)}>
-            Abort restack
+          <button type="button" className="btn btn-ghost" disabled={busy} onClick={() => void finish(true)} title="Put every branch back as it was before">
+            Cancel
           </button>
-          <span className="act-help">
-            {open.length > 0 ? `${plural(open.length, 'file')} still to resolve.` : 'Commits the result and restacks the branches above.'} Abort puts every branch back as it was.
-          </span>
         </footer>
       )}
     </section>

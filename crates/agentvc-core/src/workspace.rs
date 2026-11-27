@@ -353,6 +353,9 @@ pub enum Op {
     Merge {
         branch: String,
     },
+    /// Push every branch of the stack and open or update one PR per branch
+    /// (`agentvc stack submit --all`).
+    Submit,
 }
 
 impl Op {
@@ -364,7 +367,7 @@ impl Op {
             | Op::Checkout { branch }
             | Op::Merge { branch } => Some(branch),
             Op::Restack { branch } => branch.as_deref(),
-            Op::Sync | Op::Undo => None,
+            Op::Sync | Op::Undo | Op::Submit => None,
         }
     }
 
@@ -380,6 +383,7 @@ impl Op {
             Op::Checkout { branch } => format!("checkout {branch}"),
             Op::Undo => "undo".into(),
             Op::Merge { branch } => format!("merge --branch {branch}"),
+            Op::Submit => "submit --all".into(),
         }
     }
 }
@@ -523,6 +527,10 @@ fn run_op(w: &mut Window, op: &Op, keep: bool) -> Result<Value> {
             branch: Some(branch.clone()),
             ..Default::default()
         })?)),
+        Op::Submit => Ok(json!(w.submit(&crate::stack::SubmitOptions {
+            all: true,
+            ..Default::default()
+        })?)),
         Op::Sync => {
             let s = w.sync(true, true, keep)?;
             if s.restack.conflict.is_some() {
@@ -536,11 +544,11 @@ fn run_op(w: &mut Window, op: &Op, keep: bool) -> Result<Value> {
 /// Run `req` in `w` and record the outcome in the request file.
 fn settle_request(w: &mut Window, mut req: Request) -> (Request, Result<Value>) {
     let path = w.path().to_path_buf();
-    let begun = (req.op != Op::Undo)
-        .then(|| crate::stackundo::begin(&path))
-        .flatten();
+    // Undo and submit are not recorded (a push cannot be taken back).
+    let recorded = !matches!(req.op, Op::Undo | Op::Submit);
+    let begun = recorded.then(|| crate::stackundo::begin(&path)).flatten();
     let res = run_op(w, &req.op, req.keep_conflicts);
-    if req.op != Op::Undo {
+    if recorded {
         crate::stackundo::finish(&path, &req.op.label(), begun);
     }
     req.finished_at = Some(now());
@@ -2142,6 +2150,14 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn submit_is_an_op_the_ui_can_send() {
+        let op: Op = serde_json::from_str(r#"{"op":"submit"}"#).unwrap();
+        assert_eq!(op, Op::Submit);
+        assert_eq!(op.label(), "submit --all");
+        assert_eq!(op.branch(), None);
     }
 
     #[test]
