@@ -1,0 +1,9 @@
+# What `gcloud builds submit` uploads for deploy/gcp/cloudbuild.yaml.
+.git
+target
+**/node_modules
+ui/dist
+.agentvc
+integrations
+docs
+deploy/gcp/.state

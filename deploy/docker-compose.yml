@@ -1,6 +1,9 @@
-# The hosted service on one VM: agentvc-cloud plus a Cloudflare Tunnel, so the
-# VM needs no open inbound port and no TLS certificate of its own.
-# Values come from /etc/agentvc-cloud.env (see deploy/README.md).
+# The hosted service on one VM: agentvc-cloud behind Caddy, which serves HTTPS
+# with a Let's Encrypt certificate. Values come from /etc/agentvc-cloud.env
+# (see agentvc-cloud.env.example). For a Cloudflare Tunnel instead of Caddy,
+# see docker-compose.tunnel.yml.
+# 2.4: Debian 12's docker-compose 1.29 needs a version; Compose v2 ignores it.
+version: "2.4"
 services:
   agentvc-cloud:
     image: ${AGENTVC_CLOUD_IMAGE:-ghcr.io/ykirpichev/agentvc-cloud:latest}
@@ -11,16 +14,18 @@ services:
       AGENTVC_CLOUD_DATA: /data
     volumes:
       - /var/lib/agentvc-cloud:/data
-    # 1 GB VM: leave room for the OS and cloudflared.
+    # 1 GB VM: leave room for the OS and Caddy.
     mem_limit: 384m
 
-  cloudflared:
-    # Pin a version from https://hub.docker.com/r/cloudflare/cloudflared/tags when deploying.
-    image: cloudflare/cloudflared:latest
+  caddy:
+    image: caddy:2.8
     restart: unless-stopped
-    command: tunnel --no-autoupdate run
     env_file: /etc/agentvc-cloud.env
-    # TUNNEL_TOKEN comes from the env file. In the Cloudflare dashboard, route
-    # the tunnel's public hostname to http://agentvc-cloud:8080.
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - /var/lib/caddy:/data
     mem_limit: 128m
     depends_on: [agentvc-cloud]
