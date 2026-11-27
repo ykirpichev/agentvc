@@ -23,38 +23,30 @@ embed it, so build the UI before `cargo build --release`.
 
 ## The review screen
 
-The sidebar holds the **branch graph**: main's recent commits down the left,
-each task's versions (attempts) hung off the commit they are based on, forks
-nested under the version they came from. Badges show what needs you: `↓N`
-behind main, conflicts, the PR number. The pane on the right shows what is
-selected:
+The sidebar is one window's **stack**, drawn like `gt log`: the newest
+branch on top, main at the bottom, a filled dot on the branch you are on. It
+opens on the editor window you are in (`?here=`) or the window of the open
+branch; the name at the top switches windows. **Sync** fetches main, drops
+merged branches and rebases the stack (`POST /api/workspaces/{id}/stack`
+`{"op": "sync"}`); a banner says when main moved, and a clash stops the sync
+on the branch page with the file's two sides. **↶** undoes the window's last
+stack change, and every change's toast has Undo too. Click a branch to open
+it, double-click to check it out, drag it onto another branch or onto main to
+move it. Under the stack, **Other windows** lists each other window in one
+line, and **Agent work** lists tasks whose agent versions are still open.
 
-- **What needs you** (`/review`): every task with its next step.
-- **A task** (`/review/t/N`): one card per version with *Choose this version*,
-  the next step as a pill and button (choose, resolve, update from main, open
-  the PR), and the two best versions side by side, where *Use in …* copies a
-  file from one version into the other.
-- **A version** (`/review/v/N`): *Update from main*, *Rebase onto…*, *Open
-  PR*, *Discard*, its conflicts (Keep main / Keep mine / Keep both / Edit),
-  and its changed files.
-- **A main commit** (`/review/c/SHA`): versions that started before it.
+A branch page shows where it sits, its PR state, **Check out**, **Merge** (the
+PRs up to it) and **More** (move onto, rename, delete), then its commits and
+diff. `src/core/stack.ts` orders and summarizes a stack for every surface.
 
-Drag a version onto a main commit (or use ↻ / ⤴ on its row) to rebase it: the
-version pane first previews what merges cleanly, what auto-resolves and what
-conflicts, and changes nothing until you press Rebase. Every change shows a
-toast with Undo (`POST /api/undo`).
+Tasks and their versions (`/review/t/N`, `/review/v/N`) keep their pages:
+*Choose this version*, *Update from main*, *Open PR*, *Discard*, conflicts
+and the changed files.
 
 The UI speaks git and GitHub (version, choose, update from main, open PR);
 `src/core/words.ts` keeps those words in one place, `src/core/graph.ts` lays
 out the graph and `src/core/next.ts` decides the next step, so other surfaces
 (the VS Code and Cursor extension, the Claude Code panel) can share them.
-
-Under the graph, **Stacks** lists the branches stacked in each workspace (each
-worktree, so each editor window): *This* for the window you are in, *All* for
-every one (`GET /api/workspaces`). Drag a branch onto another branch or main
-to move it; the workspace that owns it applies the move, at once when idle and
-after its agent stops otherwise (`POST /api/workspaces/{id}/stack`, queued
-edits show with Cancel). ↻ restacks a branch that needs it.
 
 ### Inside an editor
 

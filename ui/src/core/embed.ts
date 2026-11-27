@@ -29,7 +29,7 @@ function read(): { mode: EmbedMode; theme: 'light' | 'dark' | null; here: string
       const saved = JSON.parse(sessionStorage.getItem(KEY) ?? 'null') as { mode?: string; theme?: string; here?: string; bg?: string } | null
       mode = saved?.mode ?? null
       theme = theme ?? saved?.theme ?? null
-      here = saved?.here ?? null
+      here = here ?? saved?.here ?? null
       bg = bg ?? saved?.bg ?? null
     }
   } catch {

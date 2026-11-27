@@ -554,6 +554,7 @@ export type WsOp =
   | { op: 'checkout'; branch: string }
   | { op: 'undo' }
   | { op: 'merge'; branch: string }
+  | { op: 'sync' }
 
 export interface WsRequest {
   id: string
@@ -600,7 +601,7 @@ export interface WsEditOutcome {
   workspace: string
   reason?: string
   /** With `keep_conflicts`, a restack that stopped says where. */
-  result?: { conflict?: { branch: string; paths: string[] } | null; merged?: { branch: string; number: number }[]; stopped?: { branch: string; code: string; message: string } | null }
+  result?: { conflict?: { branch: string; paths: string[] } | null; restack?: { conflict?: { branch: string; paths: string[] } | null }; merged?: { branch: string; number: number }[]; stopped?: { branch: string; code: string; message: string } | null }
 }
 
 /** A restack stopped on a conflict in a workspace. Hunks are from the branch's side: `ours` is the branch. */

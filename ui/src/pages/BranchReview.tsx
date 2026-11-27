@@ -12,6 +12,7 @@ import { HunkList } from '../components/ConflictResolver'
 import { DiffView } from '../components/DiffView'
 import { undoIn } from '../components/stackEdit'
 import { useToast } from '../components/Toaster'
+import { canMoveBranch } from '../core/graph'
 import { HELP, prWords, shortSha, WORDS } from '../core/words'
 import { plural, timeAgo } from '../lib/format'
 
@@ -65,62 +66,55 @@ export function BranchReview() {
   let below = 0
   for (let at: typeof b | undefined = b; at; at = w.branches.find((x) => x.name === at?.parent)) below++
   const d = detail.data
+  const trunk = w.trunk.replace(/^origin\//, '')
+  const prOpen = !!b.pr && (b.pr.state === 'open' || b.pr.state === null)
+  const mergeBlocked = b.pr?.status?.checks === 'fail' || b.pr?.status?.review === 'changes_requested'
+  // Where it can move: the trunk or another branch of this stack, not its own upstack.
+  const targets = [w.trunk, ...w.branches.map((x) => x.name)].filter((t) => canMoveBranch(w, b.name, t))
   return (
     <div className="page rv">
       <div className="rv-head">
         <div>
           <h1 className="rv-title mono">{b.name}</h1>
           <p className="muted">
-            in {w.name}
-            {w.kind === 'remote' ? ` on ${w.machine}` : ''} · on {b.parent.replace(/^origin\//, '')} · {plural(b.commits, 'commit')}
-            {b.current ? ' · checked out' : ''}
+            on {b.parent === w.trunk ? trunk : b.parent.replace(/^origin\//, '')} · {plural(b.commits, 'commit')}
+            {b.current ? " · you're here" : ''}
+            {w.kind === 'remote' ? ` · ${w.name} on ${w.machine}` : ''}
+            {b.pr ? ` · PR #${b.pr.number} ${prLine(b.pr.state, b.pr.status)}` : ''}
           </p>
         </div>
-        <span className={`tone tone-${b.conflicts > 0 || stopped ? 'conf' : b.needs_restack ? 'acc' : 'ok'}`}>
-          {b.conflicts > 0 ? plural(b.conflicts, 'conflict') : b.needs_restack ? 'needs restack' : 'up to date'}
-        </span>
+        {b.conflicts > 0 && <span className="tone tone-conf">{`${b.conflicts} clash${b.conflicts === 1 ? '' : 'es'}`}</span>}
       </div>
 
       {stopped && w.pending && <StackConflicts w={w} />}
 
-      {!readOnly && (
-        <div className="rv-actions rv-actions-list">
+      {!readOnly && !stopped && (
+        <div className="br-acts">
           {!b.current && (
-            <div className="act">
-              <button type="button" className="btn btn-primary" disabled={busy || stopped} onClick={() => void run({ op: 'checkout', branch: b.name }, `Checked out ${b.name} in ${w.name}.`)}>
-                {WORDS.checkout}
-              </button>
-              <span className="act-help">{HELP.checkout}</span>
-            </div>
+            <button type="button" className="btn btn-primary" disabled={busy} title={`Switch ${w.name} to this branch`} onClick={() => void run({ op: 'checkout', branch: b.name }, `Checked out ${b.name}.`)}>
+              {WORDS.checkout}
+            </button>
           )}
-          {b.needs_restack && !stopped && (
-            <div className="act">
-              <button type="button" className="btn btn-primary" disabled={busy} onClick={() => void run({ op: 'restack', branch: b.name }, `Restacked ${b.name}.`, true)}>
-                ↻ {WORDS.restack}
-              </button>
-              <span className="act-help">{HELP.restack} If something clashes, you resolve it right here.</span>
-            </div>
+          {prOpen && (
+            <button
+              type="button"
+              className="btn"
+              disabled={busy || mergeBlocked}
+              title={mergeBlocked ? 'Fix the failing checks or requested changes first' : HELP.merge(below)}
+              onClick={() => void run({ op: 'merge', branch: b.name }, `Merged up to ${b.name}.`)}
+            >
+              {WORDS.merge}
+              {below > 1 ? ` ${below} PRs` : ''}
+            </button>
           )}
-          {b.pr && (
-            <div className="act">
-              <span className="bbadge bbadge-pr">PR #{b.pr.number}</span>
-              <span className="act-help">{prLine(b.pr.state, b.pr.status)}</span>
-            </div>
-          )}
-          {b.pr && (b.pr.state === 'open' || b.pr.state === null) && !stopped && (
-            <div className="act">
-              <button
-                type="button"
-                className="btn"
-                disabled={busy || b.pr.status?.checks === 'fail' || b.pr.status?.review === 'changes_requested'}
-                onClick={() => void run({ op: 'merge', branch: b.name }, `Merged up to ${b.name}.`)}
-              >
-                {WORDS.merge}
-                {below > 1 ? ` ${below} PRs` : ''}
-              </button>
-              <span className="act-help">{HELP.merge(below)}</span>
-            </div>
-          )}
+          <MoreMenu
+            busy={busy}
+            name={b.name}
+            targets={targets.map((t) => ({ value: t, label: t === w.trunk ? trunk : t }))}
+            onMove={(onto) => void run({ op: 'move', branch: b.name, onto }, `Moved ${b.name} onto ${onto === w.trunk ? trunk : onto}.`, true)}
+            onRename={(new_name) => void run({ op: 'rename', branch: b.name, new_name }, `Renamed ${b.name} to ${new_name}.`)}
+            onDelete={() => void run({ op: 'delete', branch: b.name }, `Deleted ${b.name}; the branches on it moved down.`, true)}
+          />
         </div>
       )}
 
@@ -249,4 +243,104 @@ function prLine(state: string | null, st?: PrBrief | null): string {
   if (st.unresolved > 0) parts.push(plural(st.unresolved, 'open thread'))
   parts.push(`checked ${timeAgo(st.at)}`)
   return parts.join(' · ')
+}
+
+/** Rare branch edits, out of the way: move, rename, delete. */
+function MoreMenu({
+  busy,
+  name,
+  targets,
+  onMove,
+  onRename,
+  onDelete,
+}: {
+  busy: boolean
+  name: string
+  targets: { value: string; label: string }[]
+  onMove: (onto: string) => void
+  onRename: (to: string) => void
+  onDelete: () => void
+}) {
+  const [mode, setMode] = useState<'menu' | 'rename' | 'delete' | null>(null)
+  const [to, setTo] = useState(name)
+  if (mode === 'rename')
+    return (
+      <form
+        className="br-more-form"
+        onSubmit={(e) => {
+          e.preventDefault()
+          if (to.trim() && to.trim() !== name) onRename(to.trim())
+          setMode(null)
+        }}
+      >
+        <input id="br-rename" className="input mono" value={to} autoFocus onChange={(e) => setTo(e.target.value)} aria-label="New name" />
+        <button type="submit" className="btn btn-primary" disabled={busy}>
+          Rename
+        </button>
+        <button type="button" className="btn btn-ghost" onClick={() => setMode(null)}>
+          Cancel
+        </button>
+      </form>
+    )
+  if (mode === 'delete')
+    return (
+      <span className="br-more-form">
+        <span>Delete {name} and its commits?</span>
+        <button
+          type="button"
+          className="btn btn-danger"
+          disabled={busy}
+          onClick={() => {
+            setMode(null)
+            onDelete()
+          }}
+        >
+          Delete
+        </button>
+        <button type="button" className="btn btn-ghost" onClick={() => setMode(null)}>
+          Cancel
+        </button>
+      </span>
+    )
+  return (
+    <span className="br-more">
+      <button type="button" className="btn btn-ghost" aria-expanded={mode === 'menu'} onClick={() => setMode((m) => (m === 'menu' ? null : 'menu'))}>
+        More ▾
+      </button>
+      {mode === 'menu' && (
+        <span className="br-menu" role="menu">
+          {targets.length > 0 && (
+            <label className="br-menu-item">
+              Move onto
+              <select
+                id="br-move"
+                defaultValue=""
+                disabled={busy}
+                onChange={(e) => {
+                  if (!e.target.value) return
+                  setMode(null)
+                  onMove(e.target.value)
+                }}
+              >
+                <option value="" disabled>
+                  choose…
+                </option>
+                {targets.map((t) => (
+                  <option key={t.value} value={t.value}>
+                    {t.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
+          <button type="button" role="menuitem" className="br-menu-item" onClick={() => setMode('rename')}>
+            Rename…
+          </button>
+          <button type="button" role="menuitem" className="br-menu-item br-menu-danger" onClick={() => setMode('delete')}>
+            Delete…
+          </button>
+        </span>
+      )}
+    </span>
+  )
 }
