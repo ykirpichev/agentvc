@@ -44,6 +44,10 @@ import type {
   AgentSettings,
   WorkspaceAgentSettings,
   PermissionsReport,
+  CommentThread,
+  CommentTarget,
+  NewComment,
+  SubmittedReview,
   TreeResponse,
   SearchResponse,
 } from './types'
@@ -76,6 +80,10 @@ async function post<T>(path: string, body?: unknown): Promise<T> {
     headers: { 'content-type': 'application/json' },
     body: body === undefined ? undefined : JSON.stringify(body),
   })
+}
+
+async function del<T>(path: string): Promise<T> {
+  return request<T>(apiUrl(path), { method: 'DELETE' })
 }
 
 async function request<T>(url: string, init: RequestInit = {}): Promise<T> {
@@ -177,6 +185,18 @@ export const api = {
     post<WorkspaceAgentSettings>(`/workspaces/${encodeURIComponent(workspace)}/agent-settings`, s),
   mark: (id: number, status: 'passed' | 'failed' | 'exploring') =>
     post<ActionResponse>(`/attempts/${id}/mark`, { status }),
+  /** Review threads on a target, re-anchored to its tip; your drafts with `drafts`. */
+  comments: (target: CommentTarget, drafts = true) =>
+    get<{ threads: CommentThread[] }>('/comments', { target, drafts: drafts ? '1' : undefined }),
+  addComment: (c: NewComment) => post<{ thread: CommentThread }>('/comments', c),
+  replyComment: (id: string, body: string) => post<{ thread: CommentThread }>(`/comments/${encodeURIComponent(id)}/reply`, { body }),
+  resolveComment: (id: string) => post<{ thread: CommentThread }>(`/comments/${encodeURIComponent(id)}/resolve`),
+  reopenComment: (id: string) => post<{ thread: CommentThread }>(`/comments/${encodeURIComponent(id)}/reopen`),
+  deleteDraft: (id: string) => del<{ thread: CommentThread }>(`/comments/${encodeURIComponent(id)}`),
+  /** Send your drafts on `target` as one review, to the agent working on it and/or GitHub. */
+  submitReview: (target: CommentTarget, to: 'agent' | 'github' | 'both' | 'none') =>
+    post<SubmittedReview>('/reviews/submit', { target, to }),
+  discardDrafts: (target: CommentTarget) => post<{ discarded: string[] }>('/reviews/discard', { target }),
   /** One directory of any ref, marked against `changed` (`auto`: the ref's own base). */
   tree: (r: string, path = '', changed: string | undefined = 'auto') => get<TreeResponse>('/tree', { ref: r, path, changed }),
   /** Every file path of a ref, for go-to-file. */

@@ -1304,6 +1304,51 @@ pub fn queued_for_agent(cwd: &Path, a: &crate::agent::Agent) -> Result<Option<St
     Ok((!threads.is_empty()).then(|| format_review(&threads)))
 }
 
+/// Who an agent working in `cwd` writes as: `agent:agN` from
+/// `$AGENTVC_AGENT` or the control-center agent of this worktree, else
+/// `agent:claude`.
+pub fn agent_here(cwd: &Path) -> String {
+    if let Some(id) = std::env::var("AGENTVC_AGENT")
+        .ok()
+        .filter(|id| is_agent_id(id))
+    {
+        return format!("agent:{id}");
+    }
+    match targets_at(cwd).0 {
+        Some(id) => format!("agent:{id}"),
+        None => "agent:claude".into(),
+    }
+}
+
+/// The threads on what the agent working in `cwd` works on (it, and the
+/// checked-out branch), local and from GitHub; `active` leaves out resolved
+/// ones. Reviews sent its way count as handed over (`mcp`).
+pub fn here(cwd: &Path, active: bool) -> Result<Vec<Thread>> {
+    let (agent, targets) = targets_at(cwd);
+    if targets.is_empty() {
+        return Ok(Vec::new());
+    }
+    let file = store_path(cwd)?;
+    if file.exists() {
+        let ids: Vec<String> = undelivered(&read_store(&file)?, &targets, agent.as_deref())
+            .into_iter()
+            .map(|r| r.id)
+            .collect();
+        if !ids.is_empty() {
+            mark_delivered(&file, &ids, "mcp")?;
+        }
+    }
+    let mut out = list(
+        cwd,
+        &Filter {
+            active,
+            ..Default::default()
+        },
+    )?;
+    out.retain(|t| targets.contains(&t.target));
+    Ok(out)
+}
+
 /// Open (and addressed) threads per target key, for badges.
 pub fn active_counts(cwd: &Path) -> HashMap<String, usize> {
     let mut out = HashMap::new();

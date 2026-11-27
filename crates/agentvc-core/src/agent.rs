@@ -124,7 +124,9 @@ const TAIL_LINES: usize = 20;
 const SYSTEM_PROMPT: &str = "You are one of several agents a person runs from the agentvc control center. \
 You work in your own git worktree; do not push, switch branches or commit (agentvc commits your work when you stop). \
 When you need a decision from the person, call the ask_human tool with one short question instead of guessing; \
-they answer in the control center. Finish with a short summary of what you changed.";
+they answer in the control center. When the person sends review comments, address each one, reply in its \
+thread with reply_comment and mark it done with resolve_comment; before you finish, call review_comments to check \
+none is left open. Finish with a short summary of what you changed.";
 
 fn agent_err(code: &'static str, message: impl Into<String>) -> Error {
     Error::Stack {
@@ -2146,7 +2148,7 @@ pub fn work(dir: &Path, exe: &Path) -> Result<Agent> {
         _ => None,
     };
     let output_tail = tail(&fs::read_to_string(&out_path).unwrap_or_default(), 5);
-    update(dir, |a| {
+    let done = update(dir, |a| {
         a.seconds += now() - began;
         a.finished_at = Some(now());
         a.worker_pid = None;
@@ -2192,7 +2194,20 @@ pub fn work(dir: &Path, exe: &Path) -> Result<Agent> {
             a.tests = check;
         }
         Ok(())
-    })
+    })?;
+    // Review comments sent while it worked and not handed over by its hook
+    // start its next turn (#169).
+    if !stopped && !done.state.is_closed() {
+        let cwd = if done.worktree.is_dir() {
+            done.worktree.clone()
+        } else {
+            common.clone()
+        };
+        if let Ok(Some(text)) = crate::comments::queued_for_agent(&cwd, &done) {
+            return reply(&cwd, &done.id, &text, exe);
+        }
+    }
+    Ok(done)
 }
 
 // The tests drive agents with `sh` commands.

@@ -1,12 +1,18 @@
 import { structuredPatch } from 'diff'
+import { Fragment, useState } from 'react'
 import { Link } from 'react-router'
 import { codeLink } from '../core/links'
 import { api } from '../api/client'
+import { useLive } from '../api/live'
 import type { ChangeKind, FileResponse, Ref } from '../api/types'
 import { useResource } from '../api/useResource'
 import { bytes } from '../lib/format'
 import { ErrorNote, Skeleton } from './bits'
+import { CommentBox, ThreadView } from './Comments'
+import { lineKey, placeThreads, type DiffComments } from '../core/comments'
 import { Icon } from './Icon'
+import { useToast } from './Toaster'
+import type { CommentSide, CommentThread } from '../api/types'
 
 interface Line {
   kind: 'add' | 'del' | 'ctx'
@@ -65,18 +71,34 @@ function content(f: FileResponse | undefined): string | null {
   return f.content
 }
 
-/** Unified diff of one file between two refs. */
+/** Lines picked for a new comment: one side, a range. */
+interface Pick {
+  side: CommentSide
+  start: number
+  end: number
+}
+
+/** The side and line a row is commented on: removed lines on the old side, the rest on the new. */
+function rowLine(l: Line): { side: CommentSide; line: number } {
+  return l.kind === 'del' ? { side: 'old', line: l.old! } : { side: 'new', line: l.new! }
+}
+
+/** Unified diff of one file between two refs. With `comments`, lines take
+ * review comments: click a line number (or drag over several) to write one;
+ * threads show under their line. */
 export function DiffView({
   base,
   head,
   path,
   kind,
+  comments,
   codeRef,
 }: {
   base: Ref
   head: Ref
   path: string
   kind: ChangeKind
+  comments?: DiffComments
   /** A browse ref (`branch:w1/x`, `agent:ag3`) to offer "View file" in the Code tab. */
   codeRef?: string
 }) {
@@ -93,6 +115,80 @@ export function DiffView({
     return { binary: false as const, ...buildHunks(ta, tb) }
   })
   const result = files.data
+  const toast = useToast()
+  const { refresh } = useLive()
+  const [pick, setPick] = useState<Pick | null>(null)
+  const [dragging, setDragging] = useState(false)
+  const placed = comments ? placeThreads(comments.threads, path) : null
+  // Threads whose line is not among the rows shown (or gone) go above the table.
+  const shown = new Set<string>()
+  if (result && !result.binary)
+    for (const h of result.hunks)
+      for (const l of h.lines) {
+        const r = rowLine(l)
+        shown.add(lineKey(r.side, r.line))
+        if (l.kind === 'ctx') shown.add(lineKey('old', l.old!))
+      }
+  const above: CommentThread[] = placed
+    ? [...placed.loose, ...[...placed.at.entries()].filter(([k]) => !shown.has(k)).flatMap(([, ts]) => ts)]
+    : []
+  const canWrite = !!comments && !comments.readOnly
+
+  const startPick = (l: Line) => {
+    if (!canWrite) return
+    const r = rowLine(l)
+    setPick({ side: r.side, start: r.line, end: r.line })
+    setDragging(true)
+  }
+  const extendPick = (l: Line) => {
+    if (!dragging || !pick) return
+    const r = rowLine(l)
+    if (r.side !== pick.side) return
+    setPick({ ...pick, end: r.line })
+  }
+  const save = async (body: string, now: boolean) => {
+    if (!pick || !comments) return
+    const [start, end] = pick.start <= pick.end ? [pick.start, pick.end] : [pick.end, pick.start]
+    try {
+      await api.addComment({ target: comments.target, lines: { path, side: pick.side, start, end }, body, pending: !now })
+      setPick(null)
+      toast.ok(now ? 'Comment posted.' : 'Added to your review. Send it from the bar above when you are done.', { undo: false })
+    } catch (e) {
+      toast.error(e)
+      throw e
+    } finally {
+      refresh()
+    }
+  }
+  const inPick = (l: Line) => {
+    if (!pick) return false
+    const r = rowLine(l)
+    const [a, b] = pick.start <= pick.end ? [pick.start, pick.end] : [pick.end, pick.start]
+    return r.side === pick.side && r.line >= a && r.line <= b
+  }
+  const pickEnd = pick ? Math.max(pick.start, pick.end) : 0
+  const rowExtras = (l: Line) => {
+    const r = rowLine(l)
+    const ts = [...(placed?.at.get(lineKey(r.side, r.line)) ?? []), ...(l.kind === 'ctx' ? (placed?.at.get(lineKey('old', l.old!)) ?? []) : [])]
+    const box = pick && !dragging && r.side === pick.side && r.line === pickEnd
+    if (ts.length === 0 && !box) return null
+    return (
+      <tr className="dl-threads">
+        <td colSpan={3}>
+          {ts.map((t) => (
+            <ThreadView key={t.id} t={t} readOnly={comments?.readOnly} />
+          ))}
+          {box && (
+            <CommentBox
+              label={`${pick.side === 'old' ? 'Old line' : 'Line'}${pick.start === pick.end ? ` ${pick.start}` : `s ${Math.min(pick.start, pick.end)}-${pickEnd}`}`}
+              onSave={save}
+              onCancel={() => setPick(null)}
+            />
+          )}
+        </td>
+      </tr>
+    )
+  }
 
   return (
     <section className="diff">
@@ -124,8 +220,15 @@ export function DiffView({
       {result && !result.binary && result.hunks.length === 0 && (
         <div className="diff-note">No textual changes (mode or empty file)</div>
       )}
+      {above.length > 0 && (
+        <div className="diff-threads-above">
+          {above.map((t) => (
+            <ThreadView key={t.id} t={t} readOnly={comments?.readOnly} showWhere />
+          ))}
+        </div>
+      )}
       {result && !result.binary && result.hunks.length > 0 && (
-        <table className="diff-table">
+        <table className={`diff-table ${canWrite ? 'diff-commentable' : ''}`} onMouseUp={() => setDragging(false)} onMouseLeave={() => setDragging(false)}>
           <colgroup>
             <col className="col-ln" />
             <col className="col-ln" />
@@ -133,7 +236,7 @@ export function DiffView({
           </colgroup>
           <tbody>
             {result.hunks.map((h, hi) => (
-              <HunkRows key={hi} hunk={h} />
+              <HunkRows key={hi} hunk={h} onPick={startPick} onExtend={extendPick} picked={inPick} extras={rowExtras} commentable={canWrite} />
             ))}
           </tbody>
         </table>
@@ -142,7 +245,21 @@ export function DiffView({
   )
 }
 
-function HunkRows({ hunk }: { hunk: Hunk }) {
+function HunkRows({
+  hunk,
+  onPick,
+  onExtend,
+  picked,
+  extras,
+  commentable,
+}: {
+  hunk: Hunk
+  onPick: (l: Line) => void
+  onExtend: (l: Line) => void
+  picked: (l: Line) => boolean
+  extras: (l: Line) => React.ReactNode
+  commentable: boolean
+}) {
   return (
     <>
       {hunk.skipped > 0 && (
@@ -152,16 +269,38 @@ function HunkRows({ hunk }: { hunk: Hunk }) {
           </td>
         </tr>
       )}
-      {hunk.lines.map((l, i) => (
-        <tr key={i} className={`dl dl-${l.kind}`}>
-          <td className="ln">{l.old ?? ''}</td>
-          <td className="ln">{l.new ?? ''}</td>
-          <td className="code">
-            <span className="sign">{l.kind === 'add' ? '+' : l.kind === 'del' ? '−' : ' '}</span>
-            {l.text || ' '}
-          </td>
-        </tr>
-      ))}
+      {hunk.lines.map((l, i) => {
+        const gutter = commentable
+          ? {
+              onMouseDown: (e: React.MouseEvent) => {
+                if (e.button !== 0) return
+                e.preventDefault()
+                onPick(l)
+              },
+              onMouseEnter: () => onExtend(l),
+              title: 'Comment on this line (drag for several)',
+            }
+          : {}
+        return (
+          <Fragment key={i}>
+            <tr className={`dl dl-${l.kind} ${picked(l) ? 'dl-picked' : ''}`}>
+              <td className="ln" {...gutter}>
+                {commentable && l.kind === 'del' && <span className="ln-add" aria-hidden>+</span>}
+                {l.old ?? ''}
+              </td>
+              <td className="ln" {...gutter}>
+                {commentable && l.kind !== 'del' && <span className="ln-add" aria-hidden>+</span>}
+                {l.new ?? ''}
+              </td>
+              <td className="code">
+                <span className="sign">{l.kind === 'add' ? '+' : l.kind === 'del' ? '−' : ' '}</span>
+                {l.text || ' '}
+              </td>
+            </tr>
+            {extras(l)}
+          </Fragment>
+        )
+      })}
     </>
   )
 }

@@ -10,6 +10,8 @@ import type { Agent, AgentList, AgentPermissions, AgentRunner, AgentSettings } f
 import { useResource } from '../api/useResource'
 import { ErrorNote, Skeleton } from '../components/bits'
 import { DiffView } from '../components/DiffView'
+import { ReviewBar, ThreadList } from '../components/Comments'
+import { scrollToThread, useThreads } from '../core/comments'
 import { useToast } from '../components/Toaster'
 import { agentLink, agentState, agentsOn, DEFAULT_PERMISSIONS, needsYou, PERMISSION_WORDS, PERMISSIONS_LINK, resultWords, RUNNER_WORDS, settingsLine, working } from '../core/agents'
 import { branchLink, codeLink } from '../core/links'
@@ -518,6 +520,8 @@ export function AgentPage() {
   const steer = useCanSteer()
   const data = useResource(`agent:${id}`, () => api.agent(id))
   const [open, setOpen] = useState<string | null>(null)
+  const target = `agent:${id}`
+  const { threads } = useThreads(id ? target : null)
   if (data.error) return <div className="page rv"><ErrorNote error={data.error} /></div>
   if (!data.data) return <div className="page rv"><Skeleton rows={5} /></div>
   const { agent: a, steps } = data.data
@@ -597,6 +601,17 @@ export function AgentPage() {
         </section>
       )}
 
+      <ReviewBar target={target} threads={threads} agent={a} readOnly={!steer} />
+      <ThreadList
+        target={target}
+        threads={threads}
+        onJump={(t) => {
+          if (t.anchor) setOpen(t.anchor.path)
+          scrollToThread(t.id)
+        }}
+        readOnly={!steer}
+      />
+
       {files.length > 0 && a.result?.commit && (
         <section>
           <h2 className="rv-h2">
@@ -610,7 +625,16 @@ export function AgentPage() {
                   <span className="mono">{f.path}</span>
                   <span className="muted">{open === f.path ? '▾' : '▸'}</span>
                 </button>
-                {open === f.path && <DiffView base={ref.git(a.start.commit)} head={ref.git(a.result!.commit!)} path={f.path} kind={f.kind} codeRef={`agent:${a.id}`} />}
+                {open === f.path && (
+                  <DiffView
+                    base={ref.git(a.start.commit)}
+                    head={ref.git(a.result!.commit!)}
+                    path={f.path}
+                    kind={f.kind}
+                    codeRef={`agent:${a.id}`}
+                    comments={{ target, threads, readOnly: !steer || a.state === 'landed' || a.state === 'discarded' }}
+                  />
+                )}
               </div>
             ))}
           </div>

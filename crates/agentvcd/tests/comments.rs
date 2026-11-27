@@ -75,6 +75,15 @@ fn fixture() -> (tempfile::TempDir, PathBuf) {
     (tmp, main)
 }
 
+/// The environment is the process's, and the tests run in parallel: they
+/// share one agentvc home (their repos are separate spaces in it).
+fn shared_env() {
+    static HOME: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+    let home = HOME.get_or_init(|| tempfile::tempdir().unwrap());
+    std::env::set_var("AGENTVC_HOME", home.path());
+    std::env::set_var("AGENTVC_BIN", "true");
+}
+
 async fn send(
     app: &axum::Router,
     method: &str,
@@ -107,9 +116,8 @@ async fn send(
 
 #[tokio::test]
 async fn comment_send_reply_resolve() {
-    let (tmp, main) = fixture();
-    std::env::set_var("AGENTVC_HOME", tmp.path().join("home"));
-    std::env::set_var("AGENTVC_BIN", "true");
+    let (_tmp, main) = fixture();
+    shared_env();
     let state = AppState::start(&Config::new(&main)).unwrap();
     let app = agentvcd::router(state);
     let (_, ws) = send(&app, "GET", "/api/workspaces", None, false).await;
@@ -257,4 +265,68 @@ async fn comment_send_reply_resolve() {
         "{prompt}"
     );
     assert!(v["review"]["delivered_via"] == "prompt");
+}
+
+#[tokio::test]
+async fn a_review_sent_while_an_agent_works_starts_its_next_turn() {
+    let (_tmp, main) = fixture();
+    shared_env();
+    let state = AppState::start(&Config::new(&main)).unwrap();
+    let app = agentvcd::router(state);
+    let (s, v) = send(
+        &app,
+        "POST",
+        "/api/agents",
+        Some(json!({
+            "workspace": "main", "from": "b1", "prompt": "Add d",
+            "command": "printf 'd\\n' > d.txt",
+        })),
+        false,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let ag = v["agent"]["id"].as_str().unwrap().to_string();
+    // The agent hasn't stopped yet: a comment on its start branch's file.
+    let (s, v) = send(
+        &app,
+        "POST",
+        "/api/comments",
+        Some(json!({
+            "target": format!("agent:{ag}"),
+            "lines": { "path": "b1.txt", "start": 1 },
+            "body": "rename one",
+            "pending": true,
+        })),
+        false,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let (_, v) = send(
+        &app,
+        "POST",
+        "/api/reviews/submit",
+        Some(json!({ "target": format!("agent:{ag}"), "to": "agent" })),
+        false,
+    )
+    .await;
+    assert_eq!(v["delivery"], "queued", "{v}");
+
+    // Its turn ends without the hook handing it over: the review is its next prompt.
+    let dir = agentvc_core::agent::agent_dir(&main, &ag).unwrap();
+    let a = agentvc_core::agent::work(&dir, Path::new("true")).unwrap();
+    assert_eq!(a.state, agentvc_core::agent::AgentState::Queued, "{a:?}");
+    let prompt = a.pending_reply.unwrap();
+    assert!(
+        prompt.contains("b1.txt:1\n    > one\n  rename one"),
+        "{prompt}"
+    );
+    let (_, v) = send(
+        &app,
+        "GET",
+        &format!("/api/comments?agent={ag}"),
+        None,
+        false,
+    )
+    .await;
+    assert_eq!(v["threads"][0]["state"], "open");
 }

@@ -3894,11 +3894,26 @@ fn run_hook(event: &str, cwd: &std::path::Path, as_json: bool) -> Out {
         eprintln!("agentvc hook {event}: workspace: {e}");
     }
     let result = agentvc_core::hooks::handle(event, &input, cwd);
-    let notice = match &result {
+    let overlap = match &result {
         Ok(agentvc_core::hooks::HookOutcome::Snapshot(_)) => {
             agentvc_core::hooks::overlap_notice(event, &input, cwd)
         }
         _ => None,
+    };
+    // Review comments sent to whoever works on this branch (#169).
+    let review = (event == "post-tool-use")
+        .then(|| {
+            let dir = input
+                .get("cwd")
+                .and_then(Value::as_str)
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| cwd.to_path_buf());
+            agentvc_core::comments::inbox(&dir, "hook").ok().flatten()
+        })
+        .flatten();
+    let notice = match (overlap, review) {
+        (Some(a), Some(b)) => Some(format!("{a}\n\n{b}")),
+        (a, b) => a.or(b),
     };
     let json = match &result {
         Ok(o) => json!({ "hook": o }),

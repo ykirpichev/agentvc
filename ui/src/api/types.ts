@@ -198,6 +198,7 @@ export type DaemonEvent =
   | { type: 'attempt_updated'; attempt: Attempt; previous_status: Status }
   | { type: 'snapshot_created'; snapshot: Snapshot }
   | { type: 'agent_changed'; agent: string; state: AgentState }
+  | { type: 'comments_changed'; targets: string[] }
   | { type: 'resync' }
 
 export interface ApiErrorBody {
@@ -553,6 +554,8 @@ export interface WsBranch {
   attempt: number | null
   task: number | null
   status: string | null
+  /** Open review comments on it. */
+  comments?: number
 }
 
 /** A stack PR's checks and review as last fetched (`stack log --prs`, the daemon's poller). */
@@ -840,6 +843,67 @@ export interface PermissionsReport {
     sandbox: boolean
     worktree: string
   }[]
+}
+
+// ---- review comments (crates/agentvcd/src/comments.rs) ---------------------
+
+/** `branch:WS/NAME`, `agent:agN` or `attempt:aN`. */
+export type CommentTarget = string
+
+export type CommentSide = 'old' | 'new'
+export type CommentState = 'pending' | 'open' | 'addressed' | 'resolved'
+
+export interface CommentAnchor {
+  path: string
+  side: CommentSide
+  start: number
+  end: number
+  rev?: string
+  lines: string[]
+  before: string[]
+  after: string[]
+  hash: string
+}
+
+export interface ReviewComment {
+  id: number
+  /** `human:NAME`, `agent:agN`, `github:LOGIN`. */
+  author: string
+  body: string
+  at: Timestamp
+  github_id?: number
+}
+
+export interface CommentThread {
+  id: string
+  target: { kind: 'branch' | 'agent' | 'attempt'; workspace?: string; name: string }
+  anchor?: CommentAnchor
+  state: CommentState
+  comments: ReviewComment[]
+  source: 'local' | 'github'
+  github?: { pr: number; thread?: string; comment?: number; url?: string }
+  review?: string
+  state_by?: string
+  created_at: Timestamp
+  updated_at: Timestamp
+  /** Where its lines are now; absent when outdated or on the whole change. */
+  current?: { start: number; end: number }
+  outdated: boolean
+}
+
+export interface NewComment {
+  target: CommentTarget
+  lines?: { path: string; side: CommentSide; start: number; end?: number }
+  body: string
+  pending?: boolean
+}
+
+export interface SubmittedReview {
+  review: { id: string; threads: string[]; agent?: string; delivered_via?: string }
+  threads: CommentThread[]
+  /** `prompt`: the agent's next turn started; `queued`: it gets them at its next step. */
+  delivery: 'prompt' | 'queued' | 'waiting' | 'none'
+  agent?: Agent
 }
 
 // ---- code browsing (crates/agentvcd/src/code.rs) ---------------------------
