@@ -19,7 +19,7 @@ export function nextStep(versions: GraphAttempt[]): NextStep {
     const ready = versions.filter((g) => g.attempt.status === 'passed').length
     if (ready === 0 && versions.some((g) => g.attempt.status === 'exploring'))
       return { kind: 'wait', label: 'Agents are working' }
-    return { kind: 'choose', label: 'Choose a version' }
+    return { kind: 'choose', label: 'Pick a try' }
   }
   const id = chosen.attempt.id
   if (chosen.conflicts > 0)

@@ -371,3 +371,53 @@
   flex: 1;
   padding: 6px 10px;
 }
+
+/* ---- a task's tries ---- */
+.rv-tries {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  background: var(--surface);
+  margin-bottom: 24px;
+}
+.rv-try {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+}
+.rv-try:last-child {
+  border-bottom: 0;
+}
+.rv-try.chosen {
+  background: var(--promoted-bg);
+}
+.rv-try.closed {
+  opacity: 0.6;
+}
+.rv-try-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.rv-try-name {
+  font-weight: 600;
+  color: var(--text);
+  text-decoration: none;
+}
+.rv-try-name:hover {
+  text-decoration: underline;
+}
+.rv-try-meta {
+  font-size: 12.5px;
+}
+.sp-chip-btn {
+  border: 0;
+  font-family: inherit;
+  cursor: pointer;
+}

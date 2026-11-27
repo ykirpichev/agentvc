@@ -8,8 +8,8 @@ import { actorName, count, money } from '../lib/format'
 export const WORDS = {
   version: 'version',
   versions: 'versions',
-  choose: 'Choose this version',
-  chosen: 'Chosen',
+  choose: 'Use this',
+  chosen: 'In use',
   notChosen: 'Not chosen',
   discard: 'Discard',
   updateFromMain: 'Update from main',
@@ -30,7 +30,7 @@ export const WORDS = {
 
 /** One line under each action saying what it does, in plain words. */
 export const HELP = {
-  choose: 'Pick this as the version to ship. The task\'s other versions are set aside; Undo brings them back.',
+  choose: 'Ship this try. The other tries are set aside; Undo brings them back.',
   updateFromMain: (n: number) =>
     `Main has ${n} new commit${n === 1 ? '' : 's'}. Replays this version's changes on top; you see a preview first and settle any clashes here.`,
   rebaseOnto: 'Like Update from main, onto a main commit or another version you click in the branch graph. Onto a version stacks this one on top of it.',
@@ -69,6 +69,13 @@ export function prWords(
   return null
 }
 
+/** A try's name: the first line of what it did, else who made it. */
+export function tryName(a: Pick<Attempt, 'actor' | 'model' | 'prompt'>, summary?: string | null): string {
+  const line = (summary ?? '').split('\n')[0]!.trim()
+  if (line) return line.length > 80 ? `${line.slice(0, 77)}…` : line
+  return versionName(a)
+}
+
 /** How a version is named: who made it, e.g. `claude · opus`. */
 export function versionName(a: Pick<Attempt, 'actor' | 'model'>): string {
   const who = actorName(a.actor)
@@ -85,7 +92,7 @@ export function statusWords(s: Status): { label: string; tone: 'ok' | 'bad' | 'r
     case 'exploring':
       return { label: 'In progress', tone: 'run' }
     case 'promoted':
-      return { label: 'Chosen', tone: 'win' }
+      return { label: 'In use', tone: 'win' }
     case 'abandoned':
       return { label: 'Not chosen', tone: 'mute' }
   }
