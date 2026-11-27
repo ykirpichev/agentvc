@@ -9,18 +9,31 @@ import { branchLink } from '../core/links'
 import { mainAhead, stackGraph, trunkName, windowState } from '../core/stack'
 import { LANE, StackLines } from './StackLines'
 import { prWords } from '../core/words'
+import { checkoutsOf, folderOf, kindWords, machinesOf, whereTitle } from '../core/where'
+import { plural } from '../lib/format'
 import './stack.css'
 
 export function WorkspacesOverview() {
   const ws = useResource('workspaces', api.workspaces)
   const list = ws.data && !ws.error ? ws.data.workspaces : []
   if (!list.length) return null
+  const data = ws.data!
+  const sp = data.space_info
+  const machines = machinesOf(data)
+  const folders = checkoutsOf(data).length
   return (
-    <section className="wo" aria-label="Workspaces">
-      <h1 className="rv-title">Workspaces</h1>
+    <section className="wo" aria-label="Space">
+      <h1 className="rv-title">
+        <span className="wo-kicker">Space</span> {sp?.name ?? 'Workspaces'}
+      </h1>
       <p className="muted wo-lead">
-        Each workspace is a git worktree{list.some((w) => w.other_checkout) ? ' or another checkout folder of this repo' : ''} with its own stack. Pick a
-        branch to review, rebase or move it.
+        {sp ? (
+          <>
+            <span className="wo-key" title={`Space id ${sp.id}`}>{sp.key}</span> ·{' '}
+          </>
+        ) : null}
+        {plural(list.length, 'workspace')} in {plural(folders, 'checkout folder')} on {machines.length === 1 ? machines[0] : plural(machines.length, 'machine')}. Each workspace is an isolated
+        place where one agent or person works, with its own stack. Pick a branch to review, rebase or move it.
       </p>
       <div className="wo-grid">
         {list.map((w) => (
@@ -43,9 +56,12 @@ function Card({ w }: { w: WorkspaceInfo }) {
         <span className="wo-name">{w.name}</span>
         {st && <span className={`sp-chip sp-chip-${st.tone}`}>{st.label}</span>}
       </div>
-      <div className="wo-path muted" title={w.path}>
-        {w.path.split('/').filter(Boolean).slice(-2).join('/')}
-        {w.other_checkout ? ' · other folder' : ''}
+      <div className="wo-where" title={whereTitle(w)}>
+        <span className="wo-path">{folderOf(w)}</span>
+        <span className="muted wo-machine">
+          on <b>{w.machine}</b> · {kindWords(w)}
+          {w.user ? ` · ${w.user}` : ''}
+        </span>
       </div>
       {rows.length === 0 ? (
         <p className="muted wo-none">No unmerged branches.</p>

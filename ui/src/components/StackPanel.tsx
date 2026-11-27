@@ -8,7 +8,7 @@ import { useMemo, useState, type DragEvent } from 'react'
 import { useLocation } from 'react-router'
 import { api } from '../api/client'
 import { useLive } from '../api/live'
-import type { Agent, TaskSummary, WorkspaceInfo, WsBranch } from '../api/types'
+import type { Agent, TaskSummary, WorkspaceInfo, WorkspaceList, WsBranch } from '../api/types'
 import { useResource } from '../api/useResource'
 import { thisWorkspace } from '../core/embed'
 import { canMoveBranch } from '../core/graph'
@@ -18,6 +18,7 @@ import { mainAhead, needsSync, stackGraph, trunkName, windowState } from '../cor
 import { LANE, StackLines } from './StackLines'
 import { prWords, shortSha } from '../core/words'
 import { plural } from '../lib/format'
+import { checkoutsOf, folderOf, machinesOf, shortFolder, whereTitle } from '../core/where'
 import { BRANCH_MIME, useStackEdit } from './stackEdit'
 import { useToast } from './Toaster'
 import './stack.css'
@@ -77,9 +78,7 @@ export function StackPanel({ tasks, agents }: { tasks: TaskSummary[] | undefined
         <span>Needs you</span>
         <span className="sp-needs-n">{needs}</span>
       </button>
-      <h3 className="sp-h sp-h-top">
-        Workspaces <span className="sp-count">{list.length}</span>
-      </h3>
+      <SpaceHead data={ws.data} />
       {ordered.length === 0 && (
         <p className="sp-empty muted">
           No workspaces yet. Each git worktree or checkout folder (each editor window) is a workspace with its own stack: run <code>agentvc stack create</code> in one.
@@ -96,6 +95,28 @@ export function StackPanel({ tasks, agents }: { tasks: TaskSummary[] | undefined
           onToggle={() => toggle(w.id)}
         />
       ))}
+    </div>
+  )
+}
+
+/** The space on top of the sidebar: its name, and how many workspaces in how many places. */
+function SpaceHead({ data }: { data: WorkspaceList }) {
+  const sp = data.space_info
+  const n = data.workspaces.length
+  const machines = machinesOf(data).length
+  const folders = checkoutsOf(data).length
+  const spread = [
+    plural(n, 'workspace'),
+    folders > 1 ? `${folders} folders` : '',
+    machines > 1 ? `${machines} machines` : `on ${data.machine ?? data.workspaces[0]?.machine ?? 'this machine'}`,
+  ]
+    .filter(Boolean)
+    .join(' · ')
+  return (
+    <div className="sp-space" title={sp ? `Space ${sp.name} (${sp.id})\nKey: ${sp.key}\nEvery workspace in it works on this project without getting in the others' way.` : 'This checkout joins no space: `agentvc space join KEY`'}>
+      <div className="sp-h sp-space-label">Space</div>
+      <div className="sp-space-name">{sp?.name ?? 'no space'}</div>
+      <div className="sp-space-meta">{spread}</div>
     </div>
   )
 }
@@ -198,18 +219,16 @@ function WindowStack({
   return (
     <section className={`sp-win ${busy ? 'busy' : ''}`} aria-label={`${w.name} stack`}>
       <header className="sp-head">
-        <button type="button" className="sp-ws" onClick={onToggle} aria-expanded={open} title={w.path}>
+        <button type="button" className="sp-ws" onClick={onToggle} aria-expanded={open} title={whereTitle(w)}>
           <span className={`sp-caret ${open ? 'open' : ''}`} aria-hidden>
             ▸
           </span>
           <span className="sp-ws-name">{w.name}</span>
           {mine && <span className="sp-here">this window</span>}
-          {w.kind === 'remote' && <span className="sp-here">{w.machine}</span>}
-          {w.other_checkout && (
-            <span className="sp-here" title={`Another checkout of this repo: ${w.checkout}`}>
-              other folder
-            </span>
-          )}
+          <span className="sp-ws-where" title={whereTitle(w)}>
+            <span className="sp-ws-machine">{w.machine} · </span>
+            <span className="sp-ws-folder">{shortFolder(folderOf(w))}</span>
+          </span>
           <span className="sp-ws-meta">
             {rows.length ? `${rows.length} branch${rows.length === 1 ? '' : 'es'} on ${trunk}` : `no unmerged branches · on ${trunk}`}
             {sync && !stoppedAt && rows.length > 0 && (

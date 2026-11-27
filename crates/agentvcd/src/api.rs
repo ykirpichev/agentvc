@@ -162,14 +162,32 @@ fn parse_snapshot_id(s: &str) -> Result<i64, ApiError> {
 #[derive(Serialize)]
 struct SpaceInfo {
     workdir: String,
+    /// The workdir's folder name.
     name: String,
     format_version: u32,
     daemon_version: &'static str,
+    /// The space (project) this checkout belongs to (#162), if any.
+    project: Option<agentvc_core::checkouts::SpaceRef>,
+    /// The machine the daemon runs on.
+    machine: String,
+    /// The workdir for people (`~/...`).
+    folder: String,
 }
 
 async fn space_info(State(st): State<AppState>) -> ApiResult<SpaceInfo> {
     let w = st.workdir();
+    let dir = w.to_path_buf();
+    let project = tokio::task::spawn_blocking(move || {
+        agentvc_core::stack::Window::open(&dir)
+            .ok()
+            .and_then(|win| agentvc_core::checkouts::describe(&win))
+    })
+    .await
+    .unwrap_or(None);
     Ok(Json(SpaceInfo {
+        project,
+        machine: agentvc_core::workspace::machine(),
+        folder: agentvc_core::workspace::tilde(w),
         workdir: w.to_string_lossy().into_owned(),
         name: w
             .file_name()

@@ -120,8 +120,8 @@ export function Shell() {
           </span>
           <div className="brand-text">
             <div className="brand-name">agentvc</div>
-            <div className="brand-space" title={space.data?.workdir}>
-              {space.data?.name ?? '…'}
+            <div className="brand-space" title={space.data ? `${space.data.folder ?? space.data.workdir} on ${space.data.machine ?? 'this machine'}` : undefined}>
+              {space.data ? (space.data.project?.name ?? space.data.name) : '…'}
               {hosted && (
                 <>
                   {' · '}

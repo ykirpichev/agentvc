@@ -2211,3 +2211,96 @@ fn clones_of_one_repo_share_a_space_of_workspaces() {
     let s = agentvc_home(&home, &b, &["workspace", "space", "--reset"]);
     assert_eq!(s["checkouts"].as_array().unwrap().len(), 1, "{s}");
 }
+
+#[test]
+fn space_holds_workspaces_and_says_where_each_lives() {
+    let tmp = tempdir();
+    let home = tmp.path().join("home");
+    git(
+        tmp.path(),
+        &["init", "--quiet", "--bare", "-b", "main", "mono.git"],
+    );
+    let a = tmp.path().join("mono");
+    git(tmp.path(), &["clone", "--quiet", "mono.git", "mono"]);
+    fs::write(a.join("README"), "hi\n").unwrap();
+    git(&a, &["add", "-A"]);
+    git(&a, &["commit", "--quiet", "-m", "init"]);
+    git(&a, &["push", "--quiet", "origin", "HEAD:main"]);
+    git(&a, &["fetch", "--quiet"]);
+
+    // The space has a stable id and a name from its key.
+    let s = agentvc_home(&home, &a, &["space"]);
+    assert_eq!(s["space"]["name"], "mono", "{s}");
+    let id = s["space"]["id"].as_str().unwrap().to_string();
+    assert!(id.starts_with('s') && id.len() == 9, "{s}");
+
+    // A new worktree and a new clone both say which space they joined.
+    let r = agentvc_home(&home, &a, &["workspace", "new", "../mono-wt"]);
+    assert_eq!(r["ok"], true, "{r}");
+    assert_eq!(r["space"]["id"], id.as_str(), "{r}");
+    assert_eq!(r["kind"], "worktree");
+    assert_eq!(r["workspace"]["name"], "mono-wt");
+    let r = agentvc_home(
+        &home,
+        &a,
+        &[
+            "workspace",
+            "new",
+            "--clone",
+            "../mono-b",
+            "--name",
+            "build-b",
+        ],
+    );
+    assert_eq!(r["ok"], true, "{r}");
+    assert_eq!(r["space"]["id"], id.as_str(), "{r}");
+    assert_eq!(r["workspace"]["name"], "build-b");
+    assert!(tmp.path().join("mono-b/README").exists());
+    let r = agentvc_home(&home, &a, &["workspace", "new", "../mono-wt"]);
+    assert_eq!(r["error"]["code"], "dir_exists", "{r}");
+    let r = agentvc_home(
+        &home,
+        &a,
+        &["workspace", "new", "../other", "--name", "build-b"],
+    );
+    assert_eq!(r["error"]["code"], "name_taken", "{r}");
+
+    // Every workspace says its folder and machine; the space groups them.
+    let l = agentvc_home(&home, &a, &["workspace", "ls"]);
+    assert_eq!(l["space_info"]["id"], id.as_str(), "{l}");
+    let ws = l["workspaces"].as_array().unwrap();
+    assert_eq!(ws.len(), 3, "{l}");
+    for w in ws {
+        assert_eq!(w["machine"], l["machine"], "{w}");
+        assert_eq!(w["this_machine"], true, "{w}");
+        assert!(w["folder"].as_str().unwrap().ends_with(
+            Path::new(w["path"].as_str().unwrap())
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+        ));
+    }
+    let s = agentvc_home(&home, &a, &["space", "show"]);
+    let groups = s["checkouts"].as_array().unwrap();
+    assert_eq!(groups.len(), 2, "{s}");
+    assert_eq!(groups[0]["workspaces"].as_array().unwrap().len(), 2, "{s}");
+
+    // Renaming keeps the id; the other checkout sees the new name.
+    let r = agentvc_home(&home, &a, &["space", "name", "monorepo"]);
+    assert_eq!(r["space"]["name"], "monorepo", "{r}");
+    assert_eq!(r["space"]["id"], id.as_str());
+    let b = tmp.path().join("mono-b");
+    let s = agentvc_home(&home, &b, &["space"]);
+    assert_eq!(s["space"]["name"], "monorepo", "{s}");
+    let all = agentvc_home(&home, &b, &["space", "ls"]);
+    assert_eq!(all["spaces"].as_array().unwrap().len(), 1, "{all}");
+    assert_eq!(all["here"], id.as_str());
+    let r = agentvc_home(&home, &a, &["space", "name", "--reset"]);
+    assert_eq!(r["space"]["name"], "mono", "{r}");
+
+    // `space join` is `workspace space` under its new name.
+    let s = agentvc_home(&home, &b, &["space", "join", "solo"]);
+    assert_eq!(s["space"], "solo", "{s}");
+    assert_eq!(s["space_info"]["name"], "solo");
+}

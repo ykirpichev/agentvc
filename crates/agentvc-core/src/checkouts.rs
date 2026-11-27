@@ -1,6 +1,17 @@
-//! Checkouts of one space (#160): the same repo cloned into several folders
-//! on one machine, shown and edited together.
+//! Spaces and their checkouts (#160, #162).
 //!
+//! A *space* is one project that humans and agents work on together. It
+//! holds *workspaces*: isolated places (a worktree or a clone folder, on
+//! some machine) where one agent or person works without getting in the
+//! others' way, each with its own stack.
+//!
+//! A space is identified by its *key*: git config `agentvc.space`, else the
+//! normalized remote URL. Its id is derived from the key (`s` + 8 hex of
+//! its SHA-1), so every machine and user that works on the same repo agrees
+//! on it without talking to each other. Its display name (default: the last
+//! part of the key, e.g. `agentvc`) is kept in this machine's registry.
+//!
+//! The same repo cloned into several folders joins one space:
 //! A monorepo's build often cannot run twice in one checkout, so people
 //! clone it into several folders, one workspace (and one PR stack) each.
 //! Every checkout says which *space* it belongs to; checkouts on this
@@ -13,12 +24,16 @@
 //! - This machine's checkouts are remembered in `checkouts.json` under
 //!   `$AGENTVC_HOME` (default `~/.agentvc`). A checkout registers itself
 //!   whenever its workspaces are listed; entries whose folder is gone are
-//!   dropped.
+//!   dropped. Display names of spaces live there too.
+//!
+//! (Not to be confused with [`crate::Space`], one folder's attempt history
+//! under `.agentvc/`.)
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use sha1::{Digest, Sha1};
 
 use crate::error::{Error, IoContext, Result};
 use crate::space::now;
@@ -28,7 +43,7 @@ use crate::stack::{canon, Window};
 pub const CONFIG_KEY: &str = "agentvc.space";
 /// The space name that means "this checkout joins no space".
 pub const NONE: &str = "none";
-const REGISTRY_VERSION: u32 = 1;
+const REGISTRY_VERSION: u32 = 2;
 
 /// One checkout this machine has seen.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -42,10 +57,151 @@ pub struct Entry {
     pub seen_at: i64,
 }
 
+/// A space's display name, set with `agentvc space name`.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+struct Named {
+    key: String,
+    name: String,
+}
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct Registry {
     version: u32,
     checkouts: Vec<Entry>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    names: Vec<Named>,
+}
+
+/// A space as people and the UI see it.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct SpaceRef {
+    /// Stable id, the same on every machine: `s` + 8 hex digits of the key.
+    pub id: String,
+    /// What people call it.
+    pub name: String,
+    /// What identifies it: `agentvc.space`, else the remote's URL.
+    pub key: String,
+    /// Where the key came from.
+    pub source: Source,
+}
+
+/// The id of the space with `key`.
+pub fn space_id(key: &str) -> String {
+    let mut h = Sha1::new();
+    h.update(key.as_bytes());
+    format!("s{}", &hex::encode(h.finalize())[..8])
+}
+
+/// The name a space gets until someone names it: the key's last part.
+pub fn default_name(key: &str) -> String {
+    let last = key
+        .trim_end_matches(['/', '\\'])
+        .rsplit(['/', '\\'])
+        .next()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(key);
+    last.strip_suffix(".git")
+        .filter(|s| !s.is_empty())
+        .unwrap_or(last)
+        .to_string()
+}
+
+fn name_in(r: &Registry, key: &str) -> String {
+    r.names
+        .iter()
+        .find(|n| n.key == key)
+        .map(|n| n.name.clone())
+        .unwrap_or_else(|| default_name(key))
+}
+
+fn make_ref(r: &Registry, key: String, source: Source) -> SpaceRef {
+    SpaceRef {
+        id: space_id(&key),
+        name: name_in(r, &key),
+        key,
+        source,
+    }
+}
+
+/// The space the checkout `w` belongs to, with its id and name.
+pub fn describe(w: &Window) -> Option<SpaceRef> {
+    let (key, source) = space_of(w);
+    let r = registry_file()
+        .map(|f| read_registry(&f))
+        .unwrap_or_default();
+    key.map(|k| make_ref(&r, k, source))
+}
+
+/// Give the space of `w` a display name (`None`: back to the default).
+pub fn set_name(w: &Window, name: Option<&str>) -> Result<SpaceRef> {
+    let Some(sp) = describe(w) else {
+        return Err(Error::Stack {
+            code: "no_space",
+            message: "this checkout joins no space; `agentvc space join NAME` joins one".into(),
+            details: None,
+        });
+    };
+    let name = name.map(str::trim);
+    if let Some(n) = name {
+        if n.is_empty() || n.chars().any(|c| c.is_control()) {
+            return Err(Error::Stack {
+                code: "bad_space",
+                message: format!("{n:?} is not a space name"),
+                details: None,
+            });
+        }
+    }
+    let Some(file) = registry_file() else {
+        return Err(Error::Stack {
+            code: "no_home",
+            message: "no home directory to keep space names in; set AGENTVC_HOME".into(),
+            details: None,
+        });
+    };
+    let mut r = read_registry(&file);
+    r.names.retain(|n| n.key != sp.key);
+    if let Some(n) = name.filter(|n| *n != default_name(&sp.key)) {
+        r.names.push(Named {
+            key: sp.key.clone(),
+            name: n.to_string(),
+        });
+    }
+    r.version = REGISTRY_VERSION;
+    write_registry(&file, &r)?;
+    Ok(make_ref(&r, sp.key, sp.source))
+}
+
+/// One space this machine knows, with its checkouts here.
+#[derive(Clone, Debug, Serialize)]
+pub struct KnownSpace {
+    #[serde(flatten)]
+    pub space: SpaceRef,
+    /// Main worktrees of its checkouts on this machine.
+    pub checkouts: Vec<PathBuf>,
+}
+
+/// Every space with a checkout on this machine, by name.
+pub fn known_spaces() -> Vec<KnownSpace> {
+    let r = registry_file()
+        .map(|f| read_registry(&f))
+        .unwrap_or_default();
+    let mut out: Vec<KnownSpace> = Vec::new();
+    for e in &r.checkouts {
+        let Some(key) = &e.space else { continue };
+        if !e.path.exists() {
+            continue;
+        }
+        match out.iter_mut().find(|k| &k.space.key == key) {
+            Some(k) => k.checkouts.push(e.path.clone()),
+            None => out.push(KnownSpace {
+                // The registry does not say; most spaces come from a remote.
+                space: make_ref(&r, key.clone(), Source::Remote),
+                checkouts: vec![e.path.clone()],
+            }),
+        }
+    }
+    out.sort_by(|a, b| a.space.name.cmp(&b.space.name));
+    out
 }
 
 /// `$AGENTVC_HOME`, else `~/.agentvc`.
@@ -309,6 +465,27 @@ mod tests {
         assert_eq!(normalize_url(&p.to_string_lossy(), b), want);
         assert_eq!(normalize_url("origin.git", tmp.path()), want);
         assert_eq!(normalize_url(&format!("file://{}", p.display()), b), want);
+    }
+
+    #[test]
+    fn space_ids_and_default_names() {
+        assert_eq!(space_id("github.com/o/r"), space_id("github.com/o/r"));
+        assert_ne!(space_id("github.com/o/r"), space_id("github.com/o/s"));
+        assert!(space_id("x").starts_with('s') && space_id("x").len() == 9);
+        assert_eq!(default_name("github.com/o/mono"), "mono");
+        assert_eq!(default_name("/srv/git/mono/"), "mono");
+        assert_eq!(default_name("team-mono"), "team-mono");
+        assert_eq!(default_name("/srv/git/mono.git"), "mono");
+    }
+
+    #[test]
+    fn registry_reads_version_1_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("checkouts.json");
+        fs::write(&file, r#"{"version":1,"checkouts":[]}"#).unwrap();
+        let r = read_registry(&file);
+        assert!(r.names.is_empty());
+        assert_eq!(name_in(&r, "github.com/o/r"), "r");
     }
 
     #[test]
