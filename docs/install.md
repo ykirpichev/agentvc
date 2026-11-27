@@ -46,8 +46,7 @@ running.
 
 ## 3. Cursor
 
-Search **agentvc** in the Extensions view (it comes from Open VSX), or install
-the same file:
+Install the same file (the extension is not on Open VSX yet):
 
 ```sh
 cursor --install-extension agentvc.vsix
