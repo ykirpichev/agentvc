@@ -71,6 +71,11 @@ free tier). No Docker and no domain needed: Cloud Build builds the image, and
 the public name is `<ip>.sslip.io` with a Let's Encrypt certificate from Caddy
 (pass `DOMAIN=` to use your own name; point its A record at the IP first).
 
+To move to another name later, for example a free `<name>.duckdns.org` set to
+the static IP: change the GitHub OAuth app's homepage and callback URL, then
+`DOMAIN=<name>.duckdns.org deploy/gcp/deploy.sh up`, and restart each
+`agentvcd --cloud` with the new URL. Caddy gets the new certificate itself.
+
 ```sh
 deploy/gcp/deploy.sh setup    # new project, billing, APIs, registry, static IP, firewall
 deploy/gcp/deploy.sh build    # Cloud Build, about 10 minutes
