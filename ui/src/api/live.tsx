@@ -1,5 +1,6 @@
 import { createContext, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import type { DaemonEvent } from './types'
+import { apiUrl } from '../core/base'
 
 export type Connection = 'connecting' | 'live' | 'offline'
 
@@ -43,7 +44,7 @@ export function LiveProvider({ children }: { children: ReactNode }) {
 
     const connect = () => {
       const proto = location.protocol === 'https:' ? 'wss:' : 'ws:'
-      socket = new WebSocket(`${proto}//${location.host}/api/events`)
+      socket = new WebSocket(`${proto}//${location.host}${apiUrl('/events')}`)
       socket.onmessage = (msg) => {
         let ev: DaemonEvent
         try {

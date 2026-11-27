@@ -1,0 +1,26 @@
+# The hosted service on one VM: agentvc-cloud plus a Cloudflare Tunnel, so the
+# VM needs no open inbound port and no TLS certificate of its own.
+# Values come from /etc/agentvc-cloud.env (see deploy/README.md).
+services:
+  agentvc-cloud:
+    image: ${AGENTVC_CLOUD_IMAGE:-ghcr.io/ykirpichev/agentvc-cloud:latest}
+    restart: unless-stopped
+    env_file: /etc/agentvc-cloud.env
+    environment:
+      AGENTVC_CLOUD_LISTEN: 0.0.0.0:8080
+      AGENTVC_CLOUD_DATA: /data
+    volumes:
+      - /var/lib/agentvc-cloud:/data
+    # 1 GB VM: leave room for the OS and cloudflared.
+    mem_limit: 384m
+
+  cloudflared:
+    # Pin a version from https://hub.docker.com/r/cloudflare/cloudflared/tags when deploying.
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    env_file: /etc/agentvc-cloud.env
+    # TUNNEL_TOKEN comes from the env file. In the Cloudflare dashboard, route
+    # the tunnel's public hostname to http://agentvc-cloud:8080.
+    mem_limit: 128m
+    depends_on: [agentvc-cloud]

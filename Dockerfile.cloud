@@ -1,0 +1,28 @@
+# agentvc-cloud: the hosted review UI, one small image.
+#   docker build -f Dockerfile.cloud -t agentvc-cloud .
+# Runs anywhere a container runs (GCP VM, Nebius VM, Fly.io, a laptop);
+# configuration is all environment variables, see deploy/README.md.
+
+FROM node:22-bookworm-slim AS ui
+WORKDIR /src/ui
+COPY ui/package.json ui/package-lock.json ./
+RUN npm ci
+COPY ui/ ./
+RUN npm run build
+
+FROM rust:1-bookworm AS build
+WORKDIR /src
+COPY Cargo.toml Cargo.lock ./
+COPY crates ./crates
+COPY --from=ui /src/ui/dist ./ui/dist
+RUN cargo build --release --locked -p agentvc-cloud \
+ && strip target/release/agentvc-cloud
+
+FROM gcr.io/distroless/cc-debian12:nonroot
+COPY --from=build /src/target/release/agentvc-cloud /usr/local/bin/agentvc-cloud
+ENV AGENTVC_CLOUD_LISTEN=0.0.0.0:8080 \
+    AGENTVC_CLOUD_DATA=/data
+VOLUME ["/data"]
+EXPOSE 8080
+USER nonroot
+ENTRYPOINT ["/usr/local/bin/agentvc-cloud"]

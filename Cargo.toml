@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/agentvc-core", "crates/agentvc-cli", "crates/agentvc-mcp", "crates/agentvcd"]
+members = ["crates/agentvc-core", "crates/agentvc-cli", "crates/agentvc-mcp", "crates/agentvcd", "crates/agentvc-cloud"]
 
 [workspace.package]
 version = "0.0.1"

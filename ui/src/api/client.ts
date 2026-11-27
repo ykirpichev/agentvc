@@ -38,6 +38,7 @@ import type {
   WsOp,
   WsRequest,
 } from './types'
+import { apiUrl } from '../core/base'
 
 /** An error from the daemon, carrying its stable `code`. */
 export class ApiError extends Error {
@@ -57,11 +58,11 @@ export class ApiError extends Error {
 async function get<T>(path: string, params?: Record<string, string | undefined>): Promise<T> {
   const qs = new URLSearchParams()
   for (const [k, v] of Object.entries(params ?? {})) if (v !== undefined) qs.set(k, v)
-  return request<T>(`/api${path}${qs.size ? `?${qs}` : ''}`)
+  return request<T>(`${apiUrl(path)}${qs.size ? `?${qs}` : ''}`)
 }
 
 async function post<T>(path: string, body?: unknown): Promise<T> {
-  return request<T>(`/api${path}`, {
+  return request<T>(apiUrl(path), {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: body === undefined ? undefined : JSON.stringify(body),
