@@ -30,8 +30,17 @@ export function Shell() {
   const space = useResource('space', api.space)
   const graph = useResource('graph', api.graph)
   const tasks = useResource('tasks', api.tasks)
+  const agentList = useResource('agents', () => api.agents())
+  const agents = agentList.data?.agents ?? []
+  const needs = agentList.data?.needs_you ?? 0
 
-  const ctx: ReviewContext = { graph: graph.data, tasks: tasks.data }
+  // The count of agents waiting on you, in the browser tab too.
+  useEffect(() => {
+    const base = document.title.replace(/^\(\d+\) /, '')
+    document.title = needs > 0 ? `(${needs}) ${base}` : base
+  }, [needs])
+
+  const ctx: ReviewContext = { graph: graph.data, tasks: tasks.data, agents: agentList.data }
 
   useHotkeys([
     ...NAV.map((n) => ({
@@ -68,7 +77,7 @@ export function Shell() {
     })
   }, [navigate])
 
-  const graphBox = <StackPanel tasks={tasks.data} />
+  const graphBox = <StackPanel tasks={tasks.data} agents={agents} />
 
   if (embedMode === 'sidebar') {
     // An editor's side bar: the one branch tree, nothing else.

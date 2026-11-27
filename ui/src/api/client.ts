@@ -37,6 +37,10 @@ import type {
   WsResolve,
   WsOp,
   WsRequest,
+  Agent,
+  AgentList,
+  AgentStep,
+  StartAgent,
 } from './types'
 import { apiUrl } from '../core/base'
 
@@ -151,6 +155,16 @@ export const api = {
   wsContinue: (workspace: string) => post<WsFinish>(`/workspaces/${encodeURIComponent(workspace)}/continue`),
   wsAbort: (workspace: string) => post<WsFinish>(`/workspaces/${encodeURIComponent(workspace)}/abort`),
   cancelRequest: (id: string) => post<{ request: WsRequest }>(`/requests/${encodeURIComponent(id)}/cancel`),
+  /** Agents started on the workspaces' stacks (landed and discarded ones with `all`). */
+  agents: (all = false) => get<AgentList>('/agents', { all: all ? '1' : undefined }),
+  agent: (id: string) => get<{ agent: Agent; steps: AgentStep[] }>(`/agents/${encodeURIComponent(id)}`),
+  startAgent: (body: StartAgent) => post<{ agent: Agent }>('/agents', body),
+  agentReply: (id: string, text: string) => post<{ agent: Agent }>(`/agents/${encodeURIComponent(id)}/reply`, { text }),
+  agentApprove: (id: string) => post<{ agent: Agent }>(`/agents/${encodeURIComponent(id)}/approve`),
+  agentDeny: (id: string, reason?: string) => post<{ agent: Agent }>(`/agents/${encodeURIComponent(id)}/deny`, reason ? { reason } : {}),
+  agentStop: (id: string) => post<{ agent: Agent }>(`/agents/${encodeURIComponent(id)}/stop`),
+  agentLand: (id: string) => post<{ agent: Agent; edit: WsEditOutcome }>(`/agents/${encodeURIComponent(id)}/land`),
+  agentDiscard: (id: string) => post<{ agent: Agent }>(`/agents/${encodeURIComponent(id)}/discard`),
   mark: (id: number, status: 'passed' | 'failed' | 'exploring') =>
     post<ActionResponse>(`/attempts/${id}/mark`, { status }),
 }

@@ -22,35 +22,18 @@ import { agentLine, HELP, shortSha, statusWords, testsWords, tryName, versionNam
 import { money, plural, timeAgo } from '../lib/format'
 import { CompareView } from './Compare'
 import { WorkspacesOverview } from '../components/WorkspacesOverview'
+import { NeedsYou } from './Agents'
 
 const versionsOf = (graph: Graph, task: number) =>
   visibleVersions(graph, { showClosed: true }).filter((g) => g.attempt.task_id === task)
 
-/** `/review`: nothing picked yet; agent work that waits on you, if any. */
+/** `/review`: the agents that wait on you first, then every workspace. */
 export function ReviewHome() {
-  const { graph, tasks } = useReview()
-  if (!graph || !tasks) return <div className="page"><Skeleton rows={6} /></div>
-  const rows = tasks
-    .map((t) => ({ t, next: nextStep(versionsOf(graph, t.id)), n: versionsOf(graph, t.id).length }))
-    .filter((r) => r.n > 0 && r.next.kind !== 'done')
+  const { agents } = useReview()
   return (
     <div className="page rv">
+      <NeedsYou list={agents} />
       <WorkspacesOverview />
-      {rows.length === 0 ? null : (
-        <>
-          <h1 className="rv-title">Agent work</h1>
-          <div className="rv-list">
-            {rows.map(({ t, next, n }) => (
-              <Link key={t.id} to={taskLink(t.id)} className="rv-item">
-                <span className="rv-item-name">{t.goal}</span>
-                <span className="muted">
-                  {n} {n === 1 ? 'try' : 'tries'} · {next.kind === 'wait' ? 'agents working' : next.label.toLowerCase()} · {timeAgo(t.updated_at)}
-                </span>
-              </Link>
-            ))}
-          </div>
-        </>
-      )}
     </div>
   )
 }
