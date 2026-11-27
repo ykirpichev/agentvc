@@ -9,7 +9,7 @@ import { Kbd } from './bits'
 import { CommandPalette } from './CommandPalette'
 import { Icon, type IconName } from './Icon'
 import { ShortcutHelp } from './ShortcutHelp'
-import { BranchGraph } from './BranchGraph'
+import { StackPanel } from './StackPanel'
 import { ToastProvider } from './Toaster'
 import { embedMode, onHost, toHost } from '../core/embed'
 import { hosted } from '../core/base'
@@ -70,12 +70,7 @@ export function Shell() {
     })
   }, [navigate])
 
-  const graphBox =
-    graph.data && tasks.data ? (
-      <BranchGraph graph={graph.data} tasks={tasks.data} />
-    ) : (
-      <div className="bgraph bgraph-empty muted">{graph.error ? `Graph: ${graph.error.message}` : 'Loading branches…'}</div>
-    )
+  const graphBox = <StackPanel tasks={tasks.data} />
 
   if (embedMode === 'sidebar') {
     // An editor's side bar: the one branch tree, nothing else.

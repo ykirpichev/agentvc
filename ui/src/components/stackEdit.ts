@@ -38,7 +38,8 @@ export function useStackEdit() {
     setBusy(true)
     try {
       const r = await api.stackEdit(w.id, op, keep)
-      const stopped = r.result?.conflict?.branch
+      // A sync carries its restack's stop inside `restack`.
+      const stopped = r.result?.conflict?.branch ?? r.result?.restack?.conflict?.branch
       if (r.outcome === 'queued') toast.ok(`Queued for ${w.name}: ${r.reason ?? 'an agent is working there'}. It applies when the agent stops.`, { undo: false })
       else if (stopped) {
         toast.ok(`${stopped} clashes with its parent. Pick what to keep.`, { undo: false })
