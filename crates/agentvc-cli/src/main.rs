@@ -10,6 +10,7 @@ use std::process::{ExitCode, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
 mod agent_cmd;
+mod comment_cmd;
 mod stack_cmd;
 mod workspace_cmd;
 
@@ -217,6 +218,11 @@ enum Cmd {
     /// with a prompt, see which need you, answer, review and land them.
     #[command(subcommand)]
     Agent(agent_cmd::AgentCmd),
+    /// Review comments on a branch, an agent or a try, pinned to lines of a
+    /// file: add, list, reply, resolve, and send drafts as a review (to the
+    /// agent working on it). Threads follow their lines as the branch moves.
+    #[command(subcommand)]
+    Comment(comment_cmd::CommentCmd),
     /// Supervise one agent turn (started by `agent start` and `agent reply`).
     #[command(hide = true)]
     AgentWorker { dir: PathBuf },
@@ -1330,6 +1336,10 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
         let (json, text) = agent_cmd::run(&cwd, c)?;
         return Ok(Out { json, text });
     }
+    if let Cmd::Comment(c) = cli.cmd {
+        let (json, text) = comment_cmd::run(&cwd, c)?;
+        return Ok(Out { json, text });
+    }
     if let Cmd::AgentWorker { dir } = cli.cmd {
         let a = agentvc_core::agent::work(&dir, &std::env::current_exe()?)?;
         let text = format!("{}: {}", a.id, agent_cmd::state_word(a.state));
@@ -1461,6 +1471,7 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
         | Cmd::Workspace(_)
         | Cmd::Space { .. }
         | Cmd::Agent(_)
+        | Cmd::Comment(_)
         | Cmd::AgentWorker { .. } => unreachable!(),
         Cmd::GitHook { event: _ } => {
             let r = space.record_git_commit(&cwd)?;

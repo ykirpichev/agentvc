@@ -44,6 +44,7 @@ pub(crate) fn routes() -> Router<AppState> {
         .merge(review::routes())
         .merge(crate::workspaces::routes())
         .merge(crate::agents::routes())
+        .merge(crate::comments::routes())
         .merge(graph::routes())
         .fallback(|| async {
             ApiError::new(

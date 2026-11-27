@@ -10,6 +10,7 @@ pub mod bundle;
 pub mod check;
 pub mod checkouts;
 pub mod combine;
+pub mod comments;
 pub mod config;
 pub mod conflicts;
 pub mod cursor;

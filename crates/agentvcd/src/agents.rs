@@ -120,7 +120,7 @@ fn remote_bypass_off() -> ApiError {
 }
 
 /// Refuse a relayed call that would run or steer an agent here.
-fn local_or_allowed(h: &HeaderMap) -> Result<(), ApiError> {
+pub(crate) fn local_or_allowed(h: &HeaderMap) -> Result<(), ApiError> {
     match h.get(RELAY_HEADER).and_then(|v| v.to_str().ok()) {
         None | Some("agents") => Ok(()),
         Some(_) => Err(ApiError::new(
@@ -133,7 +133,7 @@ fn local_or_allowed(h: &HeaderMap) -> Result<(), ApiError> {
 
 /// The `agentvc` program the daemon starts workers with: `$AGENTVC_BIN`,
 /// else next to `agentvcd`, else on `PATH`.
-fn agentvc_exe() -> PathBuf {
+pub(crate) fn agentvc_exe() -> PathBuf {
     if let Some(p) = std::env::var_os("AGENTVC_BIN").filter(|p| !p.is_empty()) {
         return PathBuf::from(p);
     }

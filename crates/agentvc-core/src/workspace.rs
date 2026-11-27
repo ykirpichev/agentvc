@@ -1514,6 +1514,8 @@ pub struct WsBranch {
     pub task: Option<i64>,
     /// `running` (a run is active), or the attempt's status.
     pub status: Option<String>,
+    /// Open review comments on it (#167).
+    pub comments: usize,
 }
 
 /// One workspace with its stack.
@@ -1651,6 +1653,15 @@ pub fn list(cwd: &Path, space: Option<&Space>, remote: bool) -> Result<Workspace
         rest.retain(|r| !out.iter().any(|o| o.id == r.id));
         out.extend(rest);
     }
+    let counts = crate::comments::active_counts(cwd);
+    if !counts.is_empty() {
+        for ws in &mut out {
+            for b in &mut ws.branches {
+                let key = crate::comments::Target::branch(&ws.id, &b.name).key();
+                b.comments = counts.get(&key).copied().unwrap_or(0);
+            }
+        }
+    }
     Ok(WorkspaceList {
         here: here_id,
         space_info: space_name.as_ref().and(crate::checkouts::describe(&here)),
@@ -1727,6 +1738,7 @@ fn list_group(
                     attempt: link.as_ref().map(|l| l.0),
                     task: link.as_ref().and_then(|l| l.1),
                     status: link.map(|l| l.2),
+                    comments: 0,
                 }
             })
             .collect();
@@ -2067,6 +2079,7 @@ fn remote_branches(w: &Window, id: &str, s: &State, base: Option<&str>) -> Vec<W
                 attempt: None,
                 task: None,
                 status: None,
+                comments: 0,
             }
         })
         .collect()
