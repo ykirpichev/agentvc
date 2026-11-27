@@ -1024,11 +1024,16 @@ pub fn create(cwd: &Path, dir: &Path, name: Option<&str>, kind: NewKind) -> Resu
     let dir = if dir.is_absolute() {
         dir.to_path_buf()
     } else {
-        canon(cwd).join(dir)
+        crate::view::canonical(cwd)
+            .unwrap_or_else(|_| cwd.to_path_buf())
+            .join(dir)
     };
-    // Tidy `../x` so the folder shown (and recorded) is the real one.
+    // Tidy `../x` so the folder shown (and recorded) is the real one. Not
+    // `canon`: git rejects Windows verbatim (`\\?\`) paths.
     let dir = match (dir.parent(), dir.file_name()) {
-        (Some(p), Some(n)) if p.exists() => canon(p).join(n),
+        (Some(p), Some(n)) => crate::view::canonical(p)
+            .map(|p| p.join(n))
+            .unwrap_or(dir.clone()),
         _ => dir,
     };
     if dir.exists()
