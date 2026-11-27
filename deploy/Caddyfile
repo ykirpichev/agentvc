@@ -1,0 +1,6 @@
+# HTTPS in front of agentvc-cloud. Caddy gets and renews a Let's Encrypt
+# certificate for AGENTVC_DOMAIN by itself (ports 80 and 443 must be open).
+{$AGENTVC_DOMAIN} {
+	encode gzip
+	reverse_proxy agentvc-cloud:8080
+}

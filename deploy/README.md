@@ -9,7 +9,7 @@ comparison: [hosted service plan](https://claude.ai/artifact/RErWjUobX5k4a7Ykues
 ## How it works
 
 ```
-browser ──HTTPS──> Cloudflare ──tunnel──> agentvc-cloud (VM) <──WebSocket── agentvcd --cloud (your Mac)
+browser ──HTTPS──> Caddy ──> agentvc-cloud (VM) <──WebSocket── agentvcd --cloud (your Mac)
 ```
 
 - `agentvcd --cloud <url>` dials **out** to the service over one WebSocket and
@@ -63,46 +63,38 @@ All flags have environment variables, so one image runs anywhere.
 On the machine side: `agentvcd --cloud URL` (or `AGENTVC_CLOUD_URL`) with the
 token in `AGENTVC_CLOUD_TOKEN` or `--cloud-token-file`.
 
-## Deploying (GCP always-free e2-micro + Cloudflare Tunnel)
+## Deploying to GCP (always-free e2-micro)
 
-What you need, all free:
-
-1. A **GCP project** with billing enabled (required even for the free tier) and
-   the Compute Engine API on. The e2-micro must be in `us-west1`,
-   `us-central1` or `us-east1` to be free.
-2. A **domain on Cloudflare** (free plan) and a **Cloudflare Tunnel** (Zero
-   Trust > Networks > Tunnels) whose public hostname points at
-   `http://agentvc-cloud:8080`. Copy its token.
-3. A **GitHub OAuth app** with callback `https://<host>/auth/github/callback`.
-4. The image: run the **Cloud image** workflow (Actions > Cloud image > Run
-   workflow, with "push" on) to publish `ghcr.io/ykirpichev/agentvc-cloud`,
-   then make the package public or give the VM a pull token.
-
-Then:
+`deploy/gcp/deploy.sh` does it with `gcloud` alone, signed in as someone who
+can create projects and has a billing account (GCP requires one even for the
+free tier). No Docker and no domain needed: Cloud Build builds the image, and
+the public name is `<ip>.sslip.io` with a Let's Encrypt certificate from Caddy
+(pass `DOMAIN=` to use your own name; point its A record at the IP first).
 
 ```sh
-cd deploy/gcp
-cat > secrets.tfvars <<'TF'
-env_file = <<ENV
-AGENTVC_CLOUD_PUBLIC_URL=https://agentvc.example.com
-AGENTVC_CLOUD_ALLOW_USERS=ykirpichev
-GITHUB_CLIENT_ID=...
-GITHUB_CLIENT_SECRET=...
-TUNNEL_TOKEN=...
-ENV
-TF
-terraform init
-terraform apply -var project=YOUR_PROJECT -var-file=secrets.tfvars
+deploy/gcp/deploy.sh setup    # new project, billing, APIs, registry, static IP, firewall
+deploy/gcp/deploy.sh build    # Cloud Build, about 10 minutes
+# create a GitHub OAuth app with the callback URL that setup printed, then:
+GITHUB_CLIENT_ID=... GITHUB_CLIENT_SECRET=... deploy/gcp/deploy.sh up
+deploy/gcp/deploy.sh status
 ```
 
-The VM installs Docker on first boot, writes `/etc/agentvc-cloud.env` from
-instance metadata and starts `deploy/docker-compose.yml` (service plus
-`cloudflared`). No inbound port is open except SSH through IAP. Updating: push
-a new image, then `sudo docker-compose -f /opt/agentvc-cloud/docker-compose.yml pull && sudo docker-compose -f /opt/agentvc-cloud/docker-compose.yml up -d`
-on the VM, or reboot it.
+What it creates in project `agentvc-cloud-<random>`: an e2-micro VM
+(Debian 12, 30 GB standard disk) running `docker-compose.yml` (the service plus
+Caddy), a static external IP, firewall rules for 80/443 and SSH through IAP
+only, an Artifact Registry repository, and a service account that can only
+pull images and write logs. Secrets travel as instance metadata into
+`/etc/agentvc-cloud.env` (mode 600). Running `up` again with a new `build`
+updates the VM and restarts it.
 
-Before applying, check two things that change: whether an in-use external IPv4
-on a free-tier VM is billed in your account, and the free-tier regions.
+Cost: the VM, disk and Cloud Build minutes are in the free tier. A static
+external IPv4 may be billed (about $3 a month) depending on your account; the
+Artifact Registry stays under its free 0.5 GB if old images are deleted.
+
+SSH: `gcloud compute ssh agentvc-cloud --zone us-central1-a --tunnel-through-iap --project <project>`.
+
+`docker-compose.tunnel.yml` is the alternative without open ports, through a
+Cloudflare Tunnel (needs a domain on Cloudflare).
 
 ### Elsewhere
 
