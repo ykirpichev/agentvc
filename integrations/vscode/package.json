@@ -254,6 +254,64 @@
           "when": "view == agentvc.branches && agentvc.state != connected",
           "group": "navigation@3"
         }
+      ],
+      "commandPalette": [
+        {
+          "command": "agentvc.compareAttempts",
+          "when": "config.agentvc.attemptCommands"
+        },
+        {
+          "command": "agentvc.compareWithParent",
+          "when": "config.agentvc.attemptCommands"
+        },
+        {
+          "command": "agentvc.openFileDiff",
+          "when": "config.agentvc.attemptCommands"
+        },
+        {
+          "command": "agentvc.openView",
+          "when": "config.agentvc.attemptCommands"
+        },
+        {
+          "command": "agentvc.addViewToWorkspace",
+          "when": "config.agentvc.attemptCommands"
+        },
+        {
+          "command": "agentvc.fork",
+          "when": "config.agentvc.attemptCommands"
+        },
+        {
+          "command": "agentvc.markPassed",
+          "when": "config.agentvc.attemptCommands"
+        },
+        {
+          "command": "agentvc.markFailed",
+          "when": "config.agentvc.attemptCommands"
+        },
+        {
+          "command": "agentvc.markExploring",
+          "when": "config.agentvc.attemptCommands"
+        },
+        {
+          "command": "agentvc.promote",
+          "when": "config.agentvc.attemptCommands"
+        },
+        {
+          "command": "agentvc.abandon",
+          "when": "config.agentvc.attemptCommands"
+        },
+        {
+          "command": "agentvc.stopRun",
+          "when": "config.agentvc.attemptCommands"
+        },
+        {
+          "command": "agentvc.openPr",
+          "when": "config.agentvc.attemptCommands"
+        },
+        {
+          "command": "agentvc.revealCurrent",
+          "when": "config.agentvc.attemptCommands"
+        }
       ]
     },
     "configuration": {
@@ -278,6 +336,11 @@
           "type": "string",
           "default": "agentvcd",
           "description": "Path to the agentvcd binary used by Start agentvcd."
+        },
+        "agentvc.attemptCommands": {
+          "type": "boolean",
+          "default": false,
+          "description": "Show the attempt history commands (fork, compare attempts, mark, promote, abandon, open PR from an attempt) in the command palette. Off by default: day to day you work with workspaces, stacks and agents."
         },
         "agentvc.forkActor": {
           "type": "string",

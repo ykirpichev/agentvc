@@ -114,9 +114,9 @@ They are kept in the workspace's `stack.json`, so `stack submit` publishes
 them with the workspace and other machines see them. A start can override
 any of them (`agent start --runner/--model/--check/--permissions`, or "Just
 for this agent" in the UI). Unset fields fall back to the repo's
-`git config` below, then the defaults. Through the hosted service nobody can
-set `command` or `check` (`remote_shell_off`) or choose `bypass`
-(`remote_bypass_off`), even with `--allow-remote-agents`.
+`git config` below, then the defaults. (Through a hosted service, now
+paused, nobody can set `command` or `check` (`remote_shell_off`) or choose
+`bypass` (`remote_bypass_off`), even with `--allow-remote-agents`.)
 
 ### Your setup and what agents may do
 
@@ -174,7 +174,9 @@ in their git directory, so they never show up as workspaces.
   `/stop`, `/land`, `/discard`.
 - Event `agent_changed {agent, state}`.
 
-Calls that come through the hosted service may read agents. Starting,
+The hosted service is paused; agents are started and answered from the local
+UI, editors and CLI. For a self-hosted `agentvc-cloud` (see `deploy/`): calls
+that come through it may read agents. Starting,
 answering, stopping or landing them from there needs
 `agentvcd --cloud ... --allow-remote-agents`, because it runs code on this
 machine. Without the flag those calls get `remote_agents_off`, and `GET /api/agents`

@@ -4,6 +4,8 @@ import { api } from '../api/client'
 import { useResource } from '../api/useResource'
 import { useHotkeys } from '../keyboard/hotkeys'
 import { actorName } from '../lib/format'
+import { agentLink, agentState } from '../core/agents'
+import { branchLink } from '../core/links'
 import { StatusPill } from './bits'
 import { Icon, type IconName } from './Icon'
 import type { Status } from '../api/types'
@@ -15,6 +17,8 @@ interface Item {
   hint?: string
   status?: Status
   to: string
+  /** Agent tries and their versions: listed only once you type something. */
+  history?: boolean
 }
 
 function score(item: Item, q: string): number {
@@ -30,17 +34,35 @@ export function CommandPalette({ onClose }: { onClose: () => void }) {
   const navigate = useNavigate()
   const [query, setQuery] = useState('')
   const [selected, setSelected] = useState(0)
+  const workspaces = useResource('workspaces', api.workspaces)
+  const agents = useResource('agents', () => api.agents())
   const tasks = useResource('tasks', api.tasks)
   const attempts = useResource('attempts', () => api.attempts())
 
+  // What you see: pages, then each workspace's branches and its agents. The
+  // attempt history (tasks with several agent tries, and each try) stays
+  // searchable but out of the way: it shows once you type.
   const items = useMemo<Item[]>(() => {
     const out: Item[] = [
-      { id: 'review', icon: 'inbox', label: 'Home', hint: 'Your stack and agent work', to: '/review' },
-      { id: 'find', icon: 'search', label: 'Find', hint: 'Search the code and see who wrote each line', to: '/find' },
+      { id: 'review', icon: 'inbox', label: 'Home', hint: 'Agents that need you, then every workspace', to: '/review' },
       { id: 'agent-permissions', icon: 'check', label: 'Agent permissions', hint: 'What agents may do, per workspace', to: '/settings/agents' },
     ]
+    for (const w of workspaces.data?.workspaces ?? []) {
+      for (const b of w.branches) {
+        out.push({ id: `${w.id}:${b.name}`, icon: 'branch', label: b.name, hint: w.name, to: branchLink(w.id, b.name) })
+      }
+    }
+    for (const a of agents.data?.agents ?? []) {
+      out.push({
+        id: a.id,
+        icon: 'live',
+        label: a.title,
+        hint: `${agentState(a).label} · ${a.workspace_name} › ${a.start.trunk ? 'main' : a.start.branch}`,
+        to: agentLink(a.id),
+      })
+    }
     for (const t of tasks.data ?? []) {
-      out.push({ id: `t${t.id}`, icon: 'tasks', label: t.goal, hint: `${t.attempts.total} tries`, to: `/review/t/${t.id}` })
+      out.push({ id: `t${t.id}`, icon: 'tasks', label: t.goal, hint: `${t.attempts.total} tries`, to: `/review/t/${t.id}`, history: true })
     }
     for (const a of attempts.data ?? []) {
       out.push({
@@ -50,13 +72,15 @@ export function CommandPalette({ onClose }: { onClose: () => void }) {
         hint: a.task_id ? `t${a.task_id}` : undefined,
         status: a.status,
         to: `/attempts/${a.id}`,
+        history: true,
       })
     }
     return out
-  }, [tasks.data, attempts.data])
+  }, [workspaces.data, agents.data, tasks.data, attempts.data])
 
   const q = query.trim().toLowerCase()
   const results = items
+    .filter((item) => q || !item.history)
     .map((item) => ({ item, s: score(item, q) }))
     .filter((r) => r.s > 0)
     .sort((a, b) => b.s - a.s)
@@ -103,7 +127,7 @@ export function CommandPalette({ onClose }: { onClose: () => void }) {
           <input
             autoFocus
             value={query}
-            placeholder="Jump to a task, attempt (a3) or page…"
+            placeholder="Jump to a branch, agent or page…"
             onChange={(e) => {
               setQuery(e.target.value)
               setSelected(0)

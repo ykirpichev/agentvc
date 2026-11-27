@@ -14,13 +14,11 @@ import { useSidebarWidth } from './useSidebarWidth'
 import { StackPanel } from './StackPanel'
 import { ToastProvider } from './Toaster'
 import { embedMode, onHost, toHost } from '../core/embed'
-import { hosted } from '../core/base'
 import type { ReviewContext } from '../pages/reviewContext'
 
 // No tabs: the sidebar is the stack; these stay as shortcuts and in Ctrl+K.
 const NAV: { to: string; label: string; keys: string }[] = [
   { to: '/review', label: 'Home', keys: 'g r' },
-  { to: '/find', label: 'Find', keys: 'g f' },
 ]
 
 export function Shell() {
@@ -122,14 +120,6 @@ export function Shell() {
             <div className="brand-name">agentvc</div>
             <div className="brand-space" title={space.data ? `${space.data.folder ?? space.data.workdir} on ${space.data.machine ?? 'this machine'}` : undefined}>
               {space.data ? (space.data.project?.name ?? space.data.name) : '…'}
-              {hosted && (
-                <>
-                  {' · '}
-                  <a href="/" className="linkish" title="Your machines on the hosted service">
-                    all machines
-                  </a>
-                </>
-              )}
             </div>
           </div>
         </div>

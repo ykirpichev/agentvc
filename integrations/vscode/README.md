@@ -1,8 +1,9 @@
 # agentvc for VS Code and Cursor
 
-Review agent work without leaving the editor: one tree of main, every
-window's stack and every agent's versions; move things by dragging, settle
-clashes in place, compare in VS Code's native diff editor, and pick the winner.
+Your space, its workspaces and their agents without leaving the editor: one
+tree of main, every window's (every folder's) stack, and the agents working
+on top of its branches. Move branches by dragging, settle clashes in place,
+start agents, review their diffs and land them.
 
 ![The Branches tree and the review tab](media/screenshot-branches.png)
 
@@ -12,10 +13,8 @@ clashes in place, compare in VS Code's native diff editor, and pick the winner.
   UI as the browser, served by `agentvcd` and shown in a frame, so VS Code,
   Cursor and the web look and work the same. The side bar is one tree: main,
   each window's stack of branches (every worktree, every editor window has its
-  own; this window first), and every task's versions under the commit, branch
-  or version they are based on. Drag a version onto a main commit to rebase
-  it, or onto another version to stack it on top; drag a branch onto another
-  branch or onto main to move it, wherever that window is (the change waits
+  own; this window first), and each branch's agents under it. Drag a branch
+  onto another branch or onto main to move it, wherever that window is (the change waits
   while an agent works there). Click anything to open it in the review tab,
   with the rebase preview, conflict resolver, Open PR and Undo; double-click a
   branch to check it out. When a move or restack clashes, the branch page shows
@@ -30,18 +29,14 @@ clashes in place, compare in VS Code's native diff editor, and pick the winner.
   only (see [docs/stacks.md](../../docs/stacks.md)) and need only the
   `agentvc` CLI. The status bar shows the current branch, its place in the
   stack, and how many branches need a restack.
-- **Compare** in the native diff editor: an attempt against its fork point,
-  or any two attempts (`agentvc: Compare Two Attempts…`). Added and
-  removed files show against an empty side. Uses the multi-file diff editor
-  where available, and falls back to a file picker.
-- **Actions** (command palette): open an attempt's view in a new window or add it to the
-  workspace, fork, mark passed / failed, promote (pick the winner; the task's
-  other open attempts are abandoned, exactly like `agentvc promote`), abandon
-  with a reason, stop a live run, open a pull request (`agentvc pr`), and open
-  the attempt in the web review UI.
-- **Status bar**: in a window opened on an attempt's view, shows that attempt
-  and its last snapshot; elsewhere, how many attempts are open and how many
-  tasks are ready to pick.
+- **Attempt history** (off by default; turn on `agentvc.attemptCommands`):
+  palette commands for the attempt engine under agents (see
+  [docs/attempts.md](../../docs/attempts.md)). Compare in the native diff
+  editor (an attempt against its fork point, or any two), open an attempt's
+  view in a new window or add it to the workspace, fork, mark passed /
+  failed, promote, abandon, stop a run, open a pull request with
+  `agentvc pr`. In a window opened on an attempt's view, the status bar
+  shows that attempt and its last snapshot.
 - **Live**: the tree follows `agentvcd`'s event stream, so it updates as agents
   snapshot.
 
@@ -67,6 +62,7 @@ Fork and pull requests always run the CLI (`agentvc.cliPath`).
 | `agentvc.daemonPath` | `agentvcd` | Daemon binary to start |
 | `agentvc.forkActor` | `human` | Actor recorded on forks from the editor |
 | `agentvc.confirmPromote` | `true` | Ask before promoting |
+| `agentvc.attemptCommands` | `false` | Show the attempt history commands in the palette |
 
 ## Requirements
 
