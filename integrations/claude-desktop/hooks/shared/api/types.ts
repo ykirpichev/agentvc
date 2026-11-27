@@ -576,6 +576,8 @@ export type WsOp =
   | { op: 'rename'; branch: string; new_name: string }
   | { op: 'delete'; branch: string }
   | { op: 'checkout'; branch: string }
+  /** Start `branch` on `parent` (the trunk or a stacked branch) and check it out; worktree edits come along. */
+  | { op: 'create'; branch: string; parent?: string }
   | { op: 'undo' }
   | { op: 'merge'; branch: string }
   | { op: 'sync' }

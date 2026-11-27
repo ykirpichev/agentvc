@@ -450,3 +450,33 @@
     margin-left: 0;
   }
 }
+/* The trunk page's "Or start a branch yourself" row, under Start agent. */
+.rv-newbranch {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: -6px 0 18px;
+  padding: 0 2px;
+  font-size: 13px;
+}
+.rv-newbranch label {
+  color: var(--muted);
+}
+.rv-newbranch input {
+  flex: 0 1 240px;
+  min-width: 120px;
+  padding: 5px 9px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: inherit;
+  font-size: 12.5px;
+}
+.rv-newbranch input:focus {
+  outline: 2px solid var(--accent-soft);
+  border-color: var(--accent);
+}
+.rv-empty-lead {
+  margin: 4px 0 0;
+}

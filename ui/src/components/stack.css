@@ -784,3 +784,13 @@
 @media (prefers-reduced-motion: reduce) {
   .ag-run { animation: none; }
 }
+/* An empty workspace's trunk row: where its first branch or agent starts. */
+.sp-start {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--accent-text);
+  white-space: nowrap;
+}
+.sp-trunk:hover .sp-start {
+  text-decoration: underline;
+}

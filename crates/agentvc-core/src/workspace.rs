@@ -372,6 +372,14 @@ pub enum Op {
     Delete {
         branch: String,
     },
+    /// Start a new branch on `parent` (the trunk or a branch of the stack;
+    /// the current branch when left out) and check it out there. Edits in
+    /// the worktree come along, as with `agentvc stack create NAME`.
+    Create {
+        branch: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent: Option<String>,
+    },
     /// Fetch the trunk, drop merged branches, restack.
     Sync,
     /// Check out a branch in that workspace.
@@ -410,6 +418,7 @@ impl Op {
             | Op::Rename { branch, .. }
             | Op::Delete { branch }
             | Op::Checkout { branch }
+            | Op::Create { branch, .. }
             | Op::Merge { branch }
             | Op::Adopt { branch, .. }
             | Op::Revise { branch, .. } => Some(branch),
@@ -428,6 +437,14 @@ impl Op {
             Op::Delete { branch } => format!("delete {branch}"),
             Op::Sync => "sync".into(),
             Op::Checkout { branch } => format!("checkout {branch}"),
+            Op::Create {
+                branch,
+                parent: Some(p),
+            } => format!("create {branch} --on {p}"),
+            Op::Create {
+                branch,
+                parent: None,
+            } => format!("create {branch}"),
             Op::Undo => "undo".into(),
             Op::Merge { branch } => format!("merge --branch {branch}"),
             Op::Submit => "submit --all".into(),
@@ -572,6 +589,23 @@ fn run_op(w: &mut Window, op: &Op, keep: bool) -> Result<Value> {
         Op::Checkout { branch } => {
             w.settle()?;
             Ok(json!({ "checked_out": w.switch(branch)? }))
+        }
+        Op::Create { branch, parent } => {
+            w.settle()?;
+            if let Some(p) = parent {
+                let on_trunk = p == &w.state.trunk || p == &w.base_ref();
+                let here = w.current_branch();
+                let there = if on_trunk {
+                    here.is_some_and(|c| c != w.state.trunk)
+                } else {
+                    here.as_deref() != Some(p.as_str())
+                };
+                if there {
+                    w.checkout(p)?;
+                }
+            }
+            let (t, _) = w.create(Some(branch), None, false)?;
+            Ok(json!({ "created": t }))
         }
         Op::Undo => Ok(json!(crate::stackundo::undo(w, None)?)),
         Op::Merge { branch } => Ok(json!(w.merge_stack(&crate::stack::MergeOptions {
@@ -2687,6 +2721,58 @@ mod tests {
         )
         .unwrap();
         assert_eq!(git(&f.w2, &["branch", "--show-current"]), "b2");
+    }
+
+    #[test]
+    fn an_empty_workspace_starts_its_first_branch_from_another_window() {
+        let f = setup();
+        // w2 has no stack yet: a detached checkout of main with an edit in it.
+        fs::write(f.w2.join("a.txt"), "edited\n").unwrap();
+        let id = list(&f.w1, None, false).unwrap().workspaces[1].id.clone();
+        let create = |branch: &str, parent: Option<&str>| Op::Create {
+            branch: branch.into(),
+            parent: parent.map(String::from),
+        };
+        let o = edit(&f.w1, &id, create("first", Some("main")), None, false).unwrap();
+        assert_eq!(o.outcome, RequestStatus::Applied);
+        assert_eq!(git(&f.w2, &["branch", "--show-current"]), "first");
+        // The edit came along, uncommitted.
+        assert_eq!(fs::read_to_string(f.w2.join("a.txt")).unwrap(), "edited\n");
+        let l = list(&f.w1, None, false).unwrap();
+        let b = &l.workspaces[1].branches;
+        assert_eq!(
+            (b.len(), b[0].name.as_str(), b[0].parent.as_str()),
+            (1, "first", "main")
+        );
+
+        // From the trunk again while on a branch: a sibling, not a child.
+        git(&f.w2, &["commit", "-qam", "first"]);
+        edit(&f.w1, &id, create("second", Some("main")), None, false).unwrap();
+        let w = Window::open(&f.w2).unwrap();
+        let p = |n: &str| {
+            w.state
+                .branches
+                .iter()
+                .find(|t| t.name == n)
+                .unwrap()
+                .parent
+                .clone()
+        };
+        assert_eq!(p("second"), "main");
+        // On top of a branch.
+        edit(&f.w1, &id, create("third", Some("first")), None, false).unwrap();
+        let w = Window::open(&f.w2).unwrap();
+        assert_eq!(
+            w.state
+                .branches
+                .iter()
+                .find(|t| t.name == "third")
+                .unwrap()
+                .parent,
+            "first"
+        );
+        let e = edit(&f.w1, &id, create("third", None), None, false).unwrap_err();
+        assert_eq!(e.code(), "branch_exists");
     }
 
     #[test]
