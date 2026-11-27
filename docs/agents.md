@@ -31,6 +31,26 @@ losing track of them.
    Landing goes through the workspace's edit queue. If an agent is working
    in that workspace's own checkout, the edit waits until it stops.
 
+## In the review UI
+
+- **Sidebar**: each agent is a line under the branch it started from (under
+  main for agents started there), with a dot and its state in plain words.
+  **Needs you** at the top counts the agents waiting on you; the browser tab
+  shows the count too.
+- **Home (Needs you)**: one card per agent that waits on you, most urgent
+  first. Answer its question, approve or deny a command, land it, send failing
+  checks back, or discard it, right on the card. Agents still working are
+  listed below with their last step and the slots in use.
+- **Branch page** (click a branch or main): **Start agent** with what to do
+  and where the result goes (new branch on top, or a new version of this
+  branch), plus the agents started from there.
+- **Agent page** (`/review/a/agN`): its conversation, time, cost, checks, its
+  changes as diffs and its recent steps, with the same actions.
+
+To try it without Claude Code, `integrations/vscode/scripts/demo-workspaces.sh
+DIR BINDIR` then `demo-agents.sh DIR BINDIR` start 11 script agents in every
+state across three workspaces.
+
 ## States
 
 | State | Shown as | Needs you | What you do |
@@ -85,7 +105,7 @@ in their git directory, so they never show up as workspaces.
 ## Daemon API
 
 - `GET /api/agents[?all=1]`: agents newest first, plus `needs_you`,
-  `working`, `limit` and `machine`.
+  `working`, `limit`, `machine` and `can_steer`.
 - `POST /api/agents` with `{workspace, from, at?, prompt, mode: "new"|"revise", model?, check?, command?}`.
 - `GET /api/agents/{id}`: `{agent, steps}`.
 - `POST /api/agents/{id}/reply {text}`, `/approve`, `/deny {reason?}`,
@@ -95,7 +115,9 @@ in their git directory, so they never show up as workspaces.
 Calls that come through the hosted service may read agents. Starting,
 answering, stopping or landing them from there needs
 `agentvcd --cloud ... --allow-remote-agents`, because it runs code on this
-machine. Without the flag those calls get `remote_agents_off`.
+machine. Without the flag those calls get `remote_agents_off`, and `GET /api/agents`
+says `can_steer: false`, so the hosted UI shows the agents read-only and
+says how to allow it.
 
 ## Error codes
 

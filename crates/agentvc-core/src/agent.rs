@@ -857,6 +857,10 @@ pub struct AgentList {
     pub working: usize,
     pub limit: usize,
     pub machine: String,
+    /// Whoever asked may start, answer, stop and land agents here. False for
+    /// calls relayed by the hosted service to a daemon without
+    /// `--allow-remote-agents`.
+    pub can_steer: bool,
 }
 
 /// Every agent of the repo containing `cwd`.
@@ -903,6 +907,7 @@ pub fn list(cwd: &Path, all: bool) -> Result<AgentList> {
         working,
         limit: limit(&w),
         machine: here,
+        can_steer: true,
     })
 }
 

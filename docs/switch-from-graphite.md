@@ -73,12 +73,20 @@ PR checks and review state. Drag a branch to move it, press Restack, resolve
 clashes in place, Merge from the branch page, and Undo from the toast. The
 VS Code / Cursor extension and the Claude Code pane show the same tree.
 
-## 5. Optional: agents in attempts
+## 5. Optional: agents on your stacks
 
-For work where you want several agents to try, use attempts on top
+To hand a branch to an agent, open it in the review UI and use **Start
+agent** (or `agentvc agent start --from <branch> "..."`). The agent works in
+its own worktree, so your checkout is not touched, and shows up under that
+branch in the sidebar. **Needs you** at the top lists the agents waiting on
+you: answer, approve, review and land them from there. Landing puts the work
+on the stack as a new branch on top, or as a new version of the branch. See
+[agents.md](agents.md).
+
+For work where you want several agents to try the same thing, use attempts
 (`agentvc run`, compare, promote, `agentvc pr`): see the
 [README](../README.md) and [dogfooding.md](dogfooding.md). Stacks work
-without them.
+without either.
 
 ## Checklist
 

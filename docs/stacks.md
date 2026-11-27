@@ -243,3 +243,14 @@ always queue) answering `{"outcome": "applied"|"queued", "request_id"}`, and
 
 Workspace error codes: `no_workspace`, `remote_workspace`, `name_taken`,
 `bad_name`, `stack_locked`, `no_request`, `request_not_queued`.
+
+## Agents on a stack
+
+Any branch of any workspace's stack (or main) can be the starting point of a
+coding agent: `agentvc agent start --workspace <name> --from <branch> "..."`
+or **Start agent** on the branch page. It works in its own worktree and
+branch; landing it adds that branch to the stack on top of its start branch,
+or with `--revise` makes it the start branch's new version and restacks the
+branches above. Landing goes through the same edit queue as the commands
+above, so it waits while an agent works in that workspace's checkout. See
+[agents.md](agents.md).
