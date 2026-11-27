@@ -204,6 +204,18 @@ async fn comment_send_reply_resolve() {
     assert_eq!(s, StatusCode::BAD_REQUEST, "{v}");
     assert_eq!(v["error"]["code"], "not_a_draft");
 
+    // No PR on the branch: nothing to sync with, and nothing to post to.
+    let (s, v) = send(
+        &app,
+        "POST",
+        "/api/comments/sync",
+        Some(json!({ "target": target })),
+        false,
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{v}");
+    assert_eq!(v["error"]["code"], "no_pr");
+
     let (s, v) = send(
         &app,
         "POST",

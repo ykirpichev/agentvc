@@ -12,7 +12,7 @@ import { Icon } from '../components/Icon'
 import { HunkList } from '../components/ConflictResolver'
 import { DiffView } from '../components/DiffView'
 import { ReviewBar, ThreadList } from '../components/Comments'
-import { scrollToThread, useThreads } from '../core/comments'
+import { scrollToThread, useGithubSync, useThreads } from '../core/comments'
 import { undoIn } from '../components/stackEdit'
 import { useToast } from '../components/Toaster'
 import { canMoveBranch } from '../core/graph'
@@ -38,6 +38,8 @@ export function BranchReview() {
   const agents = useReview().agents?.agents ?? []
   const target = `branch:${workspace}/${name}`
   const { threads } = useThreads(workspace && name ? target : null)
+  const prNumber = b?.pr && (b.pr.state === 'open' || b.pr.state === null) ? b.pr.number : undefined
+  useGithubSync(target, prNumber, !!w && w.kind !== 'remote')
 
   const run = async (op: WsOp, done: string, keep = false) => {
     setBusy(true)
@@ -172,7 +174,7 @@ export function BranchReview() {
       {!readOnly && !stopped && <StartAgent workspace={w.id} branch={b.name} label={b.name} canRevise settings={w.agent_settings} settingsLink={`${branchLink(w.id, w.trunk)}#agent-settings`} />}
       <AgentsFrom agents={agentsOn(agents, w.id, b.name)} workspace={w.id} branch={b.name} />
 
-      <ReviewBar target={target} threads={threads} agent={agentWorkingOn(agents, w.id, b.name)} readOnly={readOnly} />
+      <ReviewBar target={target} threads={threads} agent={agentWorkingOn(agents, w.id, b.name)} readOnly={readOnly} pr={prNumber} />
       <ThreadList
         target={target}
         threads={threads}

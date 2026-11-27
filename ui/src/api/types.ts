@@ -874,6 +874,29 @@ export interface ReviewComment {
   github_id?: number
 }
 
+/** Where a thread is on GitHub (#170). */
+export interface CommentGithub {
+  repo?: string
+  pr: number
+  thread?: string
+  comment?: number
+  url?: string
+  /** Resolved there when last seen; absent for a comment in a review's body. */
+  resolved?: boolean
+  /** Why the last push to GitHub failed; the next sync tries again. */
+  error?: string
+}
+
+/** What `POST /api/comments/sync` did. */
+export interface CommentSync {
+  repo: string
+  pr: number
+  imported: string[]
+  updated: string[]
+  pushed: string[]
+  errors: string[]
+}
+
 export interface CommentThread {
   id: string
   target: { kind: 'branch' | 'agent' | 'attempt'; workspace?: string; name: string }
@@ -881,7 +904,7 @@ export interface CommentThread {
   state: CommentState
   comments: ReviewComment[]
   source: 'local' | 'github'
-  github?: { pr: number; thread?: string; comment?: number; url?: string }
+  github?: CommentGithub
   review?: string
   state_by?: string
   created_at: Timestamp
@@ -899,7 +922,7 @@ export interface NewComment {
 }
 
 export interface SubmittedReview {
-  review: { id: string; threads: string[]; agent?: string; delivered_via?: string }
+  review: { id: string; threads: string[]; agent?: string; delivered_via?: string; github_review?: number }
   threads: CommentThread[]
   /** `prompt`: the agent's next turn started; `queued`: it gets them at its next step. */
   delivery: 'prompt' | 'queued' | 'waiting' | 'none'

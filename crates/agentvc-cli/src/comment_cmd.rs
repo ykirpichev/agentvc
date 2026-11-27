@@ -107,8 +107,19 @@ pub enum CommentCmd {
         workspace: Option<String>,
         #[arg(long)]
         agent: bool,
+        /// Also post them as a review of the branch's GitHub PR.
+        #[arg(long)]
+        github: bool,
         #[arg(long)]
         author: Option<String>,
+    },
+    /// Sync a branch's threads with its GitHub PR: bring in review threads,
+    /// replies and resolutions from GitHub, push replies and states from
+    /// here. Without a target, the checked-out branch.
+    Sync {
+        target: Option<String>,
+        #[arg(long)]
+        workspace: Option<String>,
     },
     /// Inside an agent: the Claude Code `PostToolUse` hook that hands it the
     /// review comments sent while it works. Reads the hook input on stdin.
@@ -374,6 +385,7 @@ pub fn run(cwd: &Path, cmd: CommentCmd) -> anyhow::Result<(Value, String)> {
             target,
             workspace,
             agent,
+            github,
             author: who,
         } => {
             let target = parse_target(cwd, &target, workspace.as_deref())?;
@@ -381,10 +393,7 @@ pub fn run(cwd: &Path, cmd: CommentCmd) -> anyhow::Result<(Value, String)> {
             let s = comments::submit(
                 cwd,
                 &target,
-                Deliver {
-                    agent,
-                    github: false,
-                },
+                Deliver { agent, github },
                 &author(who),
                 Some(&exe),
             )?;
@@ -407,6 +416,41 @@ pub fn run(cwd: &Path, cmd: CommentCmd) -> anyhow::Result<(Value, String)> {
                 ),
                 _ => format!("{}: {n} comments sent", s.review.id),
             };
+            let text = match s.threads.iter().find_map(|t| t.github.as_ref()) {
+                Some(l) if s.review.github_review.is_some() => {
+                    format!("{text}; posted as a review of PR #{}", l.pr)
+                }
+                _ => text,
+            };
+            (serde_json::to_value(&s)?, text)
+        }
+        CommentCmd::Sync { target, workspace } => {
+            let target = match target {
+                Some(t) => parse_target(cwd, &t, workspace.as_deref())?,
+                None => {
+                    let w = Window::open(cwd)?;
+                    let b = w
+                        .current_branch()
+                        .ok_or_else(|| agentvc_core::Error::Stack {
+                            code: "no_branch",
+                            message: "not on a branch; name one".into(),
+                            details: None,
+                        })?;
+                    parse_target(cwd, &b, workspace.as_deref())?
+                }
+            };
+            let s = comments::github::sync(cwd, &target)?;
+            let mut text = format!(
+                "{}#{}: {} new, {} updated, {} pushed",
+                s.repo,
+                s.pr,
+                s.imported.len(),
+                s.updated.len(),
+                s.pushed.len()
+            );
+            for e in &s.errors {
+                text.push_str(&format!("\nnot pushed: {e}"));
+            }
             (serde_json::to_value(&s)?, text)
         }
         CommentCmd::Inbox => {

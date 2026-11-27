@@ -1,9 +1,31 @@
 // Review comments (#168): where threads go in a diff, and loading them.
 
+import { useEffect } from 'react'
+
 import { api } from '../api/client'
 import type { CommentSide, CommentTarget, CommentThread } from '../api/types'
 import { useResource } from '../api/useResource'
 import { actorName } from '../lib/format'
+
+/** How often an open branch page with a PR pulls its GitHub review threads. */
+const SYNC_EVERY_MS = 120_000
+
+/** While a branch page with a GitHub PR is open: bring in its review
+ * threads (and push replies made here) now and every two minutes, while the
+ * tab is visible. Failures (offline, no token) stay quiet; threads that
+ * could not be pushed say so themselves. */
+export function useGithubSync(target: CommentTarget, pr: number | undefined, enabled: boolean) {
+  useEffect(() => {
+    if (pr === undefined || !enabled) return
+    const run = () => {
+      if (document.visibilityState === 'hidden') return
+      api.syncComments(target).catch(() => {})
+    }
+    run()
+    const t = window.setInterval(run, SYNC_EVERY_MS)
+    return () => window.clearInterval(t)
+  }, [target, pr, enabled])
+}
 
 /** What a diff needs to show and add comments. */
 export interface DiffComments {
