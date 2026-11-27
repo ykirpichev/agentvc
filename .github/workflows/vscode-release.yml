@@ -44,6 +44,8 @@ jobs:
       - run: xvfb-run -a npm test
       - run: npm run package
       - name: Publish to the VS Code Marketplace
+        # A rejected token must not stop the Open VSX publish and the release below.
+        continue-on-error: true
         env:
           VSCE_PAT: ${{ secrets.VSCE_PAT }}
         run: |
