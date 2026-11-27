@@ -526,6 +526,20 @@ pub fn slug(message: &str) -> String {
     out.trim_matches('-').to_string()
 }
 
+/// The open PR whose head is `branch` in `repo` (`owner/name`), if any.
+fn find_open_pr(api: &Api, repo: &str, branch: &str) -> Result<Option<u64>> {
+    let owner = repo.split('/').next().unwrap_or_default();
+    let open = api.call(
+        "GET",
+        &format!("/repos/{repo}/pulls?state=open&head={owner}:{branch}"),
+        None,
+    )?;
+    Ok(open
+        .as_array()
+        .and_then(|a| a.first())
+        .and_then(|v| v["number"].as_u64()))
+}
+
 impl Window {
     /// The worktree containing `cwd` and its stack (empty if none yet).
     pub fn open(cwd: &Path) -> Result<Window> {
@@ -2237,6 +2251,11 @@ impl Window {
     ) -> Result<Vec<(String, PrBrief)>> {
         let mut out = Vec::new();
         for i in 0..self.state.branches.len() {
+            if self.state.branches[i].pr.is_none() {
+                // Opened outside agentvc (GitHub UI, gh): pick it up.
+                let name = self.state.branches[i].name.clone();
+                self.state.branches[i].pr = find_open_pr(api, repo, &name).ok().flatten();
+            }
             let Some(n) = self.state.branches[i].pr else {
                 continue;
             };
@@ -2324,6 +2343,14 @@ impl Window {
             let Some(i) = self.find(&name) else {
                 continue; // merged and dropped by an earlier sync
             };
+            // A PR opened elsewhere (the GitHub UI, gh, another tool) for
+            // this branch counts: find it by head branch and remember it.
+            if self.state.branches[i].pr.is_none() {
+                if let Some(n) = find_open_pr(api, &repo, &name)? {
+                    self.state.branches[i].pr = Some(n);
+                    self.save()?;
+                }
+            }
             let Some(n) = self.state.branches[i].pr else {
                 result.stopped = Some(stop(
                     &name,
@@ -4124,5 +4151,35 @@ mod tests {
             w.merge_stack_with(&o4, &api).unwrap_err().code(),
             "checks_failed"
         );
+    }
+
+    #[test]
+    fn merge_finds_a_pr_opened_outside_agentvc() {
+        let f = setup();
+        let mut w = Window::open(&f.w1).unwrap();
+        fs::write(f.w1.join("x.txt"), "x\n").unwrap();
+        w.create(Some("x"), Some("Outside PR"), true).unwrap();
+        let (api, _prs) = fake_github_on(Some(f.origin.clone()));
+        let sub = SubmitOptions {
+            repo: Some("o/r".into()),
+            ..Default::default()
+        };
+        w.submit_with(&sub, Some(&api)).unwrap();
+        // As if the PR was opened on GitHub, not by `stack submit`.
+        let i = w.find("x").unwrap();
+        w.state.branches[i].pr = None;
+        w.save().unwrap();
+        let opts = MergeOptions {
+            repo: Some("o/r".into()),
+            ..Default::default()
+        };
+        // `stack log --prs` (and the daemon's poller) pick it up too.
+        w.refresh_prs_with(&api, "o/r").unwrap();
+        assert!(w.state.branches[i].pr.is_some());
+        w.state.branches[i].pr = None;
+        let r = w.merge_stack_with(&opts, &api).unwrap();
+        assert_eq!(r.merged.len(), 1, "{:?}", r.stopped);
+        assert!(r.stopped.is_none());
+        assert!(!w.tracks("x"));
     }
 }
