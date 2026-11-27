@@ -6,12 +6,12 @@ import { useState, type FormEvent } from 'react'
 import { Link, useParams } from 'react-router'
 import { api, ref } from '../api/client'
 import { useLive } from '../api/live'
-import type { Agent, AgentList } from '../api/types'
+import type { Agent, AgentList, AgentPermissions, AgentRunner, AgentSettings } from '../api/types'
 import { useResource } from '../api/useResource'
 import { ErrorNote, Skeleton } from '../components/bits'
 import { DiffView } from '../components/DiffView'
 import { useToast } from '../components/Toaster'
-import { agentLink, agentState, agentsOn, needsYou, resultWords, working } from '../core/agents'
+import { agentLink, agentState, agentsOn, needsYou, PERMISSION_WORDS, resultWords, RUNNER_WORDS, settingsLine, working } from '../core/agents'
 import { branchLink } from '../core/links'
 import { duration, money, plural, timeAgo } from '../lib/format'
 import { useReview } from './reviewContext'
@@ -245,11 +245,26 @@ export function NeedsYou({ list }: { list: AgentList | undefined }) {
 }
 
 /** The prompt box on a branch page: start an agent on top of it. */
-export function StartAgent({ workspace, branch, label, canRevise }: { workspace: string; branch: string; label: string; canRevise: boolean }) {
+export function StartAgent({
+  workspace,
+  branch,
+  label,
+  canRevise,
+  settings,
+  settingsLink,
+}: {
+  workspace: string
+  branch: string
+  label: string
+  canRevise: boolean
+  settings?: AgentSettings
+  settingsLink?: string
+}) {
   const steer = useCanSteer()
   const [prompt, setPrompt] = useState('')
   const [mode, setMode] = useState<'new' | 'revise'>('new')
   const [opts, setOpts] = useState(false)
+  const [runner, setRunner] = useState<AgentRunner | ''>('')
   const [model, setModel] = useState('')
   const [check, setCheck] = useState('')
   const toast = useToast()
@@ -265,6 +280,7 @@ export function StartAgent({ workspace, branch, label, canRevise }: { workspace:
         from: branch,
         prompt: prompt.trim(),
         mode,
+        runner: runner || undefined,
         model: model.trim() || undefined,
         check: check.trim() || undefined,
       })
@@ -309,7 +325,7 @@ export function StartAgent({ workspace, branch, label, canRevise }: { workspace:
           </div>
         )}
         <button type="button" className="linkish" onClick={() => setOpts((o) => !o)}>
-          Options
+          Just for this agent
         </button>
         <span className="ag-spacer" />
         <button type="submit" className="btn btn-primary" disabled={busy || !prompt.trim()}>
@@ -319,10 +335,21 @@ export function StartAgent({ workspace, branch, label, canRevise }: { workspace:
       {opts && (
         <div className="ag-opts">
           <label>
-            Model <input id="agent-model" value={model} onChange={(e) => setModel(e.target.value)} placeholder="default" />
+            Runner
+            <select value={runner} onChange={(e) => setRunner(e.target.value as AgentRunner | '')}>
+              <option value="">Workspace's ({RUNNER_WORDS[settings?.runner ?? 'claude']})</option>
+              {(['claude', 'codex', 'cursor'] as const).map((r) => (
+                <option key={r} value={r}>
+                  {RUNNER_WORDS[r]}
+                </option>
+              ))}
+            </select>
           </label>
           <label>
-            Check command <input id="agent-check" value={check} onChange={(e) => setCheck(e.target.value)} placeholder="git config agentvc.agent-check" />
+            Model <input id="agent-model" value={model} onChange={(e) => setModel(e.target.value)} placeholder={settings?.model ?? 'default'} />
+          </label>
+          <label>
+            Check command <input id="agent-check" value={check} onChange={(e) => setCheck(e.target.value)} placeholder={settings?.check ?? 'none'} />
           </label>
         </div>
       )}
@@ -331,6 +358,118 @@ export function StartAgent({ workspace, branch, label, canRevise }: { workspace:
           ? `It works in its own copy; your checkout is not touched. After you review it, it lands as a new branch on top of ${label}.`
           : `It works in its own copy. After you review it, it becomes the new version of ${label} and the branches above are updated.`}
       </p>
+      <p className="muted ag-hint">
+        Runs with {settingsLine(settings)}
+        {settingsLink && (
+          <>
+            {' · '}
+            <Link to={settingsLink}>workspace agent settings</Link>
+          </>
+        )}
+      </p>
+    </form>
+  )
+}
+
+/** A workspace's agent settings: what agents started there inherit. */
+export function AgentSettingsForm({ workspace }: { workspace: string }) {
+  const steer = useCanSteer()
+  const toast = useToast()
+  const { refresh } = useLive()
+  const data = useResource(`agent-settings:${workspace}`, () => api.agentSettings(workspace))
+  const [draft, setDraft] = useState<AgentSettings | null>(null)
+  const [busy, setBusy] = useState(false)
+  if (data.error) return <ErrorNote error={data.error} />
+  if (!data.data) return <Skeleton rows={2} />
+  const { settings, defaults, machine_limit } = data.data
+  const s = draft ?? settings
+  const set = (patch: Partial<AgentSettings>) => setDraft({ ...s, ...patch })
+  const runner = s.runner ?? defaults.runner ?? 'claude'
+  const dirty = draft !== null && JSON.stringify(draft) !== JSON.stringify(settings)
+  const save = async (e: FormEvent) => {
+    e.preventDefault()
+    setBusy(true)
+    try {
+      await api.setAgentSettings(workspace, s)
+      toast.ok('Saved. New agents in this workspace use these settings.', { undo: false })
+      setDraft(null)
+    } catch (err) {
+      toast.error(err)
+    } finally {
+      setBusy(false)
+      refresh()
+    }
+  }
+  const txt = (k: 'model' | 'check' | 'command') => ({
+    value: s[k] ?? '',
+    onChange: (e: { target: { value: string } }) => set({ [k]: e.target.value || undefined }),
+    disabled: !steer,
+  })
+  return (
+    <form className="ag-start ag-settings" id="agent-settings" onSubmit={(e) => void save(e)}>
+      <h2 className="rv-h2">Agent settings</h2>
+      <p className="muted ag-hint">Every agent started in this workspace uses these, unless you change them when you start it.</p>
+      <div className="ag-opts">
+        <label>
+          Runner
+          <select value={s.runner ?? ''} disabled={!steer} onChange={(e) => set({ runner: (e.target.value || undefined) as AgentRunner | undefined })}>
+            <option value="">Default ({RUNNER_WORDS[defaults.runner ?? 'claude']})</option>
+            {(Object.keys(RUNNER_WORDS) as AgentRunner[]).map((r) => (
+              <option key={r} value={r}>
+                {RUNNER_WORDS[r]}
+              </option>
+            ))}
+          </select>
+        </label>
+        {runner === 'command' && (
+          <label>
+            Command <input {...txt('command')} placeholder={defaults.command ?? 'prompt is in $AGENTVC_AGENT_PROMPT'} />
+          </label>
+        )}
+        <label>
+          Model <input {...txt('model')} placeholder={defaults.model ?? 'default'} />
+        </label>
+        <label>
+          Check command <input {...txt('check')} placeholder={defaults.check ?? 'none, e.g. cargo test'} />
+        </label>
+        {runner === 'claude' && (
+          <label>
+            Permissions
+            <select value={s.permissions ?? ''} disabled={!steer} onChange={(e) => set({ permissions: (e.target.value || undefined) as AgentPermissions | undefined })}>
+              <option value="">Default ({PERMISSION_WORDS[defaults.permissions ?? 'edits']})</option>
+              {(Object.keys(PERMISSION_WORDS) as AgentPermissions[]).map((p) => (
+                <option key={p} value={p}>
+                  {PERMISSION_WORDS[p]}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
+        <label>
+          At once
+          <input
+            type="number"
+            min={1}
+            value={s.max ?? ''}
+            disabled={!steer}
+            onChange={(e) => set({ max: e.target.value ? Math.max(1, Number(e.target.value)) : undefined })}
+            placeholder={`no limit (machine cap ${machine_limit})`}
+          />
+        </label>
+      </div>
+      {steer && (
+        <div className="ag-start-row">
+          <span className="ag-spacer" />
+          {dirty && (
+            <button type="button" className="btn btn-ghost" disabled={busy} onClick={() => setDraft(null)}>
+              Cancel
+            </button>
+          )}
+          <button type="submit" className="btn btn-primary" disabled={busy || !dirty}>
+            Save
+          </button>
+        </div>
+      )}
     </form>
   )
 }

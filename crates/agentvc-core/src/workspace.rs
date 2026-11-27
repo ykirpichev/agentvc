@@ -982,6 +982,8 @@ pub struct WorkspaceInfo {
     pub branches: Vec<WsBranch>,
     /// Edits asked of it (queued ones and recent history).
     pub requests: Vec<Request>,
+    /// How agents started here run (`agentvc workspace agents`).
+    pub agent_settings: crate::agent::AgentSettings,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -1133,6 +1135,7 @@ pub fn list(cwd: &Path, space: Option<&Space>, remote: bool) -> Result<Workspace
             pending: log.pending.clone(),
             branches,
             requests: requests(&l.git_dir),
+            agent_settings: w.state.agents.clone(),
         });
     }
     if remote {
@@ -1380,6 +1383,7 @@ fn remote_workspaces(w: &Window, locals: &[Local]) -> Result<Vec<WorkspaceInfo>>
             pending: None,
             branches,
             requests: Vec::new(),
+            agent_settings: state.map(|s| s.agents).unwrap_or_default(),
         });
     }
     Ok(out)

@@ -103,7 +103,8 @@
 }
 .ag-reply input,
 .ag-start textarea,
-.ag-opts input {
+.ag-opts input,
+.ag-opts select {
   flex: 1;
   min-width: 0;
   padding: 6px 9px;
@@ -116,7 +117,8 @@
 }
 .ag-reply input:focus,
 .ag-start textarea:focus,
-.ag-opts input:focus {
+.ag-opts input:focus,
+.ag-opts select:focus {
   outline: 2px solid var(--accent-soft);
   border-color: var(--accent);
 }
@@ -317,3 +319,11 @@
 }
 .ag-step-tool { color: var(--text-2); }
 .ag-step-error { color: var(--failed); }
+
+.ag-settings {
+  scroll-margin-top: 16px;
+}
+.ag-opts input:disabled,
+.ag-opts select:disabled {
+  opacity: 0.7;
+}

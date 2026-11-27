@@ -41,6 +41,8 @@ import type {
   AgentList,
   AgentStep,
   StartAgent,
+  AgentSettings,
+  WorkspaceAgentSettings,
 } from './types'
 import { apiUrl } from '../core/base'
 
@@ -165,6 +167,9 @@ export const api = {
   agentStop: (id: string) => post<{ agent: Agent }>(`/agents/${encodeURIComponent(id)}/stop`),
   agentLand: (id: string) => post<{ agent: Agent; edit: WsEditOutcome }>(`/agents/${encodeURIComponent(id)}/land`),
   agentDiscard: (id: string) => post<{ agent: Agent }>(`/agents/${encodeURIComponent(id)}/discard`),
+  agentSettings: (workspace: string) => get<WorkspaceAgentSettings>(`/workspaces/${encodeURIComponent(workspace)}/agent-settings`),
+  setAgentSettings: (workspace: string, s: AgentSettings) =>
+    post<WorkspaceAgentSettings>(`/workspaces/${encodeURIComponent(workspace)}/agent-settings`, s),
   mark: (id: number, status: 'passed' | 'failed' | 'exploring') =>
     post<ActionResponse>(`/attempts/${id}/mark`, { status }),
 }

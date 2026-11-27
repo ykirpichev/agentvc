@@ -15,8 +15,9 @@ import { useToast } from '../components/Toaster'
 import { canMoveBranch } from '../core/graph'
 import { HELP, prWords, shortSha, WORDS } from '../core/words'
 import { plural, timeAgo } from '../lib/format'
-import { agentsOn } from '../core/agents'
-import { AgentsFrom, StartAgent } from './Agents'
+import { agentsOn, settingsLine } from '../core/agents'
+import { AgentSettingsForm, AgentsFrom, StartAgent } from './Agents'
+import { branchLink } from '../core/links'
 import { useReview } from './reviewContext'
 
 export function BranchReview() {
@@ -69,8 +70,13 @@ export function BranchReview() {
             </p>
           </div>
         </div>
-        {w.kind !== 'remote' && <StartAgent workspace={w.id} branch={w.trunk} label={trunkName} canRevise={false} />}
+        {w.kind !== 'remote' && <StartAgent workspace={w.id} branch={w.trunk} label={trunkName} canRevise={false} settings={w.agent_settings} />}
         <AgentsFrom agents={agents.filter((a) => a.workspace === w.id && a.start.trunk)} workspace={w.id} branch={w.trunk} />
+        {w.kind !== 'remote' ? (
+          <AgentSettingsForm workspace={w.id} />
+        ) : (
+          <p className="muted">Agents in {w.name} run with {settingsLine(w.agent_settings)}.</p>
+        )}
       </div>
     )
   }
@@ -140,7 +146,7 @@ export function BranchReview() {
         </div>
       )}
 
-      {!readOnly && !stopped && <StartAgent workspace={w.id} branch={b.name} label={b.name} canRevise />}
+      {!readOnly && !stopped && <StartAgent workspace={w.id} branch={b.name} label={b.name} canRevise settings={w.agent_settings} settingsLink={`${branchLink(w.id, w.trunk)}#agent-settings`} />}
       <AgentsFrom agents={agentsOn(agents, w.id, b.name)} workspace={w.id} branch={b.name} />
 
       <section>

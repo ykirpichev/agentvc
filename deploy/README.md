@@ -63,6 +63,12 @@ All flags have environment variables, so one image runs anywhere.
 On the machine side: `agentvcd --cloud URL` (or `AGENTVC_CLOUD_URL`) with the
 token in `AGENTVC_CLOUD_TOKEN` or `--cloud-token-file`.
 
+To rotate a token: make a new one on the home page, write it to the token
+file, then revoke the old one. The daemon is refused, reads the file again
+and reconnects with the new token within seconds; no restart. Revoking
+forgets the spaces the old token connected, so they come back under new
+links.
+
 ## Deploying to GCP (always-free e2-micro)
 
 `deploy/gcp/deploy.sh` does it with `gcloud` alone, signed in as someone who
