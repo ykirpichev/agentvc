@@ -4,7 +4,7 @@
 // double-click to check it out, drag it onto another branch or main to move it.
 
 import { useMemo, useState, type DragEvent } from 'react'
-import { useLocation, useNavigate } from 'react-router'
+import { useLocation } from 'react-router'
 import { api } from '../api/client'
 import { useLive } from '../api/live'
 import type { TaskSummary, WorkspaceInfo, WsBranch } from '../api/types'
@@ -19,71 +19,69 @@ import { BRANCH_MIME, useStackEdit } from './stackEdit'
 import { useToast } from './Toaster'
 import './stack.css'
 
-const PICK_KEY = 'agentvc.window'
+const FOLD_KEY = 'agentvc.folded'
 
-function savedWindow(): string | null {
+function savedFolds(): Set<string> {
   try {
-    return sessionStorage.getItem(PICK_KEY)
+    return new Set(JSON.parse(sessionStorage.getItem(FOLD_KEY) ?? '[]') as string[])
   } catch {
-    return null
+    return new Set()
   }
 }
 
+/** A branch whose pull request merged: Sync drops it, so the stack leaves it out. */
+const merged = (b: WsBranch) => b.pr?.state === 'merged'
+
 export function StackPanel({ tasks }: { tasks: TaskSummary[] | undefined }) {
   const ws = useResource('workspaces', api.workspaces)
-  const [picked, setPicked] = useState<string | null>(savedWindow)
-  const navigate = useNavigate()
+  const [folded, setFolded] = useState<Set<string>>(savedFolds)
   const sel = selectionFromPath(useLocation().pathname)
-  const pick = (id: string) => {
-    // Leave a branch of another window, or the pick would not show.
-    if (sel?.kind === 'branch' && sel.workspace !== id) navigate('/review')
-    setPicked(id)
-    try {
-      sessionStorage.setItem(PICK_KEY, id)
-    } catch {
-      // The choice just doesn't survive a reload.
-    }
-  }
+  const toggle = (id: string) =>
+    setFolded((f) => {
+      const n = new Set(f)
+      if (n.has(id)) n.delete(id)
+      else n.add(id)
+      try {
+        sessionStorage.setItem(FOLD_KEY, JSON.stringify([...n]))
+      } catch {
+        // The choice just doesn't survive a reload.
+      }
+      return n
+    })
 
   const list = ws.data && !ws.error ? ws.data.workspaces : []
   const here = ws.data && !ws.error ? thisWorkspace(ws.data) : undefined
-  // The window of the open branch, else the one picked, else this editor window's.
-  const shown =
-    (sel?.kind === 'branch' ? list.find((w) => w.id === sel.workspace) : undefined) ??
-    list.find((w) => w.id === picked) ??
-    here ??
-    list.find((w) => w.branches.length > 0) ??
-    list[0]
-  const others = list.filter((w) => w !== shown && (w.branches.length > 0 || w.pending || w.state === 'agent_running'))
+  // This editor window first, then windows with a stack, then the empty ones.
+  const live = (w: WorkspaceInfo) => w.branches.some((b) => !merged(b)) || w.pending !== null || w.state === 'agent_running'
+  const ordered = [...list].sort((a, b) => Number(b === here) - Number(a === here) || Number(live(b)) - Number(live(a)))
   // Tasks whose tries belong to a branch show on that branch; the rest are listed below.
   const onBranch = new Set(list.flatMap((w) => w.branches.map((b) => b.task).filter((t): t is number => t !== null)))
   const tries = new Map((tasks ?? []).map((t) => [t.id, t.attempts.total - t.attempts.abandoned]))
   const work = (tasks ?? []).filter((t) => !onBranch.has(t.id) && t.attempts.total - t.attempts.abandoned > 0 && t.attempts.promoted === 0)
 
-  if (ws.error && !work.length) return <div className="sp sp-empty muted">No stacks here: {ws.error.message}</div>
+  if (ws.error && !work.length) return <div className="sp sp-empty muted">No workspaces here: {ws.error.message}</div>
   if (!ws.data && !ws.error) return <div className="sp sp-empty muted">Loading…</div>
 
   return (
     <div className="sp">
-      {shown && <WindowStack w={shown} mine={shown === here} windows={list} tries={tries} onPick={pick} />}
-
-      {others.length > 0 && (
-        <section className="sp-sec" aria-label="Other windows">
-          <h3 className="sp-h">Other windows</h3>
-          {others.map((w) => {
-            const st = windowState(w)
-            return (
-              <button key={w.id} type="button" className="sp-line" onClick={() => pick(w.id)} title={w.path}>
-                <span className="sp-line-name">
-                  {w.name}
-                  <span className="muted"> · {w.branches.length ? `${w.branches.length} branch${w.branches.length === 1 ? '' : 'es'}` : 'no stack'}</span>
-                </span>
-                {st && <span className={`sp-chip sp-chip-${st.tone}`}>{st.label}</span>}
-              </button>
-            )
-          })}
-        </section>
+      <h3 className="sp-h sp-h-top">
+        Workspaces <span className="sp-count">{list.length}</span>
+      </h3>
+      {ordered.length === 0 && (
+        <p className="sp-empty muted">
+          No workspaces yet. Each git worktree (each editor window) is a workspace with its own stack: run <code>agentvc stack create</code> in one.
+        </p>
       )}
+      {ordered.map((w) => (
+        <WindowStack
+          key={w.id}
+          w={w}
+          mine={w === here}
+          tries={tries}
+          open={!folded.has(w.id) || (sel?.kind === 'branch' && sel.workspace === w.id)}
+          onToggle={() => toggle(w.id)}
+        />
+      ))}
 
       {work.length > 0 && (
         <section className="sp-sec" aria-label="Agent work">
@@ -116,16 +114,16 @@ function AgentLine({ t }: { t: TaskSummary }) {
 function WindowStack({
   w,
   mine,
-  windows,
   tries,
-  onPick,
+  open,
+  onToggle,
 }: {
   w: WorkspaceInfo
   mine: boolean
-  windows: WorkspaceInfo[]
   /** Open tries per task, for the "N tries" chip on a branch made from one. */
   tries: Map<number, number>
-  onPick: (id: string) => void
+  open: boolean
+  onToggle: () => void
 }) {
   const go = useGo()
   const toast = useToast()
@@ -134,11 +132,16 @@ function WindowStack({
   const [drag, setDrag] = useState<string | null>(null)
   const [over, setOver] = useState<string | null>(null)
   const sel = selectionFromPath(useLocation().pathname)
-  const rows = useMemo(() => stackRows(w), [w])
+  const live = useMemo(() => w.branches.filter((b) => !merged(b)), [w])
+  const gone = w.branches.length - live.length
+  const rows = useMemo(() => stackRows({ branches: live }), [live])
   const readOnly = w.kind === 'remote'
   const stopped = w.pending !== null || w.branches.some((b) => b.conflicts > 0)
   const ahead = mainAhead(w)
   const sync = needsSync(w)
+  const st = windowState(w)
+  // An empty workspace is one line: nothing to show or do until it has a branch.
+  const body = open && (rows.length > 0 || stopped || gone > 0)
   const trunk = trunkName(w)
   const queued = w.requests.filter((r) => r.status === 'queued')
   const lastOk = Math.max(0, ...w.requests.filter((r) => r.status === 'applied').map((r) => r.created_at))
@@ -175,29 +178,34 @@ function WindowStack({
   return (
     <section className={`sp-win ${busy ? 'busy' : ''}`} aria-label={`${w.name} stack`}>
       <header className="sp-head">
-        <label className="sp-pick" title={w.path}>
-          <span className="sr-only">Window</span>
-          <select value={w.id} onChange={(e) => onPick(e.target.value)}>
-            {windows.map((x) => (
-              <option key={x.id} value={x.id}>
-                {x.name}
-                {x.kind === 'remote' ? ` (${x.machine})` : ''}
-              </option>
-            ))}
-          </select>
+        <button type="button" className="sp-ws" onClick={onToggle} aria-expanded={open} title={w.path}>
+          <span className={`sp-caret ${open ? 'open' : ''}`} aria-hidden>
+            ▸
+          </span>
+          <span className="sp-ws-name">{w.name}</span>
           {mine && <span className="sp-here">this window</span>}
-        </label>
-        {!readOnly && (
+          {w.kind === 'remote' && <span className="sp-here">{w.machine}</span>}
+          <span className="sp-ws-meta">
+            {rows.length ? `${rows.length} branch${rows.length === 1 ? '' : 'es'} on ${trunk}` : `no unmerged branches · on ${trunk}`}
+            {sync && !stoppedAt && rows.length > 0 && (
+              <span className="sp-warn">{ahead > 0 ? ` · ${trunk} +${ahead}, sync` : ' · sync to rebase'}</span>
+            )}
+          </span>
+        </button>
+        {!open && st && <span className={`sp-chip sp-chip-${st.tone}`}>{st.label}</span>}
+        {body && !readOnly && (
           <span className="sp-tools">
-            <button type="button" className="sp-btn sp-btn-ghost" disabled={busy || stopped} onClick={doUndo} title="Undo the last stack change in this window" aria-label="Undo">
+            <button type="button" className="sp-btn sp-btn-ghost" disabled={busy || stopped} onClick={doUndo} title="Undo the last stack change in this workspace" aria-label={`Undo in ${w.name}`}>
               ↶
             </button>
-            <button type="button" className={`sp-btn ${sync && !stopped ? 'sp-btn-pri' : ''}`} disabled={busy || stopped} onClick={doSync} title={`Fetch ${trunk}, drop merged branches, rebase the stack`}>
+            <button type="button" className={`sp-btn ${sync && !stopped ? 'sp-btn-pri' : ''}`} disabled={busy || stopped} onClick={doSync} title={`Fetch ${trunk}, drop merged branches, rebase this stack`}>
               Sync
             </button>
           </span>
         )}
       </header>
+      {body && (
+        <>
 
       {stoppedAt ? (
         <div className="sp-banner sp-banner-bad">
@@ -208,19 +216,11 @@ function WindowStack({
             Resolve
           </button>
         </div>
-      ) : (
-        sync &&
-        !readOnly &&
-        w.branches.length > 0 && (
-          <div className="sp-banner">
-            <span>{ahead > 0 ? `${trunk} moved ${plural(ahead, 'commit')}. Sync to rebase your stack on it.` : 'Some branches are behind their parent. Sync to rebase them.'}</span>
-          </div>
-        )
-      )}
+      ) : null}
       {w.state === 'agent_running' && <div className="sp-note">An agent is working here; changes wait until it stops.</div>}
 
       <div className="sp-rows" role="tree" aria-label={`${w.name} branches`}>
-        {rows.length === 0 && <p className="sp-empty muted">No stacked branches in this window yet. Create one with <code>agentvc stack create</code>.</p>}
+
         {rows.map(({ branch: b, lane }) => (
           <BranchRow
             key={b.name}
@@ -257,6 +257,7 @@ function WindowStack({
         )}
       </div>
 
+      {gone > 0 && <div className="sp-note">{`${gone} merged branch${gone === 1 ? '' : 'es'} hidden. Sync drops ${gone === 1 ? 'it' : 'them'}.`}</div>}
       {!readOnly && rows.length > 0 && (
         <div className="sp-foot">
           <button
@@ -286,6 +287,8 @@ function WindowStack({
             {r.op} {r.branch ?? ''} failed: {r.code === 'conflict' ? 'a file changed on both sides' : (r.reason ?? r.code)}
           </div>
         ))}
+        </>
+      )}
     </section>
   )
 }

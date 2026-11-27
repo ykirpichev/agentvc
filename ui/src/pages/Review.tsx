@@ -21,6 +21,7 @@ import { nextStep, type NextStep } from '../core/next'
 import { agentLine, HELP, shortSha, statusWords, testsWords, tryName, versionName, WORDS } from '../core/words'
 import { money, plural, timeAgo } from '../lib/format'
 import { CompareView } from './Compare'
+import { WorkspacesOverview } from '../components/WorkspacesOverview'
 
 const versionsOf = (graph: Graph, task: number) =>
   visibleVersions(graph, { showClosed: true }).filter((g) => g.attempt.task_id === task)
@@ -34,9 +35,8 @@ export function ReviewHome() {
     .filter((r) => r.n > 0 && r.next.kind !== 'done')
   return (
     <div className="page rv">
-      {rows.length === 0 ? (
-        <Empty title="Pick a branch on the left">Its commits, changes and PR show here.</Empty>
-      ) : (
+      <WorkspacesOverview />
+      {rows.length === 0 ? null : (
         <>
           <h1 className="rv-title">Agent work</h1>
           <div className="rv-list">
