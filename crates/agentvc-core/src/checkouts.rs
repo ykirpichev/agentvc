@@ -31,6 +31,8 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
@@ -158,6 +160,7 @@ pub fn set_name(w: &Window, name: Option<&str>) -> Result<SpaceRef> {
             details: None,
         });
     };
+    let _lock = lock_registry_at(&file)?;
     let mut r = read_registry(&file);
     r.names.retain(|n| n.key != sp.key);
     if let Some(n) = name.filter(|n| *n != default_name(&sp.key)) {
@@ -230,10 +233,95 @@ fn read_registry(file: &Path) -> Registry {
         .unwrap_or_default()
 }
 
+/// A lock older than this was left by a crashed process (registry updates
+/// take milliseconds).
+const REGISTRY_LOCK_STALE: Duration = Duration::from_secs(10);
+/// How long to wait for another process's registry lock.
+const REGISTRY_LOCK_WAIT: Duration = Duration::from_secs(15);
+
+/// Exclusive right to change this machine's registry; released on drop.
+///
+/// Every change is read-modify-write of one file, so without it two
+/// processes registering at once (two checkouts listed at the same time, the
+/// daemon and the CLI) lose one entry, and the lost checkout's workspaces
+/// drop out of its space: names stop being unique (#180).
+pub struct RegistryLock {
+    path: PathBuf,
+}
+
+impl Drop for RegistryLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+/// Take the registry lock, waiting for another process to finish. `None`
+/// when there is no registry (no home directory).
+pub fn lock_registry() -> Result<Option<RegistryLock>> {
+    match registry_file() {
+        Some(file) => lock_registry_at(&file).map(Some),
+        None => Ok(None),
+    }
+}
+
+fn lock_registry_at(file: &Path) -> Result<RegistryLock> {
+    let dir = file.parent().expect("has a parent");
+    fs::create_dir_all(dir).at(dir)?;
+    let path = dir.join("checkouts.lock");
+    let start = Instant::now();
+    loop {
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(mut f) => {
+                use std::io::Write;
+                let _ = writeln!(f, "{}", std::process::id());
+                return Ok(RegistryLock { path });
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                let stale = fs::metadata(&path)
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .and_then(|t| t.elapsed().ok())
+                    .is_some_and(|age| age > REGISTRY_LOCK_STALE);
+                if stale {
+                    let _ = fs::remove_file(&path);
+                    continue;
+                }
+                if start.elapsed() > REGISTRY_LOCK_WAIT {
+                    return Err(Error::Stack {
+                        code: "registry_locked",
+                        message: format!(
+                            "another agentvc command is changing this machine's checkouts ({}); try again",
+                            path.display()
+                        ),
+                        details: None,
+                    });
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(e) => return Err(e).at(&path),
+        }
+    }
+}
+
+/// A temp file name no other process or thread uses at the same time.
+pub(crate) fn tmp_name(base: &str) -> String {
+    static N: AtomicU64 = AtomicU64::new(0);
+    format!(
+        ".{base}.{}.{}.tmp",
+        std::process::id(),
+        N.fetch_add(1, Ordering::Relaxed)
+    )
+}
+
+/// Write the registry atomically; the caller holds the [`RegistryLock`].
 fn write_registry(file: &Path, r: &Registry) -> Result<()> {
     let dir = file.parent().expect("has a parent");
     fs::create_dir_all(dir).at(dir)?;
-    let tmp = dir.join(format!(".checkouts.json.{}.tmp", std::process::id()));
+    let tmp = dir.join(tmp_name("checkouts.json"));
     let text = serde_json::to_string_pretty(r).expect("serializes") + "\n";
     fs::write(&tmp, text).at(&tmp)?;
     fs::rename(&tmp, file).at(file)
@@ -353,13 +441,21 @@ pub fn main_path(w: &Window) -> PathBuf {
 /// effort: no home directory or an unwritable one registers nothing).
 /// Returns its space.
 pub fn register(w: &Window) -> Option<String> {
+    let lock = registry_file().and_then(|f| lock_registry_at(&f).ok());
+    register_locked(w, lock.as_ref())
+}
+
+/// [`register`] for a caller already holding the registry lock (`None`:
+/// registers nothing, as without a home directory).
+pub fn register_locked(w: &Window, lock: Option<&RegistryLock>) -> Option<String> {
     let (space, _) = space_of(w);
-    if let Some(file) = registry_file() {
+    if let (Some(file), Some(_)) = (registry_file(), lock) {
         let _ = register_at(&file, &main_path(w), &w.common_dir, space.clone());
     }
     space
 }
 
+/// Add or refresh one entry; the caller holds the [`RegistryLock`].
 fn register_at(file: &Path, path: &Path, common_dir: &Path, space: Option<String>) -> Result<()> {
     let mut r = read_registry(file);
     let before = r.checkouts.clone();
@@ -516,5 +612,31 @@ mod tests {
         fs::remove_dir_all(&c).unwrap();
         register_at(&file, &a, &ag, s()).unwrap();
         assert_eq!(read_registry(&file).checkouts.len(), 2);
+    }
+
+    #[test]
+    fn checkouts_registering_at_once_are_all_kept() {
+        // Each registration is read-modify-write of one file: without the
+        // lock, concurrent ones lose entries (#180).
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("home/checkouts.json");
+        let dirs: Vec<(PathBuf, PathBuf)> = (0..16)
+            .map(|i| {
+                let d = tmp.path().join(format!("c{i}"));
+                fs::create_dir_all(d.join(".git")).unwrap();
+                (d.clone(), d.join(".git"))
+            })
+            .collect();
+        std::thread::scope(|sc| {
+            for (d, g) in &dirs {
+                let file = &file;
+                sc.spawn(move || {
+                    let _lock = lock_registry_at(file).unwrap();
+                    register_at(file, d, g, Some("s".into())).unwrap();
+                });
+            }
+        });
+        assert_eq!(read_registry(&file).checkouts.len(), dirs.len());
+        assert!(!tmp.path().join("home/checkouts.lock").exists());
     }
 }
