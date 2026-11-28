@@ -263,7 +263,15 @@ so an editor polling it does not move branches under a working agent. A
 queued edit that cannot apply (a conflict, a branch gone) is recorded as
 failed with its code. Other agents can say they are working with
 `agentvc workspace state agent-running` / `idle`. Changing stack commands take
-a per-workspace lock (`stack_locked` after 10 s), so edits never interleave.
+a per-workspace lock (`stack_locked` after 10 s, naming the holder's pid and
+command), so edits never interleave. It is an OS file lock on
+`agentvc/stack.lock`: however long a `sync` or `merge` runs it keeps the lock,
+and a killed command's lock is released by the OS at once.
+
+Every save of `stack.json` is fsynced and keeps the previous state as
+`stack.json.bak`. If `stack.json` is ever cut short, stack commands use the
+backup with a warning and `agentvc doctor --repair` puts it back
+(`bad_stack_state`).
 
 `give --to` accepts a workspace name as well as a directory.
 

@@ -32,7 +32,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
@@ -233,26 +233,18 @@ fn read_registry(file: &Path) -> Registry {
         .unwrap_or_default()
 }
 
-/// A lock older than this was left by a crashed process (registry updates
-/// take milliseconds).
-const REGISTRY_LOCK_STALE: Duration = Duration::from_secs(10);
 /// How long to wait for another process's registry lock.
 const REGISTRY_LOCK_WAIT: Duration = Duration::from_secs(15);
 
-/// Exclusive right to change this machine's registry; released on drop.
+/// Exclusive right to change this machine's registry; released on drop, or
+/// by the OS when the process dies, and never taken over by age (#204).
 ///
 /// Every change is read-modify-write of one file, so without it two
 /// processes registering at once (two checkouts listed at the same time, the
 /// daemon and the CLI) lose one entry, and the lost checkout's workspaces
 /// drop out of its space: names stop being unique (#180).
 pub struct RegistryLock {
-    path: PathBuf,
-}
-
-impl Drop for RegistryLock {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
-    }
+    _held: crate::filelock::FileLock,
 }
 
 /// Take the registry lock, waiting for another process to finish. `None`
@@ -266,43 +258,22 @@ pub fn lock_registry() -> Result<Option<RegistryLock>> {
 
 fn lock_registry_at(file: &Path) -> Result<RegistryLock> {
     let dir = file.parent().expect("has a parent");
-    fs::create_dir_all(dir).at(dir)?;
     let path = dir.join("checkouts.lock");
-    let start = Instant::now();
-    loop {
-        match fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-        {
-            Ok(mut f) => {
-                use std::io::Write;
-                let _ = writeln!(f, "{}", std::process::id());
-                return Ok(RegistryLock { path });
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                let stale = fs::metadata(&path)
-                    .and_then(|m| m.modified())
-                    .ok()
-                    .and_then(|t| t.elapsed().ok())
-                    .is_some_and(|age| age > REGISTRY_LOCK_STALE);
-                if stale {
-                    let _ = fs::remove_file(&path);
-                    continue;
-                }
-                if start.elapsed() > REGISTRY_LOCK_WAIT {
-                    return Err(Error::Stack {
-                        code: "registry_locked",
-                        message: format!(
-                            "another agentvc command is changing this machine's checkouts ({}); try again",
-                            path.display()
-                        ),
-                        details: None,
-                    });
-                }
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            Err(e) => return Err(e).at(&path),
+    match crate::filelock::acquire(&path, REGISTRY_LOCK_WAIT, Duration::from_millis(10))? {
+        Ok(l) => Ok(RegistryLock { _held: l }),
+        Err(holder) => {
+            let by = holder
+                .as_ref()
+                .map(|h| format!(" by {}", h.describe()))
+                .unwrap_or_default();
+            Err(Error::Stack {
+                code: "registry_locked",
+                message: format!(
+                    "another agentvc command is changing this machine's checkouts{by} ({}); try again",
+                    path.display()
+                ),
+                details: Some(serde_json::json!({ "lock": path, "holder": holder })),
+            })
         }
     }
 }
@@ -637,6 +608,7 @@ mod tests {
             }
         });
         assert_eq!(read_registry(&file).checkouts.len(), dirs.len());
-        assert!(!tmp.path().join("home/checkouts.lock").exists());
+        // Released: free at once (the lock file itself stays).
+        drop(lock_registry_at(&file).unwrap());
     }
 }

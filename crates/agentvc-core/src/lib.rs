@@ -19,6 +19,7 @@ pub mod doctor;
 pub mod error;
 pub mod export;
 pub mod feedback;
+pub mod filelock;
 pub mod gc;
 pub mod github;
 pub mod hooks;

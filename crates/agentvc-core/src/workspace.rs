@@ -12,8 +12,10 @@
 //!   ([`Request`]). An edit is applied at once when the workspace is idle and
 //!   has no rebase in progress; otherwise it waits here and the workspace
 //!   applies it at its next stack command or when its agent stops.
-//! - `agentvc/stack.lock`: held by whoever changes the stack, so an edit from
-//!   another window never interleaves with one made here.
+//! - `agentvc/stack.lock`: OS-locked (see [`crate::filelock`]) by whoever
+//!   changes the stack, so an edit from another window never interleaves
+//!   with one made here. A killed command's lock is free at once; a slow
+//!   one's is never taken over.
 //!
 //! Workspaces on other machines are published as `refs/agentvc/workspaces/<id>`
 //! (a commit holding `workspace.json` and `stack.json`) and listed read-only.
@@ -22,7 +24,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, SystemTime};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -37,8 +39,6 @@ use crate::stack::{canon, read_state, state_path, ParentKind, Pending, State, Wi
 pub const RECORD_VERSION: u32 = 1;
 /// An agent that has not been heard from for this long is taken as gone.
 pub const BUSY_TTL: i64 = 30 * 60;
-/// A lock older than this is taken as left by a crashed process.
-const LOCK_STALE: Duration = Duration::from_secs(120);
 /// How long to wait for another process's lock.
 const LOCK_WAIT: Duration = Duration::from_secs(10);
 /// Finished requests kept per workspace (for the UI's history).
@@ -357,57 +357,35 @@ pub fn set_activity(cwd: &Path, activity: Activity, by: Option<&str>) -> Result<
 
 // ---- lock -------------------------------------------------------------------
 
-/// Exclusive right to change one workspace's stack; released on drop.
+/// Exclusive right to change one workspace's stack; released on drop, or by
+/// the OS when the process dies (#204). Never taken over by age.
 pub struct Lock {
-    path: PathBuf,
-}
-
-impl Drop for Lock {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
-    }
+    _lock: crate::filelock::FileLock,
 }
 
 /// Take the stack lock of the workspace whose git dir is `git_dir`, waiting
 /// up to [`LOCK_WAIT`] for another process to finish.
 pub fn lock(git_dir: &Path) -> Result<Lock> {
-    let dir = agentvc_dir(git_dir);
-    fs::create_dir_all(&dir).at(&dir)?;
-    let path = dir.join("stack.lock");
-    let start = Instant::now();
-    loop {
-        match fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-        {
-            Ok(mut f) => {
-                let _ = writeln!(f, "{}", std::process::id());
-                return Ok(Lock { path });
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                let stale = fs::metadata(&path)
-                    .and_then(|m| m.modified())
-                    .ok()
-                    .and_then(|t| t.elapsed().ok())
-                    .is_some_and(|age| age > LOCK_STALE);
-                if stale {
-                    let _ = fs::remove_file(&path);
-                    continue;
-                }
-                if start.elapsed() > LOCK_WAIT {
-                    return Err(ws_err_with(
-                        "stack_locked",
-                        format!(
-                            "another agentvc command is changing this stack ({}); try again",
-                            path.display()
-                        ),
-                        json!({ "lock": path }),
-                    ));
-                }
-                std::thread::sleep(Duration::from_millis(40));
-            }
-            Err(e) => return Err(e).at(&path),
+    lock_waiting(git_dir, LOCK_WAIT)
+}
+
+fn lock_waiting(git_dir: &Path, wait: Duration) -> Result<Lock> {
+    let path = agentvc_dir(git_dir).join("stack.lock");
+    match crate::filelock::acquire(&path, wait, Duration::from_millis(40))? {
+        Ok(l) => Ok(Lock { _lock: l }),
+        Err(holder) => {
+            let by = holder
+                .as_ref()
+                .map(|h| format!(" by {}", h.describe()))
+                .unwrap_or_default();
+            Err(ws_err_with(
+                "stack_locked",
+                format!(
+                    "another agentvc command is changing this stack{by} ({}); try again",
+                    path.display()
+                ),
+                json!({ "lock": path, "holder": holder }),
+            ))
         }
     }
 }
@@ -3033,6 +3011,7 @@ pub fn finish(cwd: &Path, target: &str, abort: bool) -> Result<WsFinish> {
 mod tests {
     use super::*;
     use std::process::Command;
+    use std::time::Instant;
 
     fn git(dir: &Path, args: &[&str]) -> String {
         let out = Command::new("git")
@@ -3134,6 +3113,52 @@ mod tests {
             fs::write(dir.join(format!("{n}.txt")), format!("{n}\n")).unwrap();
             w.create(Some(n), Some(n), true).unwrap();
         }
+    }
+
+    /// #204: a stack lock held longer than the old 120 s takeover stays
+    /// held; a second command waits and fails with `stack_locked`, naming
+    /// the holder, and nobody deletes the lock file.
+    #[test]
+    fn a_long_held_stack_lock_is_not_stolen() {
+        let f = setup();
+        let w = Window::open(&f.w2).unwrap();
+        let held = lock(&w.git_dir).unwrap();
+        let path = w.git_dir.join("agentvc").join("stack.lock");
+        let old = SystemTime::now() - Duration::from_secs(600);
+        fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        let e = match lock_waiting(&w.git_dir, Duration::from_millis(100)) {
+            Ok(_) => panic!("a held lock was taken over"),
+            Err(e) => e,
+        };
+        assert_eq!(e.code(), "stack_locked");
+        #[cfg(unix)]
+        assert!(
+            e.to_string()
+                .contains(&format!("pid {}", std::process::id())),
+            "{e}"
+        );
+        drop(held);
+        assert!(path.exists(), "the lock file is never removed");
+        drop(lock_waiting(&w.git_dir, Duration::ZERO).unwrap());
+    }
+
+    /// #204: a lock file left by a killed command (the file is there, no
+    /// process holds it) does not block anyone.
+    #[test]
+    fn a_stack_lock_left_by_a_dead_process_is_free() {
+        let f = setup();
+        let w = Window::open(&f.w2).unwrap();
+        let path = w.git_dir.join("agentvc").join("stack.lock");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, "4242\n").unwrap();
+        let start = Instant::now();
+        drop(lock_waiting(&w.git_dir, Duration::from_secs(10)).unwrap());
+        assert!(start.elapsed() < Duration::from_secs(2));
     }
 
     /// w2 stacks b1 (edits a.txt) and b2; main then edits a.txt too.
