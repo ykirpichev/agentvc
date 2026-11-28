@@ -11,7 +11,12 @@
 //! (then with `isError: true`). Running the real binary keeps the two in
 //! lockstep and keeps a misbehaving command from taking the server down.
 //!
-//! Resources:
+//! Which tools it offers depends on its [`tools::Profile`]: by default the
+//! stack and review tools; inside an agent started from the control center
+//! that agent's own tools instead of the stack edits; with `--attempts` also
+//! the attempt-tree tools.
+//!
+//! Resources (with `--attempts`):
 //! - `agentvc://tree`: the attempt tree for the current task, the task of
 //!   the attempt whose view contains the server's directory (all attempts if
 //!   that attempt has no task).
@@ -28,6 +33,24 @@ use serde_json::{json, Value};
 
 /// Protocol versions this server speaks, newest first.
 pub const PROTOCOL_VERSIONS: &[&str] = &["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
+
+const STACK_INSTRUCTIONS: &str = "agentvc keeps this workspace's stack of branches, one PR per branch, \
+each stacked on the one below. Do version control through these tools, not raw git: `stack_log` shows the \
+stack and the branch checked out here; `stack_create` commits your changes as a new branch on top (one per \
+separate change, instead of git checkout -b and git commit); `stack_modify` puts fixes into the current \
+branch and restacks the ones above (instead of git commit --amend); `stack_submit` pushes and opens or \
+updates the PRs; `stack_sync` pulls the trunk, drops merged branches and restacks; `stack_restack` replays \
+branches after one below changed. Review comments reach you through `review_comments`: address each open \
+thread, `reply_comment` with what you did and `resolve_comment` it. Every result is the JSON of the matching \
+`agentvc --json` command; on failure error.code is a stable code such as conflict or not_found.";
+
+const AGENT_INSTRUCTIONS: &str = "You are an agent started from the agentvc control center, working in \
+your own worktree. agentvc commits what you leave there when you stop and the person lands it on their \
+stack and opens the PRs, so do not commit, branch, push or open PRs yourself. When the person wants several \
+reviews (a stack of PRs), call `commit_review` after each one: it commits it on its own branch and you \
+continue on top. `stack_log` shows the stack you started from. Ask the person with `ask_human` instead of \
+guessing. Review comments reach you through `review_comments`: address each open thread, `reply_comment` \
+with what you did and `resolve_comment` it.";
 
 const INSTRUCTIONS: &str = "agentvc records every agent attempt at a task as a node in an attempt tree, \
 each in its own copy-on-write view. Workflow: `task_new` (or reuse a task from `task_list`), \
@@ -51,6 +74,7 @@ const RESOURCE_NOT_FOUND: i64 = -32002;
 pub struct Server {
     exe: PathBuf,
     dir: PathBuf,
+    profile: tools::Profile,
 }
 
 impl Server {
@@ -60,7 +84,14 @@ impl Server {
         Server {
             exe: exe.into(),
             dir: dir.into(),
+            profile: tools::Profile::default(),
         }
+    }
+
+    /// Offer the tools of `profile` instead of the default ones.
+    pub fn with_profile(mut self, profile: tools::Profile) -> Self {
+        self.profile = profile;
+        self
     }
 
     /// Serve on stdin and stdout until stdin closes.
@@ -125,10 +156,10 @@ impl Server {
 
     fn dispatch(&self, method: &str, params: &Value) -> Result<Value, (i64, String)> {
         match method {
-            "initialize" => Ok(initialize(params)),
+            "initialize" => Ok(initialize(params, self.profile)),
             "ping" => Ok(json!({})),
             "tools/list" => Ok(json!({
-                "tools": tools::TOOLS.iter().map(tools::Tool::describe).collect::<Vec<_>>()
+                "tools": self.profile.tools().map(tools::Tool::describe).collect::<Vec<_>>()
             })),
             "tools/call" => self.call_tool(params),
             "resources/list" => Ok(self.list_resources()),
@@ -152,7 +183,23 @@ impl Server {
             .get("name")
             .and_then(Value::as_str)
             .ok_or((INVALID_PARAMS, "tools/call needs a tool name".to_string()))?;
-        let tool = tools::find(name).ok_or((INVALID_PARAMS, format!("unknown tool {name:?}")))?;
+        let tool = tools::find(name)
+            .filter(|t| self.profile.offers(t))
+            .ok_or_else(|| {
+                let hint = match tools::find(name).map(|t| t.group) {
+                    Some(tools::Group::Attempt) => {
+                        "; attempt tools need the server started with `agentvc mcp --attempts`"
+                    }
+                    Some(tools::Group::Agent) => {
+                        "; it is only for agents started from the agentvc control center"
+                    }
+                    Some(tools::Group::Stack) => {
+                        "; agentvc commits and lands an agent's work for it (use commit_review)"
+                    }
+                    _ => "",
+                };
+                (INVALID_PARAMS, format!("unknown tool {name:?}{hint}"))
+            })?;
         let out = match tool.build(params.get("arguments").unwrap_or(&Value::Null)) {
             Ok(argv) => self.agentvc(&argv),
             Err(tools::BadArgs(msg)) => failure("bad_args", &msg),
@@ -212,6 +259,9 @@ impl Server {
     }
 
     fn list_resources(&self) -> Value {
+        if !self.profile.attempts {
+            return json!({ "resources": [] });
+        }
         let mut resources = vec![json!({
             "uri": "agentvc://tree",
             "name": "tree",
@@ -305,7 +355,7 @@ fn current_task(dir: &Path) -> Option<i64> {
     space.attempt_for_path(dir).ok()?.task_id
 }
 
-fn initialize(params: &Value) -> Value {
+fn initialize(params: &Value, profile: tools::Profile) -> Value {
     let asked = params.get("protocolVersion").and_then(Value::as_str);
     let version = asked
         .filter(|v| PROTOCOL_VERSIONS.contains(v))
@@ -322,7 +372,11 @@ fn initialize(params: &Value) -> Value {
             "title": "agentvc",
             "version": env!("CARGO_PKG_VERSION"),
         },
-        "instructions": INSTRUCTIONS,
+        "instructions": match (profile.agent, profile.attempts) {
+            (true, _) => AGENT_INSTRUCTIONS.to_string(),
+            (false, false) => STACK_INSTRUCTIONS.to_string(),
+            (false, true) => format!("{STACK_INSTRUCTIONS} {INSTRUCTIONS}"),
+        },
     })
 }
 
@@ -339,8 +393,12 @@ fn error(id: Value, code: i64, message: &str) -> Value {
 mod tests {
     use super::*;
 
+    /// A server with every tool but the stack edits.
     fn server() -> Server {
-        Server::new("/nonexistent/agentvc", "/")
+        Server::new("/nonexistent/agentvc", "/").with_profile(tools::Profile {
+            agent: true,
+            attempts: true,
+        })
     }
 
     fn call(s: &Server, msg: Value) -> Value {

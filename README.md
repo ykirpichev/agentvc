@@ -73,20 +73,21 @@ steps and options.
 
 ## MCP server
 
-`agentvc mcp` serves the agentvc commands to coding agents over the Model
-Context Protocol (stdio). Tools: `task_new`, `task_list`, `fork`, `snapshot`,
-`mark`, `abandon`, `promote`, `log`, `show`, `diff`, `path`, `run`, `ps`, `pr`,
-`rebase`, `take`, `query`, `blame`, `sync`, `op_log`, `undo`, `land`, `comments`.
-Each one runs the matching command with `--json` and returns the same JSON,
-with `isError` set and the stable `error.code` (for example `no_space`) on
-failure. Resources: `agentvc://tree` (attempts of the current task) and
-`agentvc://attempt/aN` (metadata, snapshots and changed files).
+`agentvc mcp` serves agentvc to coding agents over the Model Context Protocol
+(stdio). By default it offers the stack and review tools: `stack_log`,
+`stack_create`, `stack_modify`, `stack_submit`, `stack_sync`, `stack_restack`,
+`review_comments`, `reply_comment`, `resolve_comment`. Inside an agent started
+from the control center it offers that agent's own tools instead of the stack
+edits (`ask_human`, `approve`, `commit_review`, plus `stack_log` and the review
+tools), since agentvc commits and lands its work. `agentvc mcp --attempts` adds
+the attempt-tree tools (`task_new`, `fork`, `snapshot`, `mark`, `promote`,
+`log`, `show`, `diff`, `run`, `pr`, `rebase`, `take`, ...) and the resources
+`agentvc://tree` and `agentvc://attempt/aN`.
 
-Commands run in the directory the server starts in, or `--space DIR`. That
-picks the space and the "current attempt", so start it inside a view to make
-`fork` and `snapshot` default to that attempt. Differences from the CLI
-defaults: `fork` and `run` use actor `agent`, `snapshot` uses trigger `mcp`,
-and `run` detaches unless `detach: false`.
+Each tool runs the matching command with `--json` and returns the same JSON,
+with `isError` set and the stable `error.code` (for example `conflict`) on
+failure. Commands run in the directory the server starts in, or `--space DIR`,
+which picks the workspace (and, with `--attempts`, the current attempt).
 
 Claude Code: install the plugin, which bundles the MCP server with the hooks,
 slash commands and a skill. See

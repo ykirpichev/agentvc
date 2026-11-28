@@ -29,9 +29,18 @@ struct Client {
 }
 
 impl Client {
+    /// The attempt-tree server (`agentvc mcp --attempts`).
     fn start(cwd: &Path) -> Client {
-        let mut child = Command::new(BIN)
-            .arg("mcp")
+        Client::start_with(cwd, &["--attempts"], None)
+    }
+
+    fn start_with(cwd: &Path, args: &[&str], agent_dir: Option<&Path>) -> Client {
+        let mut cmd = Command::new(BIN);
+        cmd.arg("mcp").args(args).env_remove("AGENTVC_AGENT_DIR");
+        if let Some(d) = agent_dir {
+            cmd.env("AGENTVC_AGENT_DIR", d);
+        }
+        let mut child = cmd
             .current_dir(cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -134,6 +143,99 @@ fn lists_every_tool_with_a_schema() {
         assert!(t["description"].as_str().is_some_and(|d| !d.is_empty()));
     }
     assert_eq!(c.request("ping", json!({}))["result"], json!({}));
+}
+
+#[test]
+fn offers_stack_tools_by_default_and_attempt_tools_on_request() {
+    let tmp = tempfile::tempdir().unwrap();
+    let w = tmp.path();
+    git(w, &["init", "--quiet", "-b", "main"]);
+    // The server's own git commits need an identity (CI has none).
+    git(w, &["config", "user.name", "t"]);
+    git(w, &["config", "user.email", "t@t"]);
+    fs::write(w.join("a.txt"), "one\n").unwrap();
+    git(w, &["add", "."]);
+    git(w, &["commit", "--quiet", "-m", "init"]);
+
+    let mut c = Client::start_with(w, &[], None);
+    let names = |c: &mut Client| -> Vec<String> {
+        let r = c.request("tools/list", json!({}));
+        r["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let list = names(&mut c);
+    assert!(list.contains(&"stack_create".to_string()), "{list:?}");
+    assert!(!list.contains(&"fork".to_string()), "{list:?}");
+    assert!(list.len() <= 10, "{list:?}");
+    // An attempt tool is refused with a hint.
+    let r = c.request("tools/call", json!({ "name": "fork", "arguments": {} }));
+    assert!(
+        r["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("--attempts"),
+        "{r}"
+    );
+    assert_eq!(
+        c.request("resources/list", json!({}))["result"]["resources"],
+        json!([])
+    );
+
+    // The stack workflow end to end: a branch per change, then the log.
+    fs::write(w.join("b.txt"), "two\n").unwrap();
+    let made = c.ok(
+        "stack_create",
+        json!({ "message": "Add b", "name": "add-b" }),
+    );
+    assert_eq!(git(w, &["branch", "--show-current"]), "add-b", "{made}");
+    fs::write(w.join("c.txt"), "three\n").unwrap();
+    c.ok("stack_create", json!({ "message": "Add c" }));
+    fs::write(w.join("c.txt"), "three, fixed\n").unwrap();
+    c.ok("stack_modify", json!({}));
+    let log = c.ok("stack_log", json!({}));
+    let text = log.to_string();
+    assert!(text.contains("add-b"), "{log}");
+    assert_eq!(
+        git(w, &["status", "--porcelain"]),
+        "",
+        "everything committed"
+    );
+    drop(c);
+
+    // Inside a control-center agent: its own tools, the stack read-only.
+    let mut c = Client::start_with(w, &[], Some(w));
+    let list = names(&mut c);
+    for want in [
+        "ask_human",
+        "approve",
+        "commit_review",
+        "stack_log",
+        "review_comments",
+    ] {
+        assert!(list.contains(&want.to_string()), "{want}: {list:?}");
+    }
+    assert!(!list.contains(&"stack_submit".to_string()), "{list:?}");
+    let r = c.request(
+        "tools/call",
+        json!({ "name": "stack_create", "arguments": { "message": "x" } }),
+    );
+    assert!(
+        r["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("commit_review"),
+        "{r}"
+    );
+    drop(c);
+
+    // --attempts adds the attempt tools.
+    let mut c = Client::start_with(w, &["--attempts"], None);
+    let list = names(&mut c);
+    assert!(list.contains(&"fork".to_string()) && list.contains(&"stack_create".to_string()));
 }
 
 #[test]

@@ -6,8 +6,12 @@ One install turns agentvc on in Claude Code:
   `Write`, `MultiEdit`, `NotebookEdit`, `Bash`) and at the end of every turn.
   An edit is recorded in the attempt whose view holds the edited file, even if
   the shell is somewhere else. Outside an agentvc space the hooks do nothing.
-- **MCP server** (`agentvc mcp`): the agent can list, fork, snapshot, mark and
-  diff attempts. Tools show up as `mcp__plugin_agentvc_agentvc__<tool>`.
+- **MCP server** (`agentvc mcp`): the agent works on the workspace's stack
+  (`stack_log`, `stack_create`, `stack_modify`, `stack_submit`, `stack_sync`,
+  `stack_restack`) and answers review comments (`review_comments`,
+  `reply_comment`, `resolve_comment`). Tools show up as
+  `mcp__plugin_agentvc_agentvc__<tool>`. The attempt-tree tools (`fork`,
+  `snapshot`, `promote`, ...) need `agentvc mcp --attempts`.
 - **Slash commands**, each printing a link to the review UI:
   - `/attempt [--from aN] [--task tN] [what you will try]`: fork a new attempt
     (from the current one by default, on its parent's task) and switch the
@@ -18,9 +22,9 @@ One install turns agentvc on in Claude Code:
 
   If another plugin uses the same name, use the namespaced form, for example
   `/agentvc:attempt`.
-- **Skill** `attempt-workflow`: teaches the agent to fork before risky or
-  alternative approaches, record outcomes with `snapshot` and `mark`, and never
-  edit outside its own view.
+- **Skill** `stack-workflow`: teaches the agent to commit one branch per change
+  with `stack_create`, put fixes into their branch with `stack_modify`, submit
+  PRs only when asked, and answer review comments in their threads.
 
 ## Install
 
@@ -113,7 +117,7 @@ npx @modelcontextprotocol/inspector --cli /absolute/path/to/agentvc mcp \
 hooks/hooks.json                PostToolUse, Stop, SubagentStop
 .mcp.json                       the agentvc MCP server
 commands/                       /attempt, /attempts, /compare, /promote
-skills/attempt-workflow/        the attempt workflow skill
+skills/stack-workflow/          the stack workflow skill
 bin/agentvc-plugin              entry point for all of the above
 tests/plugin.sh                 smoke test (runs in CI)
 ```
