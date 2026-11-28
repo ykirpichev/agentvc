@@ -2433,9 +2433,31 @@ fn clones_of_one_repo_share_a_space_of_workspaces() {
     assert_eq!(r["ok"], true, "{r}");
     assert_eq!(git(&b, &["branch", "--show-current"]), "feat-b2");
 
-    // Branches do not cross clones.
+    // A branch can be handed to another clone of the space (#205): its
+    // commits are copied there and its stack record moves.
+    let tip = git(&a, &["rev-parse", "feat-a"]);
     let r = agentvc_home(&home, &a, &["stack", "give", "feat-a", "--to", &bid]);
-    assert_eq!(r["error"]["code"], "other_checkout", "{r}");
+    assert_eq!(r["ok"], true, "{r}");
+    assert_eq!(r["moved"][0], "feat-a", "{r}");
+    assert_eq!(git(&b, &["rev-parse", "feat-a"]), tip);
+    let lb = agentvc_home(&home, &b, &["stack", "log"]);
+    let names: Vec<&str> = lb["branches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x["name"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"feat-a"), "{lb}");
+    let la = agentvc_home(&home, &a, &["stack", "log"]);
+    assert!(la["branches"].as_array().unwrap().is_empty(), "{la}");
+    // ...but not to a checkout of another space.
+    let other = tmp.path().join("other");
+    git(tmp.path(), &["init", "--quiet", "-b", "main", "other"]);
+    fs::write(other.join("o"), "o\n").unwrap();
+    git(&other, &["add", "-A"]);
+    git(&other, &["commit", "--quiet", "-m", "o"]);
+    let r = agentvc_home(&home, &b, &["stack", "give", "feat-a", "--to", "../other"]);
+    assert_eq!(r["error"]["code"], "other_repository", "{r}");
 
     // A checkout can leave for a space of its own.
     let s = agentvc_home(&home, &b, &["workspace", "space", "solo"]);
@@ -2445,6 +2467,118 @@ fn clones_of_one_repo_share_a_space_of_workspaces() {
     assert_eq!(l["workspaces"].as_array().unwrap().len(), 1, "{l}");
     let s = agentvc_home(&home, &b, &["workspace", "space", "--reset"]);
     assert_eq!(s["checkouts"].as_array().unwrap().len(), 1, "{s}");
+}
+
+fn copy_dir(from: &Path, to: &Path) {
+    fs::create_dir_all(to).unwrap();
+    for e in fs::read_dir(from).unwrap() {
+        let e = e.unwrap();
+        let (src, dst) = (e.path(), to.join(e.file_name()));
+        if e.file_type().unwrap().is_dir() {
+            copy_dir(&src, &dst);
+        } else {
+            fs::copy(&src, &dst).unwrap();
+        }
+    }
+}
+
+#[test]
+fn a_clone_of_a_folder_on_a_feature_branch_is_on_trunk_and_copies_get_own_ids() {
+    let tmp = tempdir();
+    let home = tmp.path().join("home");
+    git(
+        tmp.path(),
+        &["init", "--quiet", "--bare", "-b", "main", "origin.git"],
+    );
+    let a = tmp.path().join("mono-1");
+    git(tmp.path(), &["clone", "--quiet", "origin.git", "mono-1"]);
+    fs::write(a.join("README"), "hi\n").unwrap();
+    git(&a, &["add", "-A"]);
+    git(&a, &["commit", "--quiet", "-m", "init"]);
+    git(&a, &["push", "--quiet", "origin", "HEAD:main"]);
+    // The folder is on a pushed feature branch, with an unpushed one too.
+    fs::write(a.join("b.txt"), "b\n").unwrap();
+    let r = agentvc_home(&home, &a, &["stack", "create", "fix-b", "-a", "-m", "b"]);
+    assert_eq!(r["ok"], true, "{r}");
+    git(&a, &["push", "--quiet", "-u", "origin", "fix-b"]);
+    fs::write(a.join("c.txt"), "c\n").unwrap();
+    let r = agentvc_home(&home, &a, &["stack", "create", "local-c", "-a", "-m", "c"]);
+    assert_eq!(r["ok"], true, "{r}");
+
+    // #205: the new clone's origin/HEAD and trunk are the source's trunk,
+    // not what the source had checked out.
+    let r = agentvc_home(
+        &home,
+        &a,
+        &["workspace", "new", "../mono-4", "--clone", "--seed", "off"],
+    );
+    assert_eq!(r["ok"], true, "{r}");
+    let d = tmp.path().join("mono-4");
+    assert_eq!(
+        git(&d, &["symbolic-ref", "refs/remotes/origin/HEAD"]),
+        "refs/remotes/origin/main"
+    );
+    assert_eq!(git(&d, &["branch", "--show-current"]), "main");
+    assert_eq!(git(&d, &["branch", "--format=%(refname:short)"]), "main");
+    assert_eq!(
+        git(&d, &["rev-parse", "--abbrev-ref", "main@{upstream}"]),
+        "origin/main"
+    );
+    // Only the real remote's branches, none of the source's local ones.
+    let remotes = git(&d, &["for-each-ref", "--format=%(refname)", "refs/remotes"]);
+    assert!(!remotes.contains("local-c"), "{remotes}");
+    let l = agentvc_home(&home, &d, &["stack", "log"]);
+    assert_eq!(l["trunk"], "main", "{l}");
+    assert_eq!(l["base_ref"], "origin/main", "{l}");
+    let state: Value =
+        serde_json::from_str(&fs::read_to_string(d.join(".git/agentvc/stack.json")).unwrap())
+            .unwrap();
+    assert_eq!(state["trunk"], "main", "{state}");
+
+    // #205: a `cp -r` of a folder is a new workspace with its own id; the
+    // original keeps its id and name.
+    let before = agentvc_home(&home, &a, &["workspace", "ls"]);
+    let id_of = |l: &Value, name: &str| {
+        l["workspaces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|w| w["name"] == name)
+            .map(|w| w["id"].as_str().unwrap().to_string())
+    };
+    let a_id = id_of(&before, "mono-1").expect("listed");
+    let copy = tmp.path().join("mono-5");
+    copy_dir(&a, &copy);
+    let l = agentvc_home(&home, &copy, &["workspace", "ls"]);
+    let ids: Vec<&str> = l["workspaces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|w| w["id"].as_str().unwrap())
+        .collect();
+    let mut uniq = ids.clone();
+    uniq.sort();
+    uniq.dedup();
+    assert_eq!(uniq.len(), ids.len(), "{l}");
+    assert_eq!(id_of(&l, "mono-1"), Some(a_id.clone()), "{l}");
+    let c_id = id_of(&l, "mono-5").expect("the copy is named after its folder");
+    assert_ne!(c_id, a_id);
+    let la = agentvc_home(&home, &a, &["workspace", "ls"]);
+    assert_eq!(id_of(&la, "mono-1"), Some(a_id.clone()), "{la}");
+    assert_eq!(id_of(&la, "mono-5"), Some(c_id.clone()), "{la}");
+
+    // A folder that was moved keeps its id.
+    let moved = tmp.path().join("mono-6");
+    fs::rename(&copy, &moved).unwrap();
+    let l = agentvc_home(&home, &moved, &["workspace", "ls"]);
+    let here = l["workspaces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|w| w["here"] == true)
+        .cloned()
+        .unwrap();
+    assert_eq!(here["id"], c_id.as_str(), "{l}");
 }
 
 #[test]

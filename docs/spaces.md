@@ -67,6 +67,10 @@ Every folder is its own workspace, whatever repo it came from:
   saved so every checkout agrees.
 - A clone joins its space the first time agentvc runs there (any command,
   or its daemon starting). Until then other folders don't know it exists.
+- A folder copied with `cp -r` is a new workspace: agentvc sees its record
+  names another folder that still holds the same id, and gives the copy an
+  id and name of its own. A folder that was moved (the old path is gone)
+  keeps its id.
 
 ## Cheap workspaces
 
@@ -77,7 +81,7 @@ workspace new` keeps all three cheap:
 
 | Cost | Worktree | Clone (`--clone`) |
 | --- | --- | --- |
-| Git objects | Shared with its clone: nothing copied | Cloned from the current folder on disk: git hardlinks the objects (copies them across filesystems), then the clone is pointed at the real remote and fetches only what is new. Independent afterwards: deleting the source folder is safe |
+| Git objects | Shared with its clone: nothing copied | Cloned from the current folder on disk: git hardlinks the objects (copies them across filesystems), then the clone is pointed at the real remote and fetches only what is new. It starts on the source's trunk (its `origin/HEAD` and stack state name that trunk, whatever branch the source has checked out) with none of the source's local branches. Independent afterwards: deleting the source folder is safe |
 | Checked-out files | One `git checkout` of the stack base | Same |
 | Build and dependency folders | Seeded from the current workspace | Same |
 

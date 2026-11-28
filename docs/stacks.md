@@ -108,7 +108,7 @@ Without `--resolve` or `--keep-conflicts` the command line still fails with
 | `stack delete B` | Delete B and its commits; branches on it move to its parent without them |
 | `stack squash [-m msg]` | Squash the current branch into one commit, restack above |
 | `stack get TARGET` | Continue a stack published from another machine: TARGET is its workspace id or name, or a branch in it |
-| `stack give B --to DIR` | Hand B and the branches above it to the window at DIR |
+| `stack give B --to DIR` | Hand B and the branches above it to the window at DIR (a worktree, or another clone of this space on this machine: the branches are copied there) |
 | `stack untrack B` | Stop tracking B; branches above keep its commits |
 | `stack fold` | Fold the current branch into its parent; branches on it move to the parent |
 | `stack split [--by-commit] [--names a,b]` | Give every commit of the current branch but the last its own branch below it (`<branch>-1`, ... by default) |
@@ -119,7 +119,7 @@ Without `--resolve` or `--keep-conflicts` the command line still fails with
 | `stack up / down / top / bottom` | Move along this window's stack |
 
 Every command takes `--json`. Error codes: `needs_restack`, `push_rejected`,
-`remote_branch_exists`, `parent_not_pushed`, `no_remote`, `same_window`, `other_repository`, `not_in_stack`,
+`remote_branch_exists`, `parent_not_pushed`, `no_remote`, `same_window`, `other_repository`, `branch_exists`, `not_in_stack`,
 `owned_by_other_window`, `checked_out_elsewhere`, `conflict`,
 `rebase_in_progress`, `merge_commit`, `at_top`, `at_bottom`, `ambiguous`,
 `no_trunk`, `parent_missing`, `branch_missing`, `message_required`,
@@ -325,9 +325,13 @@ workspace, honoring its lock and queue.
 - A checkout joins when it is first listed (any `workspace ls`, or its
   daemon starting). The registry is `~/.agentvc/checkouts.json`
   (`$AGENTVC_HOME` overrides `~/.agentvc`); folders that are gone drop out.
-- Branches don't cross clones: `stack give` to a workspace in another
-  checkout fails with `other_checkout`. Push the branch and `stack get` it
-  there instead.
+- `stack give B --to W` works across clones of the space on this machine:
+  B and the branches above it are fetched from this folder into W's (with
+  their upstreams), then W's stack tracks them; this folder keeps its git
+  branches but no longer stacks them. It fails with `branch_exists` when W
+  has a branch of that name at another commit, and with `other_repository`
+  for a checkout of another space (push the branch and `stack get` it
+  there).
 - Agent ids are unique across the space, so `agentvc agent show agN` works
   from any of its checkouts.
 

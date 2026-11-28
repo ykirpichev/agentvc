@@ -180,7 +180,7 @@ fn ensure_record(git_dir: &Path, path: &Path, taken: &[String]) -> Result<Record
     let file = agentvc_dir(git_dir).join("workspace.json");
     for _ in 0..3 {
         if let Some(r) = read_json::<Record>(&file) {
-            return Ok(r);
+            return relocated(git_dir, path, r, taken);
         }
         if !file.exists() {
             break;
@@ -248,6 +248,44 @@ fn ensure_record(git_dir: &Path, path: &Path, taken: &[String]) -> Result<Record
         }
         Err(e) => Err(e).at(&file),
     }
+}
+
+/// `rec` as it should be now that its checkout is at `path` (#205). A
+/// folder that was moved keeps its id and records its new path; a copy
+/// (`cp -r`, whose original still holds the same id at the recorded path)
+/// is a new workspace: a new id, named after its own folder, so the two
+/// never publish over each other's `refs/agentvc/workspaces/<id>`.
+fn relocated(git_dir: &Path, path: &Path, mut rec: Record, taken: &[String]) -> Result<Record> {
+    if canon(&rec.path) == canon(path) || rec.machine != machine() {
+        return Ok(rec);
+    }
+    let original = rec.path.exists()
+        && HostRepo {
+            workdir: rec.path.clone(),
+        }
+        .git(&["rev-parse", "--absolute-git-dir"], None)
+        .ok()
+        .map(|g| canon(Path::new(g.trim())))
+        .filter(|g| *g != canon(git_dir))
+        .and_then(|g| read_json::<Record>(&agentvc_dir(&g).join("workspace.json")))
+        .is_some_and(|o| o.id == rec.id);
+    if original {
+        let base = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("workspace")
+            .to_string();
+        let taken: Vec<&str> = taken.iter().map(String::as_str).collect();
+        rec.id = new_id(git_dir);
+        rec.name = unique_name(&base, &taken);
+        rec.created_at = now();
+        rec.user = user();
+        // The copied agent is not working here.
+        let _ = fs::remove_file(busy_path(git_dir));
+    }
+    rec.path = path.to_path_buf();
+    write_record(git_dir, &rec)?;
+    Ok(rec)
 }
 
 fn write_record(git_dir: &Path, rec: &Record) -> Result<()> {
@@ -1557,8 +1595,10 @@ pub fn create(cwd: &Path, dir: &Path, o: &NewOptions) -> Result<Created> {
                     None,
                 )
                 .unwrap_or_default();
+            // --no-deref: `origin/HEAD` is a symref to the branch this
+            // checkout had checked out; drop the symref itself (#205).
             for r in stale.lines().filter(|l| !l.is_empty()) {
-                let _ = nr.git(&["update-ref", "-d", r], None);
+                let _ = nr.git(&["update-ref", "--no-deref", "-d", r], None);
             }
             let spec = format!("+refs/remotes/{remote}/*:refs/remotes/{remote}/*");
             let _ = nr.git(
@@ -1579,10 +1619,36 @@ pub fn create(cwd: &Path, dir: &Path, o: &NewOptions) -> Result<Created> {
                 .git(&["symbolic-ref", "--quiet", "--short", "HEAD"], None)
                 .unwrap_or_default();
             let start = format!("{remote}/{trunk}");
+            // `origin/HEAD` names the trunk this checkout uses, not
+            // whatever it had checked out: trunk detection reads it (#205).
+            let head_ref = format!("refs/remotes/{remote}/HEAD");
             if nr.rev(&format!("refs/remotes/{start}")).is_some() {
+                nr.git(
+                    &["symbolic-ref", &head_ref, &format!("refs/remotes/{start}")],
+                    None,
+                )?;
                 nr.git(&["checkout", "--quiet", "-B", &trunk, &start], None)?;
             } else {
-                nr.git(&["reset", "--quiet", "--hard", "HEAD"], None)?;
+                let _ = nr.git(&["update-ref", "--no-deref", "-d", &head_ref], None);
+                if head.trim() != trunk && w.repo.rev(&format!("refs/heads/{trunk}")).is_some() {
+                    // No remote trunk yet: start from this checkout's.
+                    let spec = format!("refs/heads/{trunk}:refs/heads/{trunk}");
+                    let _ = nr.git(
+                        &[
+                            "fetch",
+                            "--quiet",
+                            "--no-tags",
+                            &main.to_string_lossy(),
+                            &spec,
+                        ],
+                        None,
+                    );
+                }
+                if nr.rev(&format!("refs/heads/{trunk}")).is_some() {
+                    nr.git(&["checkout", "--quiet", "--force", &trunk], None)?;
+                } else {
+                    nr.git(&["reset", "--quiet", "--hard", "HEAD"], None)?;
+                }
             }
             let head = head.trim();
             if !head.is_empty() && head != trunk {
@@ -1591,7 +1657,14 @@ pub fn create(cwd: &Path, dir: &Path, o: &NewOptions) -> Result<Created> {
             }
         }
     }
-    let nw = Window::open(&dir)?;
+    let mut nw = Window::open(&dir)?;
+    if kind == NewKind::Clone && read_state(&nw.git_dir)?.is_none() {
+        // Same trunk as the folder it was made from, written down so a
+        // later origin/HEAD change cannot move it (#205).
+        nw.state.trunk = w.state.trunk.clone();
+        nw.state.remote = remote.clone();
+        nw.save()?;
+    }
     if kind == NewKind::Clone {
         match &o.space {
             Some(s) => crate::checkouts::set_space(&nw, Some(s))?,
