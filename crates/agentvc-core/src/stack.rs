@@ -66,6 +66,11 @@ pub struct Tracked {
     /// (`stack log --prs`, `stack merge`, the daemon's poller).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pr_status: Option<PrBrief>,
+    /// The commit this window last pushed to (or took over from) the
+    /// remote branch: what `submit`'s lease expects there, so a push from
+    /// another checkout with the same branch name is never overwritten.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pushed: Option<String>,
 }
 
 /// A PR's checks and review, as `stack log --prs` shows them.
@@ -1723,6 +1728,7 @@ impl Window {
             pr: None,
             pr_state: None,
             pr_status: None,
+            pushed: None,
         };
         self.state.branches.push(t.clone());
         self.save()?;
@@ -1843,6 +1849,13 @@ impl Window {
                 _ if self.repo.is_ancestor(&parent_tip, &tip) => parent_tip,
                 _ => self.merge_base(&tip, &parent_tip).unwrap_or(parent_tip),
             };
+            // A remote copy (as last fetched) that the branch contains is
+            // taken over: a later submit's lease expects it. One with commits
+            // the branch lacks is left to submit's check (#201).
+            let pushed = self
+                .repo
+                .rev(&format!("refs/remotes/{}/{name}", self.state.remote))
+                .filter(|r| self.repo.is_ancestor(r, &tip));
             let t = Tracked {
                 name: name.clone(),
                 parent: parent.clone(),
@@ -1850,6 +1863,7 @@ impl Window {
                 pr: None,
                 pr_state: None,
                 pr_status: None,
+                pushed,
             };
             added.push(t);
             if chain && parent != self.state.trunk && !self.tracks(&parent) {
@@ -2013,6 +2027,7 @@ impl Window {
         self.state.branches[i].name = new.to_string();
         self.state.branches[i].pr = None;
         self.state.branches[i].pr_state = None;
+        self.state.branches[i].pushed = None;
         for c in self.state.branches.iter_mut() {
             if c.parent == old {
                 c.parent = new.to_string();
@@ -2282,6 +2297,7 @@ impl Window {
                 pr: None,
                 pr_state: None,
                 pr_status: None,
+                pushed: None,
             });
             parent = name.clone();
             parent_rev = c.id.clone();
@@ -2947,6 +2963,9 @@ impl Window {
                 pr: b.pr,
                 pr_state: b.pr_state.clone(),
                 pr_status: b.pr_status.clone(),
+                // Taken over at the remote tip just fetched: later submits
+                // from here lease against it.
+                pushed: self.repo.rev(&format!("refs/remotes/{remote}/{}", b.name)),
             };
             match self.find(&b.name) {
                 Some(i) => self.state.branches[i] = t.clone(),
@@ -3109,6 +3128,74 @@ impl Window {
     /// Push this window's branches and open or update one PR per branch,
     /// based on its parent branch (the trunk for the bottom one), with the
     /// stack listed in every PR body.
+    /// What `submit`'s lease expects on the remote for each of `names`
+    /// (`None`: the branch must not exist there). That is the commit this
+    /// window last pushed. A branch it never pushed may only be pushed when
+    /// the remote has no such branch, or one the local branch contains (a
+    /// fast-forward loses nothing); else another checkout owns that name and
+    /// this refuses with `remote_branch_exists`. Stacks from before the
+    /// `pushed` field that recorded a PR lease against the tracking ref once.
+    fn submit_leases(
+        &self,
+        remote: &str,
+        names: &[String],
+    ) -> Result<HashMap<String, Option<String>>> {
+        let mut leases = HashMap::new();
+        let mut unseen = Vec::new();
+        for n in names {
+            let b = &self.state.branches[self.find(n).expect("tracked")];
+            match (&b.pushed, b.pr) {
+                (Some(p), _) => {
+                    leases.insert(n.clone(), Some(p.clone()));
+                }
+                (None, Some(_)) => {
+                    let tracking = self.repo.rev(&format!("refs/remotes/{remote}/{n}"));
+                    leases.insert(n.clone(), tracking);
+                }
+                (None, None) => unseen.push(n.clone()),
+            }
+        }
+        if unseen.is_empty() {
+            return Ok(leases);
+        }
+        let mut args = vec!["ls-remote".to_string(), remote.to_string()];
+        args.extend(unseen.iter().map(|n| format!("refs/heads/{n}")));
+        let a: Vec<&str> = args.iter().map(String::as_str).collect();
+        let out = self
+            .repo
+            .git(&a, None)
+            .map_err(|e| crate::github::push_error(e, remote, &unseen.join(" ")))?;
+        let theirs: HashMap<&str, &str> = out
+            .lines()
+            .filter_map(|l| l.split_once('\t'))
+            .filter_map(|(sha, r)| Some((r.strip_prefix("refs/heads/")?, sha)))
+            .collect();
+        let mut taken = Vec::new();
+        for n in unseen {
+            let tip = self.branch_tip(&n).expect("checked");
+            match theirs.get(n.as_str()) {
+                None => {
+                    leases.insert(n, None);
+                }
+                Some(&r) if r == tip || self.repo.is_ancestor(r, &tip) => {
+                    leases.insert(n, Some(r.to_string()));
+                }
+                Some(_) => taken.push(n),
+            }
+        }
+        if !taken.is_empty() {
+            return Err(stack_err_with(
+                "remote_branch_exists",
+                format!(
+                    "{remote} already has {} with commits this window never pushed (another checkout using the same branch name?); nothing was pushed. Rename yours (`agentvc stack rename`), take theirs over (`agentvc stack get`), or overwrite it with `agentvc stack submit --force`",
+                    taken.join(", ")
+                ),
+                json!({ "branches": taken }),
+            ));
+        }
+        Ok(leases)
+    }
+
     pub fn submit(&mut self, opts: &SubmitOptions) -> Result<SubmitResult> {
         let api = if opts.no_pr {
             None
@@ -3171,15 +3258,26 @@ impl Window {
                 }
             }
         }
-        // Push what changed, all or nothing, with a lease on what we last
-        // saw on the remote so nobody else's push is overwritten.
+        // Push what changed, all or nothing, with a lease on what this window
+        // last pushed, so nobody else's push is overwritten: not the shared
+        // tracking ref, which any fetch moves to another checkout's push of
+        // the same branch name (#201).
+        let leases = if opts.force {
+            HashMap::new()
+        } else {
+            self.submit_leases(&remote, &names)?
+        };
         let mut pushed = Vec::new();
         let mut args: Vec<String> = vec!["push".into(), "--quiet".into(), "--atomic".into()];
         let mut specs = Vec::new();
         for n in &names {
             let tip = self.branch_tip(n).expect("checked");
             let tracking = self.repo.rev(&format!("refs/remotes/{remote}/{n}"));
-            if tracking.as_deref() == Some(tip.as_str()) {
+            let lease = leases.get(n).cloned().flatten();
+            let on_remote = if opts.force { tracking } else { lease.clone() };
+            if on_remote.as_deref() == Some(tip.as_str()) {
+                let i = self.find(n).expect("tracked");
+                self.state.branches[i].pushed = Some(tip);
                 continue;
             }
             if opts.force {
@@ -3187,7 +3285,7 @@ impl Window {
             } else {
                 args.push(format!(
                     "--force-with-lease=refs/heads/{n}:{}",
-                    tracking.unwrap_or_default()
+                    lease.unwrap_or_default()
                 ));
                 specs.push(format!("refs/heads/{n}:refs/heads/{n}"));
             }
@@ -3211,7 +3309,12 @@ impl Window {
                 }
                 return Err(crate::github::push_error(e, &remote, &pushed.join(" ")));
             }
+            for n in &pushed {
+                let i = self.find(n).expect("tracked");
+                self.state.branches[i].pushed = self.branch_tip(n);
+            }
         }
+        self.save()?;
         let mut result = SubmitResult {
             repo: String::new(),
             pushed,
@@ -3236,6 +3339,8 @@ impl Window {
                     }
                 }
             }
+            // An open PR found by head name is this window's: the leases
+            // above refused any branch another checkout pushed (#201).
             if existing.is_none() {
                 let open = api.call(
                     "GET",
@@ -4056,6 +4161,146 @@ mod tests {
         w.modify(None, true, false, false).unwrap();
         let e = w.submit_with(&opts, Some(&api)).unwrap_err();
         assert_eq!(e.code(), "push_rejected");
+    }
+
+    /// Another clone of `origin`, ready to commit.
+    fn clone_origin(f: &Fixture, name: &str) -> PathBuf {
+        let root = f.origin.parent().unwrap();
+        let dir = root.join(name);
+        git(
+            root,
+            &[
+                "clone",
+                "-q",
+                f.origin.to_str().unwrap(),
+                dir.to_str().unwrap(),
+            ],
+        );
+        git(&dir, &["config", "user.name", "t"]);
+        git(&dir, &["config", "user.email", "t@t"]);
+        dir
+    }
+
+    #[test]
+    fn submit_never_overwrites_another_checkouts_branch_of_the_same_name() {
+        // #201: two clones each create `fix-tests`; a submits first.
+        let f = setup();
+        let opts = SubmitOptions {
+            no_pr: true,
+            ..Default::default()
+        };
+        let mut a = Window::open(&f.w1).unwrap();
+        fs::write(f.w1.join("t1.txt"), "a\n").unwrap();
+        a.create(Some("fix-tests"), Some("Fix tests"), true)
+            .unwrap();
+        commit_file(&f.w1, "t2.txt", "a\n", "More fixes");
+        assert_eq!(
+            a.submit_with(&opts, None).unwrap().pushed,
+            vec!["fix-tests"]
+        );
+        let a_tip = rev(&f.w1, "fix-tests");
+        assert_eq!(a.state.branches[0].pushed.as_deref(), Some(a_tip.as_str()));
+
+        let bdir = clone_origin(&f, "b");
+        // b cloned after a's push: its tracking ref has a's commits too.
+        git(
+            &bdir,
+            &["update-ref", "-d", "refs/remotes/origin/fix-tests"],
+        );
+        let mut b = Window::open(&bdir).unwrap();
+        fs::write(bdir.join("t1.txt"), "b\n").unwrap();
+        b.create(Some("fix-tests"), Some("Fix tests"), true)
+            .unwrap();
+        let e = b.submit_with(&opts, None).unwrap_err();
+        assert_eq!(e.code(), "remote_branch_exists");
+        // An editor's auto-fetch must not make a's push b's to overwrite.
+        git(&bdir, &["fetch", "-q", "origin"]);
+        let e = b.submit_with(&opts, None).unwrap_err();
+        assert_eq!(e.code(), "remote_branch_exists");
+        assert_eq!(git(&f.origin, &["rev-parse", "fix-tests"]), a_tip);
+
+        // a amends and resubmits as usual, even with a stale tracking ref.
+        git(
+            &f.w1,
+            &["update-ref", "-d", "refs/remotes/origin/fix-tests"],
+        );
+        fs::write(f.w1.join("t2.txt"), "a2\n").unwrap();
+        a.modify(None, true, false, false).unwrap();
+        assert_eq!(
+            a.submit_with(&opts, None).unwrap().pushed,
+            vec!["fix-tests"]
+        );
+        assert_eq!(
+            git(&f.origin, &["rev-parse", "fix-tests"]),
+            rev(&f.w1, "fix-tests")
+        );
+        // Still refused for b; `--force` is the explicit overwrite.
+        git(&bdir, &["fetch", "-q", "origin"]);
+        assert_eq!(
+            b.submit_with(&opts, None).unwrap_err().code(),
+            "remote_branch_exists"
+        );
+        let force = SubmitOptions {
+            force: true,
+            ..opts.clone()
+        };
+        b.submit_with(&force, None).unwrap();
+        assert_eq!(
+            git(&f.origin, &["rev-parse", "fix-tests"]),
+            rev(&bdir, "fix-tests")
+        );
+        // Now a is the one that has not seen the remote: its lease refuses.
+        fs::write(f.w1.join("t2.txt"), "a3\n").unwrap();
+        a.modify(None, true, false, false).unwrap();
+        git(&f.w1, &["fetch", "-q", "origin"]);
+        assert_eq!(
+            a.submit_with(&opts, None).unwrap_err().code(),
+            "push_rejected"
+        );
+    }
+
+    #[test]
+    fn submit_leases_for_stacks_without_a_recorded_push() {
+        let f = setup();
+        let opts = SubmitOptions {
+            no_pr: true,
+            ..Default::default()
+        };
+        let mut w = Window::open(&f.w1).unwrap();
+        fs::write(f.w1.join("m.txt"), "1\n").unwrap();
+        w.create(Some("m1"), Some("m1"), true).unwrap();
+        w.submit_with(&opts, None).unwrap();
+        // A stack.json from before `pushed`, with a PR recorded: the
+        // tracking ref is the lease once, then the push is recorded.
+        w.state.branches[0].pushed = None;
+        w.state.branches[0].pr = Some(7);
+        w.save().unwrap();
+        let mut w = Window::open(&f.w1).unwrap();
+        fs::write(f.w1.join("m.txt"), "2\n").unwrap();
+        w.modify(None, true, false, false).unwrap();
+        assert_eq!(w.submit_with(&opts, None).unwrap().pushed, vec!["m1"]);
+        let tip = rev(&f.w1, "m1");
+        assert_eq!(w.state.branches[0].pushed.as_deref(), Some(tip.as_str()));
+        // No PR and no record, but the remote branch is one this branch
+        // contains (pushed with plain git): a fast-forward loses nothing.
+        w.state.branches[0].pushed = None;
+        w.state.branches[0].pr = None;
+        commit_file(&f.w1, "m2.txt", "x\n", "more");
+        assert_eq!(w.submit_with(&opts, None).unwrap().pushed, vec!["m1"]);
+        // `stack track` of a branch pushed with plain git records its
+        // remote copy, so amending it later still submits.
+        git(&f.w1, &["switch", "-q", "-c", "plain", "main"]);
+        commit_file(&f.w1, "p.txt", "p\n", "plain");
+        git(&f.w1, &["push", "-q", "origin", "plain"]);
+        let t = w.adopt("plain", None, false).unwrap();
+        assert_eq!(t[0].pushed, Some(rev(&f.w1, "plain")));
+        fs::write(f.w1.join("p.txt"), "p2\n").unwrap();
+        w.modify(None, true, false, false).unwrap();
+        let only = SubmitOptions {
+            branch: Some("plain".into()),
+            ..opts.clone()
+        };
+        assert_eq!(w.submit_with(&only, None).unwrap().pushed, vec!["plain"]);
     }
 
     #[test]

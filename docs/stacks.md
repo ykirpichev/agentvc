@@ -117,7 +117,7 @@ Without `--resolve` or `--keep-conflicts` the command line still fails with
 | `stack up / down / top / bottom` | Move along this window's stack |
 
 Every command takes `--json`. Error codes: `needs_restack`, `push_rejected`,
-`parent_not_pushed`, `no_remote`, `same_window`, `other_repository`, `not_in_stack`,
+`remote_branch_exists`, `parent_not_pushed`, `no_remote`, `same_window`, `other_repository`, `not_in_stack`,
 `owned_by_other_window`, `checked_out_elsewhere`, `conflict`,
 `rebase_in_progress`, `merge_commit`, `at_top`, `at_bottom`, `ambiguous`,
 `no_trunk`, `parent_missing`, `branch_missing`, `message_required`,
@@ -171,7 +171,15 @@ since. Checkouts, `submit` and `give` are not recorded.
 `submit` pushes the branches that changed, all at once (`--atomic`), with a
 lease on what this window last pushed: if anyone else pushed to one of them
 (a teammate, or the restack Action), nothing is pushed and the command fails
-with `push_rejected`. It opens a PR for each branch that has none (title and
+with `push_rejected`. The lease is the commit recorded in the window's stack
+(`pushed`), never the shared `origin/<branch>` tracking ref, which a plain
+`git fetch` moves to anyone's push. A branch this window never pushed is
+pushed only if the remote has no branch of that name, or one the local branch
+contains; otherwise another checkout owns the name and `submit` fails with
+`remote_branch_exists` (rename yours with `stack rename`, take theirs over
+with `stack get`, or overwrite with `--force`). `stack get` and `stack track`
+record the remote copy they take over; stacks from before this field that
+have a PR recorded lease against the tracking ref once. It opens a PR for each branch that has none (title and
 body from its commits; base = the parent branch, or the trunk), retargets
 existing ones whose parent changed, and keeps a list of the stack between
 `<!-- agentvc:stack:begin -->` markers in every body; the rest of the body is

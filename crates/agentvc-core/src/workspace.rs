@@ -3455,6 +3455,32 @@ mod tests {
             Window::open(&laptop).unwrap().branch_tip("g2"),
             Window::open(&f.w1).unwrap().branch_tip("g2")
         );
+        // The laptop took the branches over: it submits an amend with the
+        // lease `get` recorded (#201), and the desktop (which pushed with
+        // plain git) is refused: the remote has commits it never pushed.
+        let mut lw = Window::open(&laptop).unwrap();
+        git(&laptop, &["switch", "-q", "g1"]);
+        fs::write(laptop.join("g1.txt"), "laptop\n").unwrap();
+        lw.modify(None, true, false, false).unwrap();
+        let no_pr = crate::stack::SubmitOptions {
+            no_pr: true,
+            all: true,
+            ..Default::default()
+        };
+        let r = lw.submit_with(&no_pr, None).unwrap();
+        assert_eq!(r.pushed, vec!["g1", "g2"]);
+        assert_eq!(
+            git(&root.join("origin.git"), &["rev-parse", "g2"]),
+            lw.branch_tip("g2").unwrap()
+        );
+        fs::write(f.w1.join("g2.txt"), "desk\n").unwrap();
+        d.modify(None, true, false, false).unwrap();
+        git(&f.w1, &["fetch", "-q", "origin"]);
+        assert_eq!(
+            d.submit_with(&no_pr, None).unwrap_err().code(),
+            "remote_branch_exists"
+        );
+
         // Work made on the laptop is never thrown away.
         git(&laptop, &["switch", "-q", "g2"]);
         fs::write(laptop.join("lap.txt"), "l\n").unwrap();
