@@ -2350,6 +2350,10 @@ fn folders_of_one_github_repo_are_separate_workspaces_in_one_or_more_spaces() {
     let mut names: Vec<&str> = ws.iter().map(|w| w["name"].as_str().unwrap()).collect();
     names.sort();
     assert_eq!(names, ["mono", "mono-2"], "{l}");
+    // The older folder keeps the name, even when both were first seen in
+    // the same second.
+    let here = ws.iter().find(|w| w["here"] == true).unwrap();
+    assert_eq!(here["name"], "mono", "{l}");
     // ...and the same names seen from the other folder.
     let l2 = agentvc_home(&home, &b, &["workspace", "ls"]);
     let mut names2: Vec<&str> = l2["workspaces"]

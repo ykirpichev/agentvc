@@ -72,10 +72,8 @@ fn agentvc_dir(git_dir: &Path) -> PathBuf {
 fn write_atomic(path: &Path, text: &str) -> Result<()> {
     let dir = path.parent().expect("has a parent");
     fs::create_dir_all(dir).at(dir)?;
-    let tmp = dir.join(format!(
-        ".{}.{}.tmp",
+    let tmp = dir.join(crate::checkouts::tmp_name(
         path.file_name().and_then(|n| n.to_str()).unwrap_or("f"),
-        std::process::id()
     ));
     fs::write(&tmp, text).at(&tmp)?;
     fs::rename(&tmp, path).at(path)
@@ -119,6 +117,10 @@ pub struct Record {
     /// Short name people use; unique among this repo's workspaces.
     pub name: String,
     pub created_at: i64,
+    /// Nanoseconds past `created_at`, so that records made in the same
+    /// second still sort by age; 0 in records written before #180.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub created_ns: u32,
     /// Machine it lives on.
     pub machine: String,
     /// Its directory there.
@@ -127,6 +129,10 @@ pub struct Record {
     /// written before #162.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub user: String,
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }
 
 /// This process's OS user name, or empty.
@@ -193,26 +199,45 @@ fn ensure_record(git_dir: &Path, path: &Path, taken: &[String]) -> Result<Record
         name = format!("{base}-{n}");
         n += 1;
     }
+    let t = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default();
     let rec = Record {
         version: RECORD_VERSION,
         id: new_id(git_dir),
         name,
-        created_at: now(),
+        created_at: t.as_secs() as i64,
+        created_ns: t.subsec_nanos(),
         machine: machine(),
         path: path.to_path_buf(),
         user: user(),
     };
     let dir = agentvc_dir(git_dir);
     fs::create_dir_all(&dir).at(&dir)?;
-    // create_new: when two processes race, the first record wins and the
-    // other reads it back.
+    let text = serde_json::to_string_pretty(&rec).expect("serializes") + "\n";
+    // Publish the whole file at once, only if there is none yet: when two
+    // processes race, the first record wins and the other reads it back, and
+    // nobody ever reads a half-written record.
+    let tmp = dir.join(crate::checkouts::tmp_name("workspace.json"));
+    fs::write(&tmp, &text).at(&tmp)?;
+    let linked = fs::hard_link(&tmp, &file);
+    let _ = fs::remove_file(&tmp);
+    match linked {
+        Ok(()) => return Ok(rec),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            return read_json(&file).ok_or_else(|| {
+                ws_err("bad_workspace", format!("{} is not valid", file.display()))
+            });
+        }
+        // No hard links on this file system: create in place instead.
+        Err(_) => {}
+    }
     match fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(&file)
     {
         Ok(mut f) => {
-            let text = serde_json::to_string_pretty(&rec).expect("serializes") + "\n";
             f.write_all(text.as_bytes()).at(&file)?;
             Ok(rec)
         }
@@ -1084,20 +1109,29 @@ pub fn space_locals(w: &Window) -> Result<Vec<Local>> {
 /// own: two clones in folders both called `mono` start out as two `mono`s.
 /// The older keeps the name; the newer becomes `mono-2` (saved, so every
 /// checkout sees the same names from then on).
+///
+/// Age is `created_at` to the nanosecond; the id only breaks ties between
+/// old records that kept whole seconds. A new name is unique against every
+/// name in the space, not only the older ones, so settling one clash never
+/// makes another.
 fn dedupe_names(groups: &mut [Vec<Local>]) {
-    let mut order: Vec<(i64, String, usize, usize)> = Vec::new();
+    let mut order: Vec<(i64, u32, String, usize, usize)> = Vec::new();
+    let mut names: Vec<String> = Vec::new();
     for (g, ls) in groups.iter().enumerate() {
         for (i, l) in ls.iter().enumerate() {
-            order.push((l.record.created_at, l.record.id.clone(), g, i));
+            let r = &l.record;
+            order.push((r.created_at, r.created_ns, r.id.clone(), g, i));
+            names.push(r.name.clone());
         }
     }
     order.sort();
     let mut seen: Vec<String> = Vec::new();
-    for (_, _, g, i) in order {
+    for (.., g, i) in order {
         let l = &mut groups[g][i];
         if seen.contains(&l.record.name) {
-            let all: Vec<&str> = seen.iter().map(String::as_str).collect();
+            let all: Vec<&str> = names.iter().map(String::as_str).collect();
             let name = unique_name(&l.record.name, &all);
+            names.push(name.clone());
             l.record.name = name;
             let _ = write_record(&l.git_dir, &l.record);
         }
@@ -1569,7 +1603,10 @@ pub fn create(cwd: &Path, dir: &Path, o: &NewOptions) -> Result<Created> {
     }
     let seeded = seed(&w, w.path(), &dir, o);
     // Name it before anything lists the space: listing settles clashing
-    // names by age, and records made in the same second would tie.
+    // names by age, and the newest record would lose its name. Hold the
+    // registry lock until it is registered, so that two workspaces made at
+    // once each see the other's name.
+    let lock = crate::checkouts::lock_registry()?;
     let own = locals(&nw)?;
     let mut rec = own
         .iter()
@@ -1601,7 +1638,8 @@ pub fn create(cwd: &Path, dir: &Path, o: &NewOptions) -> Result<Created> {
         write_record(&nw.git_dir, &rec)?;
     }
     // Now join the registry, so the space lists it.
-    crate::checkouts::register(&nw);
+    crate::checkouts::register_locked(&nw, lock.as_ref());
+    drop(lock);
     let from = locals(&w)?
         .into_iter()
         .find(|l| l.git_dir == w.git_dir)
@@ -2939,6 +2977,50 @@ mod tests {
             String::from_utf8_lossy(&out.stderr)
         );
         String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    #[test]
+    fn clashing_names_settle_by_age_to_the_nanosecond() {
+        let tmp = crate::testutil::tempdir();
+        let mk = |dir: &str, id: &str, name: &str, ns: u32| {
+            let git_dir = tmp.path().join(dir);
+            fs::create_dir_all(&git_dir).unwrap();
+            Local {
+                record: Record {
+                    version: RECORD_VERSION,
+                    id: id.into(),
+                    name: name.into(),
+                    created_at: 1_000,
+                    created_ns: ns,
+                    machine: "m".into(),
+                    path: tmp.path().join(dir),
+                    user: String::new(),
+                },
+                git_dir,
+                path: tmp.path().join(dir),
+                kind: Kind::Main,
+                checkout: tmp.path().join(dir),
+                other_checkout: false,
+            }
+        };
+        // Made in the same second: the older keeps `mono` although its id
+        // sorts last, and the newer `mono` does not take `mono-2`, which an
+        // even newer workspace already has (that would rename it too, #180).
+        let mut groups = vec![
+            vec![mk("a", "wffffffff", "mono", 10)],
+            vec![mk("b", "w00000000", "mono", 20)],
+            vec![mk("c", "w11111111", "mono-2", 30)],
+        ];
+        dedupe_names(&mut groups);
+        let names: Vec<&str> = groups
+            .iter()
+            .flatten()
+            .map(|l| l.record.name.as_str())
+            .collect();
+        assert_eq!(names, ["mono", "mono-3", "mono-2"]);
+        let saved: Record = read_json(&tmp.path().join("b/agentvc/workspace.json")).unwrap();
+        assert_eq!(saved.name, "mono-3");
+        assert!(!tmp.path().join("a/agentvc/workspace.json").exists());
     }
 
     struct Fx {
