@@ -59,7 +59,68 @@ export type ToHost =
   | { type: 'agentvc.openFile'; file: string; line?: number }
 
 /** Messages a host sends to the page. */
-export type FromHost = { type: 'agentvc.theme'; theme: 'light' | 'dark'; bg?: string } | { type: 'agentvc.navigate'; path: string }
+export type FromHost =
+  | {
+      type: 'agentvc.theme'
+      theme: 'light' | 'dark'
+      bg?: string
+      vars?: Record<string, string>
+    }
+  | { type: 'agentvc.navigate'; path: string }
+
+/** A value of one editor theme variable, or null when it is not plain. */
+export function hostVar(name: string, value: unknown): string | null {
+  if (typeof value !== 'string' || !/^[A-Za-z][\w-]*$/.test(name)) return null
+  const v = value.trim()
+  if (name === 'font-family') return /^[\w\s"',.-]{1,300}$/.test(v) ? v : null
+  if (name === 'font-size') return /^\d{1,2}(\.\d+)?px$/.test(v) ? v : null
+  if (name === 'font-weight') return /^(normal|bold|\d{3})$/.test(v) ? v : null
+  return cssColor(v)
+}
+
+/** Our tokens that follow an editor variable, when the editor has it. */
+const TOKENS: [string, string[]][] = [
+  ['--font-sans', ['font-family']],
+  ['--text', ['foreground']],
+  ['--text-2', ['foreground']],
+  ['--muted', ['descriptionForeground']],
+  ['--accent', ['button-background']],
+  ['--accent-text', ['textLink-foreground']],
+  ['--border', ['widget-border', 'panel-border']],
+  ['--border-strong', ['input-border', 'dropdown-border', 'panel-border']],
+  ['--hover', ['list-hoverBackground']],
+  ['--surface-2', ['textCodeBlock-background', 'editorWidget-background']],
+]
+
+let applied: string[] = []
+
+/**
+ * Take on the editor's theme: its variables as `--vscode-*` (for the native
+ * controls in native.css) and our own tokens where the editor has a value.
+ * Each call replaces the last one's, so a theme switch leaves nothing stale.
+ */
+export function applyHostVars(vars: Record<string, string> | undefined, root: HTMLElement = document.documentElement) {
+  for (const p of applied) root.style.removeProperty(p)
+  applied = []
+  const clean: Record<string, string> = {}
+  for (const [k, v] of Object.entries(vars ?? {})) {
+    const ok = hostVar(k, v)
+    if (ok) clean[k] = ok
+  }
+  const set = (p: string, v: string) => {
+    root.style.setProperty(p, v)
+    applied.push(p)
+  }
+  for (const [k, v] of Object.entries(clean)) set(`--vscode-${k}`, v)
+  // Cards and menus sit on the editor's own background, flat like its settings.
+  const ground = embedMode === 'sidebar' ? ['sideBar-background', 'editor-background'] : ['editor-background']
+  for (const [token, from] of [...TOKENS, ['--surface', ground] as [string, string[]], ['--bg', ground] as [string, string[]]]) {
+    const hit = from.map((k) => clean[k]).find(Boolean)
+    if (hit) set(token, hit)
+  }
+  if (Object.keys(clean).length) root.dataset.native = ''
+  else delete root.dataset.native
+}
 
 export function toHost(msg: ToHost) {
   if (window.parent !== window) window.parent.postMessage(msg, '*')

@@ -800,6 +800,14 @@ export interface WorkspaceAgentSettings {
   /** Repo defaults (git config agentvc.agent-*) under the workspace's. */
   defaults: AgentSettings
   machine_limit: number
+  /** The model each runner's own tool picks when none is set (Claude Code's /model), by runner. */
+  tool_models?: Partial<Record<AgentRunner, ToolModel>>
+}
+
+/** A tool's own model choice and where it was found, e.g. ~/.claude/settings.json. */
+export interface ToolModel {
+  model: string
+  source: string
 }
 
 /** A file of the person's Claude Code setup that agents inherit. */

@@ -1,5 +1,5 @@
 import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from 'react'
-import { cssColor, embedMode, hostBg, hostTheme, onHost } from '../core/embed'
+import { applyHostVars, cssColor, embedMode, hostBg, hostTheme, onHost } from '../core/embed'
 
 export type ThemePref = 'system' | 'light' | 'dark'
 const ORDER: ThemePref[] = ['system', 'light', 'dark']
@@ -46,6 +46,7 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
         if (msg.type !== 'agentvc.theme') return
         setPref(msg.theme)
         setBg(cssColor(msg.bg) ?? null)
+        applyHostVars(msg.vars)
       }),
     [],
   )

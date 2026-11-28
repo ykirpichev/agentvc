@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- The review panel takes the editor's own look: its font, inputs, dropdowns,
+  buttons and focus ring follow the current VS Code or Cursor theme.
+- Agent settings read like the editor's Settings, and the model is a dropdown
+  of Claude Code models whose default is the one you picked in Claude Code.
+
 ## 0.2.1
 
 - The panel sets itself up: *Install agentvc on <host>* when the CLI is

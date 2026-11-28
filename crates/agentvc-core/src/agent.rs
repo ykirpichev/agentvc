@@ -787,6 +787,9 @@ pub struct WorkspaceAgentSettings {
     pub defaults: AgentSettings,
     /// Agents working at once on this machine, across all workspaces.
     pub machine_limit: usize,
+    /// The model each runner's own tool picks when no model is set (Claude
+    /// Code's `/model`, Codex's `config.toml`), keyed by runner.
+    pub tool_models: std::collections::BTreeMap<String, crate::tool_model::ToolModel>,
 }
 
 /// The agent settings of `workspace` (id, name or directory; default: the
@@ -804,6 +807,7 @@ pub fn settings(cwd: &Path, workspace: Option<&str>) -> Result<WorkspaceAgentSet
         settings: w.state.agents.clone(),
         defaults: repo_defaults(&w),
         machine_limit: limit(&w),
+        tool_models: crate::tool_model::tool_models(&ws.path),
     })
 }
 

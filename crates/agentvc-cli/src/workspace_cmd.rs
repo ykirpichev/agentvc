@@ -427,7 +427,13 @@ pub fn run(cwd: &Path, cmd: WorkspaceCmd) -> anyhow::Result<(Value, String)> {
             }
             text.push_str(&format!(
                 "  model        {}\n  check        {}\n  permissions  {}\n  sandbox      {}\n  at once      {} (machine cap {})",
-                or(&eff.model, "default"),
+                eff.model.clone().unwrap_or_else(|| {
+                    let runner = eff.runner.as_deref().unwrap_or("claude");
+                    match r.tool_models.get(runner) {
+                        Some(t) => format!("default ({}, from {})", t.model, t.source),
+                        None => "default".into(),
+                    }
+                }),
                 or(&eff.check, "none"),
                 or(&eff.permissions, agent::DEFAULT_PERMISSIONS),
                 if eff.sandbox.unwrap_or(false) { "on" } else { "off" },
