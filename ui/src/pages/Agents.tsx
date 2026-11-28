@@ -3,17 +3,17 @@
 // can keep 10 to 20 agents moving without opening each one.
 
 import { useState, type FormEvent, type ReactNode } from 'react'
-import { Link, useParams } from 'react-router'
+import { Link, useNavigate, useParams } from 'react-router'
 import { api, ref } from '../api/client'
 import { useLive } from '../api/live'
-import type { Agent, AgentList, AgentPermissions, AgentRunner, AgentSettings, ToolModel } from '../api/types'
+import type { Agent, AgentConflicts, AgentList, AgentPermissions, AgentRunner, AgentSettings, ToolModel } from '../api/types'
 import { useResource } from '../api/useResource'
 import { ErrorNote, Skeleton } from '../components/bits'
 import { DiffView } from '../components/DiffView'
 import { ReviewBar, ThreadList } from '../components/Comments'
 import { scrollToThread, useThreads } from '../core/comments'
 import { useToast } from '../components/Toaster'
-import { agentLink, agentState, agentsOn, CLAUDE_MODELS, DEFAULT_PERMISSIONS, needsYou, PERMISSION_WORDS, PERMISSIONS_LINK, resultWords, RUNNER_WORDS, settingsLine, TOOL_MODEL_HOME, working } from '../core/agents'
+import { agentLink, agentState, agentsOn, CLAUDE_MODELS, CONFLICT_WORDS, DEFAULT_PERMISSIONS, needsYou, PERMISSION_WORDS, PERMISSIONS_LINK, resultWords, RUNNER_WORDS, settingsLine, TOOL_MODEL_HOME, working } from '../core/agents'
 import { branchLink, codeLink } from '../core/links'
 import { duration, money, plural, timeAgo } from '../lib/format'
 import { useReview } from './reviewContext'
@@ -67,7 +67,7 @@ function Where({ a }: { a: Agent }) {
         <Link className="mono" to={branchLink(a.workspace, a.start.branch)}>
           {a.start.branch}
         </Link>{' '}
-        → {a.mode === 'revise' ? 'new version' : 'new branch'}
+        → {a.mode === 'resolve' ? 'resolve clash' : a.mode === 'revise' ? 'new version' : 'new branch'}
       </span>
       {a.waiting_since !== null && <span className="muted">· waiting {timeAgo(a.waiting_since)}</span>}
     </div>
@@ -123,6 +123,7 @@ function Actions({ a, compact = false }: { a: Agent; compact?: boolean }) {
     )
   const done = a.state === 'ready' || a.state === 'tests_failing' || a.state === 'stopped' || a.state === 'failed'
   const changed = !!a.result?.commit
+  if (a.mode === 'resolve') return <ResolveActions a={a} compact={compact} done={done} />
   return (
     <div className="ag-acts">
       {compact && done && (
@@ -163,6 +164,63 @@ function Actions({ a, compact = false }: { a: Agent; compact?: boolean }) {
       )}
       {a.state !== 'landed' && a.state !== 'discarded' && (
         <button type="button" className="btn btn-ghost" disabled={busy} title="Throw away its worktree and branch" onClick={() => void act(() => api.agentDiscard(a.id), `Discarded ${a.title}.`)}>
+          Discard
+        </button>
+      )}
+    </div>
+  )
+}
+
+/** A resolve agent: accept its resolution, take the clash over yourself, or throw it away. Redo is a reply. */
+function ResolveActions({ a, compact, done }: { a: Agent; compact: boolean; done: boolean }) {
+  const { busy, act } = useAgentAction()
+  const navigate = useNavigate()
+  const parent = (a.conflict?.parent ?? 'its parent').replace(/^origin\//, '')
+  const left = a.markers_left ?? []
+  const working = a.state === 'running' || a.state === 'queued' || a.state === 'asking'
+  const myself = async () => {
+    const ok = await act(async () => {
+      if (a.state !== 'landed' && a.state !== 'discarded') await api.agentDiscard(a.id)
+      await api.stackEdit(a.workspace, { op: 'restack', branch: a.start.branch }, 'keep')
+    }, `Stopped at ${a.start.branch}: pick what each place should say.`)
+    if (ok) navigate(`/review/b/${encodeURIComponent(a.workspace)}/${a.start.branch.split('/').map(encodeURIComponent).join('/')}`)
+  }
+  return (
+    <div className="ag-acts">
+      {compact && done && (
+        <Link className="btn btn-primary" to={agentLink(a.id)}>
+          Review
+        </Link>
+      )}
+      {done && a.result?.commit && (
+        <button
+          type="button"
+          className={`btn ${compact ? 'btn-ghost' : 'btn-primary'}`}
+          disabled={busy || left.length > 0 || a.stale}
+          title={
+            left.length
+              ? `Conflict markers are left in ${left.join(', ')}: reply to have the agent fix them, or resolve it yourself`
+              : a.stale
+                ? `${a.start.branch} changed since; resolve it yourself or discard and restack again`
+                : `Put ${a.start.branch} on ${parent} with this resolution; the branches above it are updated`
+          }
+          onClick={() => void act(() => api.agentLand(a.id), `Accepted: ${a.start.branch} is on ${parent} now.`)}
+        >
+          Accept resolution
+        </button>
+      )}
+      {working && (
+        <button type="button" className="btn btn-ghost" disabled={busy} onClick={() => void act(() => api.agentStop(a.id), 'Stopping; what it did so far is kept.')}>
+          Stop
+        </button>
+      )}
+      {!compact && a.state !== 'landed' && (
+        <button type="button" className="btn btn-ghost" disabled={busy} title={`Discard the agent and stop the restack at ${a.start.branch} in ${a.workspace_name}, to pick what each place should say`} onClick={() => void myself()}>
+          Resolve myself
+        </button>
+      )}
+      {a.state !== 'landed' && a.state !== 'discarded' && (
+        <button type="button" className="btn btn-ghost" disabled={busy} title={`Throw the resolution away; ${a.start.branch} stays where it was`} onClick={() => void act(() => api.agentDiscard(a.id), `Discarded; ${a.start.branch} stays where it was.`)}>
           Discard
         </button>
       )}
@@ -668,6 +726,20 @@ export function AgentSettingsForm({ workspace }: { workspace: string }) {
             placeholder="no limit"
           />
         </Setting>
+        <Setting
+          id={id('conflicts')}
+          name="Conflicts"
+          help="When a sync, move or landing makes a branch clash with its parent. An agent resolves it in its own copy and you accept the result, or the restack stops here for you."
+        >
+          <Select id={id('conflicts')} value={s.conflicts ?? ''} disabled={!steer} onChange={(v) => set({ conflicts: (v || undefined) as AgentConflicts | undefined })}>
+            <option value="">Default ({CONFLICT_WORDS[defaults.conflicts ?? 'agent']})</option>
+            {(Object.keys(CONFLICT_WORDS) as AgentConflicts[]).map((c) => (
+              <option key={c} value={c}>
+                {CONFLICT_WORDS[c]}
+              </option>
+            ))}
+          </Select>
+        </Setting>
       </div>
       {steer && (
         <div className="ag-start-row">
@@ -720,6 +792,8 @@ export function AgentPage() {
   const q = a.question
   const files = a.result?.changes ?? a.result?.paths.map((path) => ({ path, kind: 'modified' as const })) ?? []
   const canReply = q?.kind === 'ask' || a.state === 'ready' || a.state === 'tests_failing' || a.state === 'failed' || a.state === 'stopped'
+  const clashed = new Set(a.conflict?.paths ?? [])
+  const shown = open ?? (a.mode === 'resolve' ? (files.find((f) => clashed.has(f.path))?.path ?? null) : null)
   return (
     <div className="page rv ag-page">
       <div>
@@ -769,7 +843,24 @@ export function AgentPage() {
       )}
       {!steer && <WatchOnly machine={a.machine} />}
       {steer && !q && <Actions a={a} />}
-      {steer && canReply && <ReplyBox a={a} placeholder={q?.kind === 'ask' ? 'Answer the agent…' : 'Reply: what should it do next?'} />}
+      {steer && canReply && (
+        <ReplyBox a={a} placeholder={q?.kind === 'ask' ? 'Answer the agent…' : a.mode === 'resolve' ? 'Redo: say what to resolve differently…' : 'Reply: what should it do next?'} />
+      )}
+      {a.mode === 'resolve' && a.conflict && (
+        <section className="conf-box conf-agent" aria-label="The clash">
+          <header>
+            <b>
+              {a.start.branch} clashed with {a.conflict.parent.replace(/^origin\//, '')} at “{a.conflict.subject}”
+            </b>
+            <span className="muted">
+              {(a.markers_left ?? []).length
+                ? `Markers are still in ${(a.markers_left ?? []).join(', ')}.`
+                : `Files that clashed: ${a.conflict.paths.join(', ')}. Below is ${a.start.branch}'s change as it will be on ${a.conflict.parent.replace(/^origin\//, '')}.`}
+              {a.conflict.rest > 0 ? ` Its ${plural(a.conflict.rest, 'later commit')} replay on top when you accept.` : ''}
+            </span>
+          </header>
+        </section>
+      )}
       {a.error && <p className="ag-err">{a.error}</p>}
 
       <section>
@@ -812,12 +903,13 @@ export function AgentPage() {
           <div className="rv-files">
             {files.map((f) => (
               <div key={f.path} className="rv-file">
-                <button type="button" className="rv-file-head" onClick={() => setOpen((o) => (o === f.path ? null : f.path))}>
+                <button type="button" className="rv-file-head" onClick={() => setOpen(shown === f.path ? '' : f.path)}>
                   <span className={`change change-${f.kind}`}>{f.kind}</span>
                   <span className="mono">{f.path}</span>
-                  <span className="muted">{open === f.path ? '▾' : '▸'}</span>
+                  {clashed.has(f.path) && <span className="tone tone-conf">clashed</span>}
+                  <span className="muted">{shown === f.path ? '▾' : '▸'}</span>
                 </button>
-                {open === f.path && (
+                {shown === f.path && (
                   <DiffView
                     base={ref.git(a.start.commit)}
                     head={ref.git(a.result!.commit!)}

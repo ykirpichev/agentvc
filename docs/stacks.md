@@ -60,6 +60,34 @@ git rebase --continue
 agentvc stack restack                    # carries on with the branches above
 ```
 
+### An agent resolves it (the default in the review UI)
+
+Sync, move, delete and landing an agent in the review UI, and
+`agentvc stack restack|sync --resolve` on the command line, hand each
+conflicting branch to an agent instead of stopping. The other branches restack
+as usual; the conflicting one and the branches above it stay where they were
+until you accept.
+
+- The agent runs with the workspace's agent settings (runner, model, check
+  command, permissions) in its own worktree, never in yours. Its worktree holds
+  the branch's commits replayed so far plus the conflicting commit merged with
+  diff3 markers, after agentvc's own auto-resolution; the prompt names the
+  files, the commit and how to see both sides.
+- When it stops, the check command runs. Markers left in a file fail the agent
+  (`markers_left`), and it lands nowhere.
+- Review it on its agent page: **Accept resolution** (`agentvc agent land agN`)
+  commits it with the original message and author, replays the branch's later
+  commits, moves the branch and restacks the ones above it (a later clash gets
+  an agent of its own). **Redo** is a reply to the agent. **Resolve myself**
+  discards it and stops the restack in your worktree, as `--keep-conflicts`.
+  A branch that moved since is refused with `branch_moved`.
+- Per workspace: `agentvc workspace agents --conflicts manual` (or Conflicts in
+  Agent settings, or `git config agentvc.agent-conflicts manual` for the repo)
+  makes these stop in the worktree for you instead; `agent` is the default.
+
+Without `--resolve` or `--keep-conflicts` the command line still fails with
+`conflict` and changes nothing, so scripts never start an agent by surprise.
+
 ## Commands
 
 | Command | Does |
@@ -68,7 +96,7 @@ agentvc stack restack                    # carries on with the branches above
 | `stack log [--all] [--prs]` | This window's branches with commits, PRs, `needs restack`; `--all` adds other windows read-only; `--prs` fetches each PR's checks and review first |
 | `stack create [name] [-m msg] [-a] [-i]` | Branch on the current one (or the trunk), commit staged work; name from the message if omitted. `--insert` puts it between the current branch and its children |
 | `stack modify [-a] [-m msg] [-c]` | Amend (or `-c` add a commit), restack the branches above |
-| `stack restack [--branch B] [--keep-conflicts]` | Replay branches onto their parents' tips |
+| `stack restack [--branch B] [--keep-conflicts \| --resolve]` | Replay branches onto their parents' tips |
 | `stack sync [--no-fetch] [--keep-merged]` | Fetch trunk, drop merged branches, restack |
 | `stack adopt B [--parent P] [--no-chain]` | Track existing branches: B and the untracked branches below it; parents from Graphite's `refs/branch-metadata` or git history |
 | `stack submit [--branch B \| --all] [--draft] [--force] [--no-pr]` | Push with a lease; one PR per branch with its parent as base; the stack listed in every PR body; new PRs get the `agentvc:no-restack` label |

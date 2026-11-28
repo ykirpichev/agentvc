@@ -409,6 +409,13 @@ pub enum Op {
         commit: String,
         base: String,
     },
+    /// Put an agent's resolution of a conflicting restack on the stack:
+    /// `tree` resolves `conflict` (see [`crate::stack::Window::finish_hand_off`]).
+    Resolve {
+        branch: String,
+        tree: String,
+        conflict: crate::stack::HandOff,
+    },
 }
 
 impl Op {
@@ -421,7 +428,8 @@ impl Op {
             | Op::Create { branch, .. }
             | Op::Merge { branch }
             | Op::Adopt { branch, .. }
-            | Op::Revise { branch, .. } => Some(branch),
+            | Op::Revise { branch, .. }
+            | Op::Resolve { branch, .. } => Some(branch),
             Op::Restack { branch } => branch.as_deref(),
             Op::Sync | Op::Undo | Op::Submit => None,
         }
@@ -452,6 +460,7 @@ impl Op {
             Op::Revise { branch, commit, .. } => {
                 format!("revise {branch} --to {}", &commit[..commit.len().min(10)])
             }
+            Op::Resolve { branch, .. } => format!("resolve {branch}"),
         }
     }
 }
@@ -478,6 +487,10 @@ pub struct Request {
     /// stopped there) instead of failing with nothing changed.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub keep_conflicts: bool,
+    /// Resolve conflicts the way the workspace's `conflicts` setting says:
+    /// hand them to an agent (the default), or as `keep_conflicts`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub resolve: bool,
     /// Who asked: a workspace id, `api`, or an actor.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from: Option<String>,
@@ -550,6 +563,42 @@ fn new_request_id() -> String {
 /// (nothing changed), so a queued edit reports it as failed; with `keep`
 /// the conflict is left in the worktree to resolve and reported in the
 /// result.
+/// [`run_op`], then the agents for what it handed off.
+fn run_op_with(w: &mut Window, op: &Op, how: OnConflict, workspace: &str) -> Result<Value> {
+    let agent = how == OnConflict::Resolve && crate::agent::resolves_conflicts(w);
+    let keep = how == OnConflict::Keep || (how == OnConflict::Resolve && !agent);
+    w.hand_off = agent;
+    let mut v = run_op(w, op, keep)?;
+    let handed: Vec<crate::stack::HandOff> =
+        [v.pointer("/handed_off"), v.pointer("/restack/handed_off")]
+            .into_iter()
+            .flatten()
+            .filter_map(|h| serde_json::from_value::<Vec<crate::stack::HandOff>>(h.clone()).ok())
+            .flatten()
+            .collect();
+    if !handed.is_empty() {
+        let exe = crate::agent::agentvc_program();
+        let started: Vec<Value> = handed
+            .iter()
+            .map(
+                |h| match crate::agent::start_resolve(w.path(), workspace, h, &exe) {
+                    Ok(a) => json!({ "branch": h.branch, "agent": a.id, "paths": h.paths }),
+                    Err(e) => json!({
+                        "branch": h.branch,
+                        "paths": h.paths,
+                        "error": e.to_string(),
+                        "code": e.code(),
+                    }),
+                },
+            )
+            .collect();
+        if let Some(o) = v.as_object_mut() {
+            o.insert("resolving".into(), Value::Array(started));
+        }
+    }
+    Ok(v)
+}
+
 fn run_op(w: &mut Window, op: &Op, keep: bool) -> Result<Value> {
     let restacked = |r: crate::stack::RestackResult| -> Result<Value> {
         if let Some(c) = r.conflict.as_ref().filter(|_| !keep) {
@@ -657,6 +706,19 @@ fn run_op(w: &mut Window, op: &Op, keep: bool) -> Result<Value> {
             scope.remove(branch);
             restacked(w.restack(Some(&scope), keep)?)
         }
+        Op::Resolve {
+            branch,
+            tree,
+            conflict,
+        } => {
+            if branch != &conflict.branch {
+                return Err(ws_err(
+                    "bad_request",
+                    "the resolution is for another branch",
+                ));
+            }
+            restacked(w.finish_hand_off(conflict, tree)?)
+        }
         Op::Sync => {
             let s = w.sync(true, true, keep)?;
             if s.restack.conflict.is_some() {
@@ -673,7 +735,14 @@ fn settle_request(w: &mut Window, mut req: Request) -> (Request, Result<Value>) 
     // Undo and submit are not recorded (a push cannot be taken back).
     let recorded = !matches!(req.op, Op::Undo | Op::Submit);
     let begun = recorded.then(|| crate::stackundo::begin(&path)).flatten();
-    let res = run_op(w, &req.op, req.keep_conflicts);
+    let on_conflict = if req.resolve {
+        OnConflict::Resolve
+    } else if req.keep_conflicts {
+        OnConflict::Keep
+    } else {
+        OnConflict::Fail
+    };
+    let res = run_op_with(w, &req.op, on_conflict, &req.workspace);
     if recorded {
         crate::stackundo::finish(&path, &req.op.label(), begun);
     }
@@ -737,6 +806,21 @@ pub fn edit(
     edit_with(cwd, target, op, from, queue, false)
 }
 
+/// What a stack edit does when a branch conflicts with its parent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OnConflict {
+    /// Fail with code `conflict`; nothing changes.
+    Fail,
+    /// Stop in the workspace's worktree for a person (`keep_conflicts`).
+    Keep,
+    /// What the workspace's `conflicts` setting says: start an agent that
+    /// resolves each conflicting branch in its own worktree (`agent`, the
+    /// default), or [`OnConflict::Keep`] (`manual`). The other branches
+    /// restack either way.
+    Resolve,
+}
+
 /// [`edit`], leaving a conflicting restack in the worktree when
 /// `keep_conflicts` (see [`conflicts`], [`resolve`] and [`finish`]).
 pub fn edit_with(
@@ -747,6 +831,23 @@ pub fn edit_with(
     queue: bool,
     keep_conflicts: bool,
 ) -> Result<EditOutcome> {
+    let how = if keep_conflicts {
+        OnConflict::Keep
+    } else {
+        OnConflict::Fail
+    };
+    edit_full(cwd, target, op, from, queue, how)
+}
+
+/// [`edit`] with a choice of what conflicts do.
+pub fn edit_full(
+    cwd: &Path,
+    target: &str,
+    op: Op,
+    from: Option<&str>,
+    queue: bool,
+    on_conflict: OnConflict,
+) -> Result<EditOutcome> {
     let here = Window::open(cwd)?;
     let ws = find_local(&here, target)?;
     let _lock = lock(&ws.git_dir)?;
@@ -755,7 +856,8 @@ pub fn edit_with(
         id: new_request_id(),
         workspace: ws.record.id.clone(),
         op,
-        keep_conflicts,
+        keep_conflicts: on_conflict == OnConflict::Keep,
+        resolve: on_conflict == OnConflict::Resolve,
         from: from.map(str::to_string),
         created_at: now(),
         status: RequestStatus::Queued,

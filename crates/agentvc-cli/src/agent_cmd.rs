@@ -131,6 +131,7 @@ fn line(a: &Agent) -> String {
         match a.mode {
             Mode::New => "",
             Mode::Revise => ", revise",
+            Mode::Resolve => ", resolve clash",
         }
     );
     if let Some(q) = &a.question {

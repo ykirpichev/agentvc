@@ -651,8 +651,8 @@ export interface WsEditOutcome {
   request_id: string
   workspace: string
   reason?: string
-  /** With `keep_conflicts`, a restack that stopped says where. */
-  result?: { conflict?: { branch: string; paths: string[] } | null; restack?: { conflict?: { branch: string; paths: string[] } | null }; merged?: { branch: string; number: number }[]; pushed?: string[]; prs?: { branch: string; number: number; url: string }[]; stopped?: { branch: string; code: string; message: string } | null }
+  /** With `keep_conflicts`, a restack that stopped says where; with `resolve`, `resolving` lists the agents. */
+  result?: { resolving?: Resolving[]; conflict?: { branch: string; paths: string[] } | null; restack?: { conflict?: { branch: string; paths: string[] } | null }; merged?: { branch: string; number: number }[]; pushed?: string[]; prs?: { branch: string; number: number; url: string }[]; stopped?: { branch: string; code: string; message: string } | null }
 }
 
 /** A restack stopped on a conflict in a workspace. Hunks are from the branch's side: `ours` is the branch. */
@@ -718,7 +718,8 @@ export interface Agent {
   workspace: string
   workspace_name: string
   start: { branch: string; commit: string; trunk: boolean }
-  mode: 'new' | 'revise'
+  /** `resolve`: it resolves a restack of `start.branch` that conflicted (`conflict`). */
+  mode: 'new' | 'revise' | 'resolve'
   branch: string
   worktree: string
   runner: string
@@ -744,11 +745,40 @@ export interface Agent {
   error: string | null
   landed: { outcome: 'applied' | 'queued'; request_id: string; branch: string; at: number } | null
   messages: { from: 'you' | 'agent'; text: string; at: number }[]
+  /** Resolve agents: the restack it resolves. */
+  conflict?: HandOff
+  /** Resolve agents: files still holding conflict markers when it stopped. */
+  markers_left?: string[]
   stale: boolean
   /** Rank in Needs you, 1 most urgent; null when it does not need you. */
   urgency: number | null
   waiting_since: number | null
 }
+
+/** A branch whose restack conflicted, handed to an agent: `commit` of it clashed with `parent` at `onto`. */
+export interface HandOff {
+  branch: string
+  parent: string
+  old: string
+  onto: string
+  partial: string
+  commit: string
+  subject: string
+  paths: string[]
+  tree: string
+  rest: number
+}
+
+/** What a conflicting branch went to on a `resolve` edit. */
+export interface Resolving {
+  branch: string
+  paths: string[]
+  agent?: string
+  error?: string
+  code?: string
+}
+
+export type AgentConflicts = 'agent' | 'manual'
 
 export interface AgentList {
   agents: Agent[]
@@ -791,6 +821,8 @@ export interface AgentSettings {
   /** Claude Code: run commands in its sandbox (writes only in the worktree). */
   sandbox?: boolean
   max?: number
+  /** What a restack that conflicts does: an agent resolves it for review (default), or it stops for you. */
+  conflicts?: AgentConflicts
 }
 
 export interface WorkspaceAgentSettings {

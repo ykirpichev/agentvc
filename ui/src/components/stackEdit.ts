@@ -6,6 +6,7 @@ import { api } from '../api/client'
 import { useLive } from '../api/live'
 import type { WorkspaceInfo, WsOp } from '../api/types'
 import { branchLink, useGo } from '../core/links'
+import { agentLink, resolvingWords } from '../core/agents'
 import { useToast } from './Toaster'
 
 /** Drag payload of a branch row: `{ workspace, branch }` as JSON. */
@@ -37,10 +38,14 @@ export function useStackEdit() {
   const run = async (w: WorkspaceInfo, op: WsOp, done: string, keep = false) => {
     setBusy(true)
     try {
-      const r = await api.stackEdit(w.id, op, keep)
+      const r = await api.stackEdit(w.id, op, keep ? 'resolve' : false)
       // A sync carries its restack's stop inside `restack`.
       const stopped = r.result?.conflict?.branch ?? r.result?.restack?.conflict?.branch
-      if (r.outcome === 'queued') toast.ok(`Queued for ${w.name}: ${r.reason ?? 'an agent is working there'}. It applies when the agent stops.`, { undo: false })
+      const resolving = resolvingWords(r.result?.resolving)
+      if (resolving) {
+        toast.ok(`${done} ${resolving.text}`, { undo: false })
+        if (resolving.agent) go(agentLink(resolving.agent))
+      } else if (r.outcome === 'queued') toast.ok(`Queued for ${w.name}: ${r.reason ?? 'an agent is working there'}. It applies when the agent stops.`, { undo: false })
       else if (stopped) {
         toast.ok(`${stopped} clashes with its parent. Pick what to keep.`, { undo: false })
         go(branchLink(w.id, stopped))

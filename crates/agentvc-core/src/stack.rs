@@ -236,6 +236,35 @@ pub struct RestackResult {
     /// The conflicting branch is being rebased in the worktree: resolve the
     /// files, `git rebase --continue`, then run restack again.
     pub kept_conflicts: bool,
+    /// Branches left for an agent to resolve ([`Window::hand_off`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub handed_off: Vec<HandOff>,
+}
+
+/// A branch whose restack conflicts, left as it was for an agent (or a
+/// person) to resolve: the replay of `old` onto `onto` stopped at `commit`.
+/// [`Window::finish_hand_off`] puts the resolution on the stack.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HandOff {
+    pub branch: String,
+    /// The parent branch (or trunk) it was being restacked onto.
+    pub parent: String,
+    /// The branch's tip before the restack.
+    pub old: String,
+    /// The parent's tip it was being restacked onto.
+    pub onto: String,
+    /// The commits before `commit`, already replayed onto `onto`.
+    pub partial: String,
+    /// The branch's commit that conflicts.
+    pub commit: String,
+    pub subject: String,
+    /// Files that still conflict after auto-resolution.
+    pub paths: Vec<String>,
+    /// `commit` merged onto `partial`, with conflict markers in `paths`.
+    pub tree: String,
+    /// Commits of the branch after `commit`, replayed once it is resolved.
+    #[serde(default)]
+    pub rest: usize,
 }
 
 /// What `fold` did.
@@ -406,6 +435,10 @@ enum Replayed {
         commit: String,
         subject: String,
         paths: Vec<String>,
+        /// The replay so far: the commits before `commit`, on the new parent.
+        partial: String,
+        /// The merge of `commit` onto `partial`, conflict markers included.
+        tree: String,
     },
 }
 
@@ -418,6 +451,10 @@ pub struct Window {
     pub common_dir: PathBuf,
     pub state: State,
     rules: Rules,
+    /// Restack hands conflicting branches off (see [`HandOff`]) instead of
+    /// failing or stopping in the worktree: they and their upstack stay as
+    /// they were, everything else restacks.
+    pub hand_off: bool,
 }
 
 pub(crate) fn canon(p: &Path) -> PathBuf {
@@ -575,6 +612,7 @@ impl Window {
             common_dir,
             state,
             rules: Rules::new(),
+            hand_off: false,
         })
     }
 
@@ -980,6 +1018,8 @@ impl Window {
                     commit: c.id.clone(),
                     subject: c.subject(),
                     paths: m.conflicts,
+                    partial: tip,
+                    tree: m.tree,
                 });
             }
             if m.tree == self.tree_of(&tip)? {
@@ -1096,7 +1136,31 @@ impl Window {
                     commit,
                     subject,
                     paths,
+                    partial,
+                    tree,
                 } => {
+                    if self.hand_off {
+                        let rest = commits
+                            .iter()
+                            .skip_while(|x| x.id != commit)
+                            .skip(1)
+                            .count();
+                        result.handed_off.push(HandOff {
+                            branch: name.clone(),
+                            parent: b.parent.clone(),
+                            old: old.clone(),
+                            onto: onto.clone(),
+                            partial,
+                            commit,
+                            subject,
+                            paths,
+                            tree,
+                            rest,
+                        });
+                        new_tips.insert(name.clone(), old);
+                        skip.insert(name);
+                        continue;
+                    }
                     let c = StackConflict {
                         branch: name.clone(),
                         commit,
@@ -1211,6 +1275,120 @@ impl Window {
         self.state.pending = None;
         self.save()?;
         r.map(|_| ())
+    }
+
+    /// Put the resolution of a [`HandOff`] on the stack: `tree` is the
+    /// resolved merge of `h.commit` onto `h.partial`. The commit keeps the
+    /// original message and author, the branch's later commits are replayed
+    /// on it, the branch moves, and the branches above it restack. Refuses
+    /// with `branch_moved` when the branch changed since the hand-off. A
+    /// later commit that conflicts too is handed off again (with
+    /// [`Window::hand_off`]) or fails with `conflict`.
+    pub fn finish_hand_off(&mut self, h: &HandOff, tree: &str) -> Result<RestackResult> {
+        self.settle()?;
+        self.require_tracked(&h.branch)?;
+        let tip = self.branch_tip(&h.branch).ok_or_else(|| {
+            stack_err_with(
+                "branch_missing",
+                format!("branch {} is gone", h.branch),
+                json!({ "branch": h.branch }),
+            )
+        })?;
+        if tip != h.old {
+            return Err(stack_err_with(
+                "branch_moved",
+                format!(
+                    "{} changed since its conflict was handed off; restack it again",
+                    h.branch
+                ),
+                json!({ "branch": h.branch, "tip": tip, "old": h.old }),
+            ));
+        }
+        let info = self
+            .commits_between(&format!("{}^", h.commit), &h.commit)?
+            .pop()
+            .ok_or_else(|| stack_err("bad_ref", format!("no commit {}", h.commit)))?;
+        let resolved = if tree == self.tree_of(&h.partial)? {
+            // The change is already in the parent.
+            h.partial.clone()
+        } else {
+            self.repo.git_env(
+                &["commit-tree", tree, "-p", &h.partial, "-F", "-"],
+                Some(&info.message),
+                &[
+                    ("GIT_AUTHOR_NAME", info.author_name.as_str()),
+                    ("GIT_AUTHOR_EMAIL", info.author_email.as_str()),
+                    ("GIT_AUTHOR_DATE", info.author_date.as_str()),
+                ],
+            )?
+        };
+        let rest = self.commits_between(&h.commit, &h.old)?;
+        let mut result = RestackResult::default();
+        match self.replay(&h.branch, &rest, &resolved)? {
+            Replayed::Done { tip, replayed, .. } => {
+                let update = BranchUpdate {
+                    branch: h.branch.clone(),
+                    old: h.old.clone(),
+                    new: tip,
+                    onto: h.onto.clone(),
+                    commits: replayed + 1,
+                    dropped: 0,
+                };
+                self.apply(std::slice::from_ref(&update))?;
+                if let Some(i) = self.find(&h.branch) {
+                    self.state.branches[i].parent_rev = h.onto.clone();
+                }
+                self.save()?;
+                result.updated.push(update);
+            }
+            Replayed::Conflict {
+                commit,
+                subject,
+                paths,
+                partial,
+                tree,
+            } => {
+                let next = HandOff {
+                    rest: rest.iter().skip_while(|x| x.id != commit).skip(1).count(),
+                    commit,
+                    subject,
+                    paths,
+                    partial,
+                    tree,
+                    ..h.clone()
+                };
+                if !self.hand_off {
+                    let c = StackConflict {
+                        branch: next.branch.clone(),
+                        commit: next.commit.clone(),
+                        subject: next.subject.clone(),
+                        onto: next.onto.clone(),
+                        paths: next.paths.clone(),
+                    };
+                    return Err(stack_err_with(
+                        "conflict",
+                        format!(
+                            "{} conflicts again in {} (commit \"{}\"); nothing was changed",
+                            c.branch,
+                            c.paths.join(", "),
+                            c.subject
+                        ),
+                        serde_json::to_value(&c).expect("serializes"),
+                    ));
+                }
+                result.handed_off.push(next);
+                return Ok(result);
+            }
+        }
+        // The branches above it, and the branch itself if its parent moved
+        // on again in the meantime.
+        let scope = self.upstack(&h.branch);
+        let more = self.restack(Some(&scope), false)?;
+        result.updated.extend(more.updated);
+        result.unchanged.extend(more.unchanged);
+        result.handed_off.extend(more.handed_off);
+        result.conflict = more.conflict;
+        Ok(result)
     }
 
     // ---- sync ----
