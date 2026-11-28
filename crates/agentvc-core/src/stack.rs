@@ -3670,11 +3670,23 @@ impl Window {
             .map_err(|_| Error::NotGitRepo(to.to_path_buf()))?;
         let their_git = canon(Path::new(&their_git));
         let their_common = canon(&to.join(probe.git(&["rev-parse", "--git-common-dir"], None)?));
-        if their_common != self.common_dir {
-            return Err(stack_err(
-                "other_repository",
-                format!("{} is a worktree of another repository", to.display()),
-            ));
+        // Another clone of this space on this machine: its branches are
+        // its own, so they are copied over first (#205).
+        let other_clone = their_common != self.common_dir;
+        if other_clone {
+            let (ours, _) = crate::checkouts::space_of(self);
+            let theirs = Window::open(to)
+                .ok()
+                .and_then(|t| crate::checkouts::space_of(&t).0);
+            if ours.is_none() || ours != theirs {
+                return Err(stack_err(
+                    "other_repository",
+                    format!(
+                        "{} is a checkout of another space; `stack give` hands branches to worktrees and clones of this space on this machine (push the branch and `stack get` it there instead)",
+                        to.display()
+                    ),
+                ));
+            }
         }
         if their_git == self.git_dir {
             return Err(stack_err("same_window", "that is this window"));
@@ -3687,6 +3699,9 @@ impl Window {
                 .filter(|n| set.contains(n))
                 .collect()
         };
+        if other_clone {
+            self.copy_branches(&probe, &moving)?;
+        }
         let mut theirs = read_state(&their_git)?.unwrap_or_else(|| State {
             version: STATE_VERSION,
             trunk: self.state.trunk.clone(),
@@ -3704,6 +3719,79 @@ impl Window {
         self.state.branches.retain(|b| !moving.contains(&b.name));
         self.save()?;
         Ok(moving)
+    }
+
+    /// Copy `moving` (and the bases they sit on, when `to` lacks them)
+    /// from this clone into the clone `to`, with their upstreams. Nothing
+    /// is copied when one of `moving` already exists there at another
+    /// commit.
+    fn copy_branches(&self, to: &HostRepo, moving: &[String]) -> Result<()> {
+        let mut specs = Vec::new();
+        for n in moving {
+            let tip = self.branch_tip(n).ok_or_else(|| {
+                stack_err_with(
+                    "no_branch",
+                    format!("branch {n} is gone"),
+                    json!({ "branch": n }),
+                )
+            })?;
+            match to.rev(&format!("refs/heads/{n}")) {
+                Some(t) if t == tip => {}
+                Some(_) => {
+                    return Err(stack_err_with(
+                        "branch_exists",
+                        format!(
+                            "{} already has a branch {n} at another commit; rename or delete one of them first",
+                            to.workdir.display()
+                        ),
+                        json!({ "branch": n }),
+                    ))
+                }
+                None => specs.push(format!("refs/heads/{n}:refs/heads/{n}")),
+            }
+        }
+        for n in moving {
+            let p = &self.state.branches[self.find(n).expect("tracked")].parent;
+            if *p != self.state.trunk
+                && !moving.contains(p)
+                && self.branch_tip(p).is_some()
+                && to.rev(&format!("refs/heads/{p}")).is_none()
+                && !specs
+                    .iter()
+                    .any(|s| s.starts_with(&format!("refs/heads/{p}:")))
+            {
+                // A read-only base there, as it is for a worktree.
+                specs.push(format!("refs/heads/{p}:refs/heads/{p}"));
+            }
+        }
+        if !specs.is_empty() {
+            let src = self.repo.workdir.to_string_lossy().into_owned();
+            let mut args = vec!["fetch", "--quiet", "--no-tags", src.as_str()];
+            args.extend(specs.iter().map(String::as_str));
+            to.git(&args, None)?;
+        }
+        // Same remote: bring the remote-tracking refs and upstreams, so
+        // `submit` there knows what is already pushed.
+        let remote = &self.state.remote;
+        let url = |r: &HostRepo| r.git(&["remote", "get-url", remote], None).ok();
+        if remote.is_empty() || url(&self.repo).is_none() || url(&self.repo) != url(to) {
+            return Ok(());
+        }
+        for n in moving {
+            let tracking = format!("refs/remotes/{remote}/{n}");
+            if self.repo.rev(&tracking).is_some() && to.rev(&tracking).is_none() {
+                let src = self.repo.workdir.to_string_lossy().into_owned();
+                let spec = format!("{tracking}:{tracking}");
+                let _ = to.git(&["fetch", "--quiet", "--no-tags", &src, &spec], None);
+            }
+            for key in ["remote", "merge"] {
+                let k = format!("branch.{n}.{key}");
+                if let Ok(v) = self.repo.git(&["config", "--get", &k], None) {
+                    let _ = to.git(&["config", &k, v.trim()], None);
+                }
+            }
+        }
+        Ok(())
     }
 
     // ---- log ----

@@ -60,8 +60,10 @@ agentvc side bar shows the same tree.
 | `gt undo` | `agentvc stack undo` | Undo in the toast |
 | `gt get` | `agentvc stack get <branch or workspace>` | |
 
-To move a branch, drag it onto another branch or onto main in the sidebar,
-including into another folder's stack (it waits while an agent works there).
+To move a branch, drag it onto another branch or onto main in the sidebar
+(it waits while an agent works there). To hand a branch and the ones above
+it to another folder's stack, a worktree or another clone of the repo on
+this machine: `agentvc stack give <branch> --to <folder or workspace>`.
 
 ## 5. Hand work to an agent
 

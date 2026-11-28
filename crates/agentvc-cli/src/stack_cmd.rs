@@ -223,11 +223,12 @@ pub enum StackCmd {
         #[arg(long)]
         keep_conflicts: bool,
     },
-    /// Hand a branch and the branches above it to another window: --to is
-    /// its directory, or a workspace id or name.
+    /// Hand a branch and the branches above it to another window (a
+    /// worktree, or another clone of this space on this machine, which gets
+    /// the branches copied): --to is its directory, or a workspace id or name.
     Give {
         branch: String,
-        /// The other worktree's directory, or its workspace id or name.
+        /// The other workspace's directory, or its workspace id or name.
         #[arg(long)]
         to: std::path::PathBuf,
     },
@@ -936,20 +937,8 @@ fn dispatch(cwd: &Path, cmd: StackCmd) -> anyhow::Result<(Value, String)> {
             let to = if path.is_dir() {
                 path
             } else {
+                // In this checkout or another clone of its space (#205).
                 let l = workspace::find_local(&w, &to.to_string_lossy())?;
-                if l.other_checkout {
-                    // Branches do not cross clones (#160).
-                    return Err(agentvc_core::Error::Stack {
-                        code: "other_checkout",
-                        message: format!(
-                            "workspace {} is in another checkout ({}); push the branch and `agentvc stack get` it there",
-                            l.record.name,
-                            l.checkout.display()
-                        ),
-                        details: None,
-                    }
-                    .into());
-                }
                 l.path
             };
             // The receiving stack is changed too: hold its lock.
