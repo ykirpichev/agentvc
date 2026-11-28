@@ -25,6 +25,7 @@ pub const PR_BRANCH: &str = "pr.branch";
 pub const PR_BASE: &str = "pr.base";
 pub const PR_TRAILER: &str = "pr.trailer";
 pub const PR_BODY_PREFIX: &str = "pr.body-prefix";
+pub const PR_BODY_SUFFIX: &str = "pr.body-suffix";
 pub const GIT_CAPTURE_COMMITS: &str = crate::viewgit::CAPTURE_COMMITS;
 pub const USER_NAME: &str = "user.name";
 
@@ -67,6 +68,12 @@ pub const KEYS: &[Key] = &[
         multi: false,
         env: Some("AGENTVC_PR_BODY_PREFIX"),
         about: "file whose text goes above the generated PR body",
+    },
+    Key {
+        name: PR_BODY_SUFFIX,
+        multi: false,
+        env: Some("AGENTVC_PR_BODY_SUFFIX"),
+        about: "file whose text ends the PR body, below the generated part (attribution footer)",
     },
     Key {
         name: MERGE_STRATEGY,

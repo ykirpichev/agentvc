@@ -250,10 +250,16 @@ thread goes idle. Use your thread's own push branch wherever `<branch>` appears.
    `agentvc pr aX`. Run fmt and clippy in the view first. `GITHUB_TOKEN` is set in
    cloud sessions. Exporting to the branch checked out in the main checkout (the usual case
    in a thread) moves that checkout along; no detach or `--force` needed.
-6. **PR body:** keep agentvc's generated body; put required attribution lines and your
-   summary in a file and pass `--body-prefix <file>` on the first `pr`. Text outside
-   agentvc's `<!-- agentvc:begin/end -->` markers is kept on every later update. Say which
-   attempts ran and which won.
+6. **PR body:** keep agentvc's generated body; put the required header lines and your
+   summary in a file and pass `--body-prefix <file>`, and put the required footer
+   (e.g. "🤖 Generated with ..." and the session URL) in another and pass
+   `--body-suffix <file>`: it becomes the last lines of the body, below the generated
+   part. Or set them once with `agentvc config pr.body-prefix <file>` and
+   `pr.body-suffix <file>` (relative to the space) so every `pr` uses them. Text outside
+   agentvc's `<!-- agentvc:begin/end -->` markers is kept on every later update, and a
+   new suffix replaces the old footer rather than adding another. Say which attempts
+   ran and which won. The title is the attempt's own task goal; pass `--title` to set
+   another. Later `pr` runs keep a title given with `--title` or edited on GitHub.
    For a big change, tell it as a series of commits before `pr`:
    `agentvc story aX --at sN:"First step" --last "Second step"` (see `agentvc log aX` for
    snapshot ids); `pr` then pushes one commit per change and lists them in the body.
