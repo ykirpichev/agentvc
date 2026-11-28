@@ -301,9 +301,28 @@ pub struct SyncResult {
     pub merged: Vec<String>,
     /// Merged branches whose local branch was deleted.
     pub deleted: Vec<String>,
+    /// Where each deleted branch's old tip is kept, and how to restore it.
+    pub trashed: Vec<Trashed>,
     /// Where the worktree was switched to when its branch was merged.
     pub switched_to: Option<String>,
     pub restack: RestackResult,
+}
+
+/// A branch `stack sync` deleted, kept under [`trash_ref`].
+#[derive(Clone, Debug, Serialize)]
+pub struct Trashed {
+    pub branch: String,
+    /// Its tip when it was deleted.
+    pub tip: String,
+    /// `refs/agentvc/trash/<branch>`.
+    pub trash_ref: String,
+    /// The command that brings the branch back.
+    pub restore: String,
+}
+
+/// Where `stack sync` keeps the tip of a merged branch it deletes (#200).
+pub fn trash_ref(branch: &str) -> String {
+    format!("refs/agentvc/trash/{branch}")
 }
 
 /// What a branch's parent is.
@@ -979,8 +998,18 @@ impl Window {
             .git(&["rev-parse", &format!("{commit}^{{tree}}")], None)
     }
 
-    /// Cherry-pick `commits` onto `onto`, in memory.
-    fn replay(&self, branch: &str, commits: &[CommitInfo], onto: &str) -> Result<Replayed> {
+    /// Cherry-pick `commits` onto `onto`, in memory, resolving conflicts
+    /// with `rules`. A commit that turns empty only because a resolution
+    /// rule picked the other side (an indentation-only change against a
+    /// trunk edit of the same line, #200) is a conflict, never dropped:
+    /// in Python, YAML or Makefiles indentation is a real change.
+    fn replay(
+        &self,
+        branch: &str,
+        commits: &[CommitInfo],
+        onto: &str,
+        rules: &Rules,
+    ) -> Result<Replayed> {
         let mut tip = onto.to_string();
         let (mut replayed, mut dropped, mut kept) = (0, 0, 0);
         for c in commits {
@@ -1005,14 +1034,7 @@ impl Window {
                 theirs: format!("{branch} {}", &c.id[..12.min(c.id.len())]),
                 theirs_first: false,
             };
-            let m = merge_commits(
-                &self.repo,
-                Some(&c.parents[0]),
-                &tip,
-                &c.id,
-                &self.rules,
-                &sides,
-            )?;
+            let m = merge_commits(&self.repo, Some(&c.parents[0]), &tip, &c.id, rules, &sides)?;
             if !m.conflicts.is_empty() {
                 return Ok(Replayed::Conflict {
                     commit: c.id.clone(),
@@ -1023,6 +1045,26 @@ impl Window {
                 });
             }
             if m.tree == self.tree_of(&tip)? {
+                if !m.files.is_empty() {
+                    // Empty only after resolving a conflict: the rules
+                    // threw this commit's change away. Hand back the
+                    // unresolved merge, markers included.
+                    let raw = merge_commits(
+                        &self.repo,
+                        Some(&c.parents[0]),
+                        &tip,
+                        &c.id,
+                        &Rules::disabled(),
+                        &sides,
+                    )?;
+                    return Ok(Replayed::Conflict {
+                        commit: c.id.clone(),
+                        subject: c.subject(),
+                        paths: m.files.iter().map(|f| f.path.clone()).collect(),
+                        partial: tip,
+                        tree: raw.tree,
+                    });
+                }
                 dropped += 1;
                 continue;
             }
@@ -1110,7 +1152,7 @@ impl Window {
             }
             let from = self.replay_from(&b, &old, &onto);
             let commits = self.commits_between(&from, &old)?;
-            match self.replay(&name, &commits, &onto)? {
+            match self.replay(&name, &commits, &onto, &self.rules)? {
                 Replayed::Done {
                     tip,
                     replayed,
@@ -1324,7 +1366,7 @@ impl Window {
         };
         let rest = self.commits_between(&h.commit, &h.old)?;
         let mut result = RestackResult::default();
-        match self.replay(&h.branch, &rest, &resolved)? {
+        match self.replay(&h.branch, &rest, &resolved, &self.rules)? {
             Replayed::Done { tip, replayed, .. } => {
                 let update = BranchUpdate {
                     branch: h.branch.clone(),
@@ -1393,24 +1435,62 @@ impl Window {
 
     // ---- sync ----
 
-    /// Whether `b` is merged into `base`: its tip is in the base, or its
-    /// commits replay onto the base as no change (squash or rebase merges).
+    /// Whether `b` is merged into `base`: its tip is in the base and the
+    /// branch had commits of its own there, or its commits replay onto the
+    /// base as no change (squash or rebase merges). The replay uses no
+    /// resolution rules: any conflict means not merged (#200).
     fn is_merged(&self, b: &Tracked, base: &str) -> Result<bool> {
         let Some(tip) = self.branch_tip(&b.name) else {
             return Ok(false);
         };
         if self.repo.is_ancestor(&tip, base) {
-            // A branch with no commits of its own is new, not merged.
-            return Ok(tip != b.parent_rev);
+            // A branch with no commits of its own is new, not merged; so is
+            // one only fast-forwarded to trunk commits (#200).
+            return Ok(tip != b.parent_rev && self.had_own_commits(&b.name, &b.parent_rev, &tip));
         }
         let from = self.replay_from(b, &tip, base);
         let commits = self.commits_between(&from, &tip)?;
         if commits.is_empty() {
             return Ok(false);
         }
-        Ok(match self.replay(&b.name, &commits, base) {
-            Ok(Replayed::Done { replayed, kept, .. }) => replayed == 0 && kept == 0,
-            _ => false,
+        Ok(
+            match self.replay(&b.name, &commits, base, &Rules::disabled()) {
+                Ok(Replayed::Done { replayed, kept, .. }) => replayed == 0 && kept == 0,
+                _ => false,
+            },
+        )
+    }
+
+    /// Whether some commit in `from..tip` was made on `branch` (committed,
+    /// amended, cherry-picked, rebased or restacked there) rather than only
+    /// reached by moving the branch to existing commits (fast-forward,
+    /// reset, `branch -f`), going by the branch's reflog. Without a reflog
+    /// it cannot tell, and answers yes.
+    fn had_own_commits(&self, branch: &str, from: &str, tip: &str) -> bool {
+        let Ok(log) = self.repo.git_raw(&[
+            "log",
+            "-g",
+            "--format=%H%x1f%gs",
+            &format!("refs/heads/{branch}"),
+            "--",
+        ]) else {
+            return true;
+        };
+        let entries: Vec<(&str, &str)> = log.lines().filter_map(|l| l.split_once('\x1f')).collect();
+        if entries.is_empty() {
+            return true;
+        }
+        let Ok(range) = self.repo.git_raw(&["rev-list", &format!("{from}..{tip}")]) else {
+            return true;
+        };
+        let range: HashSet<&str> = range.lines().map(str::trim).collect();
+        entries.iter().any(|(id, subject)| {
+            let s = subject.to_ascii_lowercase();
+            range.contains(id)
+                && !s.is_empty()
+                && !s.starts_with("branch:")
+                && !s.starts_with("reset:")
+                && !s.contains("fast-forward")
         })
     }
 
@@ -1507,6 +1587,7 @@ impl Window {
             merged.push(b.name);
         }
         let mut deleted = Vec::new();
+        let mut trashed = Vec::new();
         let mut switched_to = None;
         if !merged.is_empty() {
             let current = self.current_branch();
@@ -1522,10 +1603,40 @@ impl Window {
             if delete {
                 let elsewhere = self.checkouts_elsewhere();
                 for m in &merged {
-                    if !elsewhere.contains_key(m)
-                        && self.current_branch().as_deref() != Some(m.as_str())
-                        && self.repo.git(&["branch", "-D", m], None).is_ok()
+                    if elsewhere.contains_key(m)
+                        || self.current_branch().as_deref() == Some(m.as_str())
                     {
+                        continue;
+                    }
+                    // Keep the old tip first, so a wrong call is one
+                    // command to undo: `git branch <m> refs/agentvc/trash/<m>`.
+                    let Some(tip) = self.branch_tip(m) else {
+                        continue;
+                    };
+                    let trash = trash_ref(m);
+                    if self
+                        .repo
+                        .git(
+                            &[
+                                "update-ref",
+                                "-m",
+                                "agentvc stack sync: deleted merged branch",
+                                &trash,
+                                &tip,
+                            ],
+                            None,
+                        )
+                        .is_err()
+                    {
+                        continue;
+                    }
+                    if self.repo.git(&["branch", "-D", m], None).is_ok() {
+                        trashed.push(Trashed {
+                            branch: m.clone(),
+                            tip,
+                            restore: format!("git branch {m} {trash}"),
+                            trash_ref: trash,
+                        });
                         deleted.push(m.clone());
                     }
                 }
@@ -1552,6 +1663,7 @@ impl Window {
             base,
             merged,
             deleted,
+            trashed,
             switched_to,
             restack,
         })
@@ -3621,6 +3733,7 @@ mod tests {
         let s = w.sync(true, true, false).unwrap();
         assert_eq!(s.merged, vec!["s1".to_string()]);
         assert_eq!(s.deleted, vec!["s1".to_string()]);
+        assert_eq!(rev(&f.w1, "refs/agentvc/trash/s1"), s1, "old tip kept");
         assert_eq!(s.restack.updated.len(), 11);
         let base = rev(&f.w1, "origin/main");
         assert_eq!(rev(&f.w1, "s2~1"), base);
@@ -4359,5 +4472,103 @@ mod tests {
         assert_eq!(r.merged.len(), 1, "{:?}", r.stopped);
         assert!(r.stopped.is_none());
         assert!(!w.tracks("x"));
+    }
+
+    /// main has n.py pushed; `ws` re-indents `bar()`; main then edits the
+    /// same line (#200).
+    fn whitespace_only_branch(f: &Fixture) -> (Window, String) {
+        commit_file(
+            &f.w1,
+            "n.py",
+            "def g():\n    if y:\n        bar()\n",
+            "add n.py",
+        );
+        git(&f.w1, &["push", "-q", "origin", "main"]);
+        git(&f.w1, &["fetch", "-q", "origin"]);
+        let mut w = Window::open(&f.w1).unwrap();
+        fs::write(f.w1.join("n.py"), "def g():\n    if y:\n    bar()\n").unwrap();
+        w.create(Some("ws"), Some("ws only"), true).unwrap();
+        let tip = rev(&f.w1, "ws");
+        advance_origin(f, "n.py", "def g():\n    if y:\n        bar(1)\n");
+        (w, tip)
+    }
+
+    #[test]
+    fn sync_keeps_a_whitespace_only_commit() {
+        let f = setup();
+        let (mut w, tip) = whitespace_only_branch(&f);
+        let e = w.sync(true, true, false).unwrap_err();
+        assert_eq!(e.code(), "conflict", "{e}");
+        assert!(w.tracks("ws"));
+        assert_eq!(rev(&f.w1, "ws"), tip, "nothing changed");
+        assert!(git(&f.w1, &["branch", "--list", "ws"]).contains("ws"));
+        assert!(
+            git(&f.w1, &["for-each-ref", "refs/agentvc/trash"]).is_empty(),
+            "nothing was deleted"
+        );
+        // Restacking by hand raises the same conflict; with --keep-conflicts
+        // it is left in the worktree rather than dropped.
+        let e = w.restack(None, false).unwrap_err();
+        assert_eq!(e.code(), "conflict");
+        let r = w.restack(None, true).unwrap();
+        let c = r.conflict.expect("conflict");
+        assert_eq!(c.branch, "ws");
+        assert_eq!(c.paths, vec!["n.py".to_string()]);
+        assert!(r.updated.is_empty());
+    }
+
+    #[test]
+    fn restack_keeps_a_whitespace_only_commit_mid_stack() {
+        let f = setup();
+        let (mut w, tip) = whitespace_only_branch(&f);
+        fs::write(f.w1.join("top.txt"), "top\n").unwrap();
+        w.create(Some("top"), Some("top"), true).unwrap();
+        git(&f.w1, &["fetch", "-q", "origin"]);
+        let e = w.restack(None, false).unwrap_err();
+        assert_eq!(e.code(), "conflict", "{e}");
+        assert_eq!(rev(&f.w1, "ws"), tip);
+        assert_eq!(rev(&f.w1, "top~1"), tip);
+    }
+
+    #[test]
+    fn sync_keeps_an_empty_branch_fast_forwarded_to_trunk() {
+        let f = setup();
+        let mut w = Window::open(&f.w1).unwrap();
+        w.create(Some("wip"), None, false).unwrap();
+        advance_origin(&f, "up.txt", "up\n");
+        git(&f.w1, &["fetch", "-q", "origin"]);
+        git(&f.w1, &["merge", "-q", "--ff-only", "origin/main"]);
+        let s = w.sync(true, true, false).unwrap();
+        assert!(s.merged.is_empty(), "{:?}", s.merged);
+        assert!(s.deleted.is_empty());
+        assert!(w.tracks("wip"));
+        assert_eq!(
+            git(&f.w1, &["symbolic-ref", "--short", "HEAD"]),
+            "wip",
+            "HEAD stays on the branch"
+        );
+        assert_eq!(rev(&f.w1, "wip"), rev(&f.w1, "origin/main"));
+    }
+
+    #[test]
+    fn sync_trashes_a_fast_forward_merged_branch_before_deleting_it() {
+        let f = setup();
+        let mut w = Window::open(&f.w1).unwrap();
+        fs::write(f.w1.join("ff.txt"), "ff\n").unwrap();
+        w.create(Some("ff"), Some("ff work"), true).unwrap();
+        let tip = rev(&f.w1, "ff");
+        // Merged upstream as a fast-forward: the tip is in main as is.
+        git(&f.w1, &["push", "-q", "origin", "ff:main"]);
+        git(&f.w1, &["switch", "-q", "--detach", "HEAD"]);
+        let s = w.sync(true, true, false).unwrap();
+        assert_eq!(s.merged, vec!["ff".to_string()]);
+        assert_eq!(s.deleted, vec!["ff".to_string()]);
+        assert!(git(&f.w1, &["branch", "--list", "ff"]).is_empty());
+        assert_eq!(rev(&f.w1, "refs/agentvc/trash/ff"), tip);
+        assert_eq!(s.trashed.len(), 1);
+        assert_eq!(s.trashed[0].tip, tip);
+        assert_eq!(s.trashed[0].restore, "git branch ff refs/agentvc/trash/ff");
+        git(&f.w1, &["branch", "ff", "refs/agentvc/trash/ff"]);
+        assert_eq!(rev(&f.w1, "ff"), tip);
     }
 }

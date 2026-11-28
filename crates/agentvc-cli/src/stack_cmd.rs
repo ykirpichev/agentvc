@@ -97,7 +97,9 @@ pub enum StackCmd {
         /// Use the trunk as already fetched.
         #[arg(long)]
         no_fetch: bool,
-        /// Keep merged branches in git (they still leave the stack).
+        /// Keep merged branches in git (they still leave the stack). Deleted
+        /// ones keep their tip under refs/agentvc/trash/<branch>; restore
+        /// with `git branch <branch> refs/agentvc/trash/<branch>`.
         #[arg(long)]
         keep_merged: bool,
         #[arg(long)]
@@ -763,14 +765,16 @@ fn dispatch(cwd: &Path, cmd: StackCmd) -> anyhow::Result<(Value, String)> {
                 text += &format!("fetched {} {}\n", w.base_ref(), short(&s.base));
             }
             for m in &s.merged {
-                text += &format!(
-                    "{m} is merged: removed from the stack{}\n",
-                    if s.deleted.contains(m) {
-                        " and deleted"
-                    } else {
-                        ""
+                match s.trashed.iter().find(|t| &t.branch == m) {
+                    Some(t) => {
+                        text += &format!(
+                            "{m} is merged: removed from the stack and deleted (was {}; restore with `{}`)\n",
+                            short(&t.tip),
+                            t.restore
+                        )
                     }
-                );
+                    None => text += &format!("{m} is merged: removed from the stack\n"),
+                }
             }
             if let Some(t) = &s.switched_to {
                 text += &format!("switched to {t}\n");
