@@ -123,7 +123,7 @@ Every command takes `--json`. Error codes: `needs_restack`, `push_rejected`,
 `no_trunk`, `parent_missing`, `branch_missing`, `message_required`,
 `nothing_to_split`, `bad_names`, `nothing_staged`, `nothing_to_absorb`,
 `dirty_worktree`, `no_conflicts`, `unresolved_conflicts`, `no_undo`,
-`already_undone`, `undo_conflict`. Workspace codes are listed under
+`already_undone`, `undo_conflict`, `undo_not_newest`, `undo_owned_elsewhere`. Workspace codes are listed under
 [Workspaces](#workspaces-every-window-from-anywhere).
 
 ## Coming from Graphite
@@ -163,8 +163,24 @@ showing them as a stack.
 `stack undo` keeps the last 50 changing commands per worktree
 (`<git-dir>/agentvc/stack-undo.json`), including edits made from the review
 UI or another window (`--workspace`); the UI's toasts offer Undo for them.
-It refuses with `undo_conflict` when a branch the command touched has moved
-since. Checkouts, `submit` and `give` are not recorded.
+Undo changes nothing and refuses with a stable code when:
+
+- `undo_not_newest`: `undo ID` names an older command while a later one
+  still stands (undoing it would throw the later ones away too); the error
+  lists the later commands to undo first.
+- `undo_conflict`: a branch the command touched has moved since, or left
+  this window's stack outside the log.
+- `undo_owned_elsewhere`: a branch the undo would change now belongs to
+  another window, or is checked out in another worktree.
+
+`give` is recorded: undoing it takes the branches back, only while the
+other window still has them, has nothing of its own stacked on them and has
+none checked out. `continue` and `abort` fold into the command that stopped
+on the conflict, so one undo reverses the whole restack. A command run with
+uncommitted changes (such as `create -a -m` or `modify`) is undone like
+`git reset --soft`: HEAD moves back and the changes stay staged. Undo keeps
+PR numbers (a push cannot be taken back). Checkouts and `submit` are not
+recorded.
 
 ## Pull requests
 
