@@ -32,7 +32,22 @@ describe('reviewHtml', () => {
     const html = offlineHtml({ state: 'offline', cspSource: 'c', nonce: 'n' })
     assert.match(html, /data-cmd="agentvc.startDaemon"/)
     assert.ok(!offlineHtml({ state: 'connecting', cspSource: 'c', nonce: 'n' }).includes('data-cmd="'))
-    assert.deepEqual([...WEBVIEW_COMMANDS], ['agentvc.startDaemon', 'agentvc.refresh'])
+    assert.deepEqual([...WEBVIEW_COMMANDS], ['agentvc.startDaemon', 'agentvc.refresh', 'agentvc.install', 'agentvc.setup'])
+  })
+
+  it('offers to install agentvc on the remote host when the CLI is missing', () => {
+    const html = offlineHtml({ state: 'nocli', machine: 'spark', folder: '/w', cspSource: 'c', nonce: 'n' })
+    assert.match(html, /not installed on spark/)
+    assert.match(html, /data-cmd="agentvc.install">Install agentvc on spark</)
+    assert.ok(!html.includes('agentvc.startDaemon'))
+  })
+
+  it('offers one-click set up when the folder has no space, not agentvc init', () => {
+    const html = offlineHtml({ state: 'nospace', machine: 'spark', folder: '/w', cspSource: 'c', nonce: 'n' })
+    assert.match(html, /data-cmd="agentvc.setup">Set up agentvc here</)
+    assert.ok(!html.includes('Run <code>agentvc init'))
+    assert.ok(!offlineHtml({ state: 'nospace', cspSource: 'c', nonce: 'n' }).includes('agentvc.setup'))
+    assert.ok(!offlineHtml({ state: 'nocli', machine: '<b>', cspSource: 'c', nonce: 'n' }).includes('<b>'))
   })
 
   it('takes the origin of a forwarded URL', () => {

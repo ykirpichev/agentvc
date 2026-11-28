@@ -10,6 +10,7 @@ import { execFile } from 'node:child_process'
 import * as path from 'node:path'
 import * as vscode from 'vscode'
 import { AgentvcError, cliRunner } from './client'
+import { resolveBinary } from './setup'
 import {
   branchDescription,
   canMoveOnto,
@@ -34,7 +35,7 @@ const MIME = 'application/vnd.code.tree.agentvc.stack'
 function cfg() {
   const c = vscode.workspace.getConfiguration('agentvc')
   return {
-    cliPath: c.get<string>('cliPath', 'agentvc') || 'agentvc',
+    cliPath: resolveBinary(c.get<string>('cliPath', 'agentvc') || 'agentvc') ?? (c.get<string>('cliPath', 'agentvc') || 'agentvc'),
     showOthers: c.get<boolean>('stack.showOtherWindows', true),
   }
 }

@@ -68,7 +68,21 @@ Fork and pull requests always run the CLI (`agentvc.cliPath`).
 
 The `agentvc` CLI and the `agentvcd` daemon on `PATH` (or set
 `agentvc.cliPath` and `agentvc.daemonPath`), and a repository set up with
-`agentvc init`.
+`agentvc init`. The panel does both for you: when the CLI is missing it offers
+**Install agentvc on <host>** (runs `scripts/get.sh` into `~/.local/bin` in a
+terminal), and when the folder has no space it offers **Set up agentvc here**
+(`agentvc init` at the repository top, then starts agentvcd). A bare
+`agentvc.cliPath` is looked up on PATH, then in `~/.local/bin`, `~/.cargo/bin`,
+`/usr/local/bin` and `/opt/homebrew/bin`, since editors started from a dock or
+over Remote-SSH often miss `~/.local/bin`.
+
+### Remote-SSH and containers
+
+The extension runs on the workspace side (`extensionKind: workspace`), so in a
+Remote-SSH window agentvc, the space and agentvcd all live on the remote host,
+and the review frame reaches the daemon through a forwarded port. Install the
+`.vsix` in the remote window too (*Install in SSH: host*) if your editor does not
+do it for you.
 
 ## Install
 

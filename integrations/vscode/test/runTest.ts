@@ -71,6 +71,43 @@ async function main() {
   } finally {
     rmSync(workspace, { recursive: true, force: true })
   }
+
+  // A plain git repository with no space: the panel must set it up itself.
+  const fresh = makeFreshRepo()
+  try {
+    await runTests({
+      extensionDevelopmentPath: ext,
+      extensionTestsPath: path.resolve(__dirname, 'suite/index'),
+      vscodeExecutablePath: process.env.VSCODE_EXECUTABLE || undefined,
+      launchArgs: [fresh, '--disable-extensions', '--disable-workspace-trust'],
+      extensionTestsEnv: { AGENTVC_BIN_DIR: bin, AGENTVC_FIXTURE: fresh, AGENTVC_SUITE: 'setup' },
+    })
+  } catch (e) {
+    console.error('set up tests failed:', e)
+    process.exitCode = 1
+  } finally {
+    rmSync(fresh, { recursive: true, force: true })
+  }
+}
+
+/** A git repository without an agentvc space, set to a CLI that is not there. */
+export function makeFreshRepo(): string {
+  const dir = mkdtempSync(path.join(tmpdir(), 'agentvc-fresh-'))
+  const env = { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' }
+  execFileSync('git', ['init', '-q'], { cwd: dir, env })
+  writeFileSync(path.join(dir, 'a.txt'), 'one\n')
+  execFileSync('git', ['add', '.'], { cwd: dir, env })
+  execFileSync('git', ['commit', '-qm', 'init'], { cwd: dir, env })
+  mkdirSync(path.join(dir, '.vscode'))
+  writeFileSync(
+    path.join(dir, '.vscode', 'settings.json'),
+    JSON.stringify({
+      'agentvc.daemonUrl': 'http://127.0.0.1:9',
+      'agentvc.cliPath': path.join(dir, 'missing', 'agentvc'),
+      'agentvc.daemonPath': path.join(bin, 'agentvcd'),
+    }),
+  )
+  return dir
 }
 
 if (require.main === module) void main()

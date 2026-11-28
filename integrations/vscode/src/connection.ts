@@ -2,15 +2,22 @@
 // agentvcd, one we start ourselves, or the CLI as a fallback. Turns the
 // daemon's WebSocket events into one debounced "changed" signal.
 
-import { spawn, type ChildProcess } from 'node:child_process'
+import { execFile, spawn, type ChildProcess } from 'node:child_process'
 import { existsSync, statSync } from 'node:fs'
+import * as os from 'node:os'
 import * as path from 'node:path'
 import * as vscode from 'vscode'
 import WebSocket from 'ws'
 import { AgentvcError, CliBackend, DaemonBackend, cliRunner, type Backend } from './client'
+import { INSTALL_COMMAND, machineLabel, resolveBinary, resolveDaemon } from './setup'
 import type { DaemonEvent } from './types'
 
-export type ConnState = 'connecting' | 'connected' | 'cli' | 'offline' | 'nospace'
+/**
+ * `nocli`: the agentvc CLI is not installed on the machine the workspace is
+ * on (the remote host in a Remote-SSH window). `nospace`: it is, but the
+ * folder has no space yet.
+ */
+export type ConnState = 'connecting' | 'connected' | 'cli' | 'offline' | 'nospace' | 'nocli'
 
 /** The directory holding `.agentvc` at or above `dir`. */
 export function findSpaceRoot(dir: string): string | undefined {
@@ -30,12 +37,22 @@ export function findSpaceRoot(dir: string): string | undefined {
 
 function config() {
   const c = vscode.workspace.getConfiguration('agentvc')
+  const cliSetting = c.get<string>('cliPath', 'agentvc') || 'agentvc'
+  const daemonSetting = c.get<string>('daemonPath', 'agentvcd') || 'agentvcd'
+  // Found on PATH or in ~/.local/bin (get.sh) and friends; undefined if missing.
+  const cli = resolveBinary(cliSetting)
   return {
     daemonUrl: c.get<string>('daemonUrl', 'http://127.0.0.1:7420'),
     autoStart: c.get<boolean>('autoStartDaemon', true),
-    cliPath: c.get<string>('cliPath', 'agentvc') || 'agentvc',
-    daemonPath: c.get<string>('daemonPath', 'agentvcd') || 'agentvcd',
+    cliSetting,
+    cli,
+    daemon: resolveDaemon(daemonSetting, cli),
   }
+}
+
+/** The machine the workspace (and this extension) runs on, as the panel names it. */
+export function machine(): string {
+  return machineLabel(vscode.env.remoteName, os.hostname())
 }
 
 /** Minimum gap between refreshes triggered by events; live runs poll no faster than this. */
@@ -83,10 +100,11 @@ export class Connection implements vscode.Disposable {
   cli(args: string[]): Promise<Record<string, unknown>> {
     const root = this._root ?? this.workspaceDir()
     if (!root) return Promise.reject(new AgentvcError('no_space', 'open a folder with an agentvc space'))
-    return cliRunner(config().cliPath, root, 10 * 60_000)(args)
+    const cfg = config()
+    return cliRunner(cfg.cli ?? cfg.cliSetting, root, 10 * 60_000)(args)
   }
 
-  private workspaceDir(): string | undefined {
+  workspaceDir(): string | undefined {
     return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath
   }
 
@@ -122,7 +140,8 @@ export class Connection implements vscode.Disposable {
     }
 
     if (!this._root) {
-      this.setState('nospace')
+      this._backend = undefined
+      this.setState(cfg.cli ? 'nospace' : 'nocli')
       return this._state
     }
 
@@ -136,9 +155,9 @@ export class Connection implements vscode.Disposable {
         this.stopChild()
       }
     }
-    if (cfg.autoStart || opts.forceStart) {
+    if ((cfg.autoStart || opts.forceStart) && cfg.daemon) {
       try {
-        const url = await this.startDaemon(cfg.daemonPath, this._root)
+        const url = await this.startDaemon(cfg.daemon, this._root)
         return this.useDaemon(new DaemonBackend(url))
       } catch (e) {
         this.log.appendLine(`could not start agentvcd: ${String(e)}`)
@@ -147,7 +166,13 @@ export class Connection implements vscode.Disposable {
     }
 
     // 3. The CLI.
-    const cli = new CliBackend(cliRunner(cfg.cliPath, this._root))
+    if (!cfg.cli) {
+      this.log.appendLine(`agentvc CLI not found (agentvc.cliPath = ${cfg.cliSetting}, PATH and ~/.local/bin searched)`)
+      this._backend = undefined
+      this.setState('nocli')
+      return this._state
+    }
+    const cli = new CliBackend(cliRunner(cfg.cli, this._root))
     try {
       await cli.attempts()
       this._backend = cli
@@ -159,6 +184,80 @@ export class Connection implements vscode.Disposable {
       this.setState(e instanceof AgentvcError && e.code === 'no_space' ? 'nospace' : 'offline')
     }
     return this._state
+  }
+
+  /**
+   * Installs agentvc on this machine (the remote host in a remote window)
+   * with the release installer, in a terminal so progress and errors show.
+   * On success, sets the folder up when it has no space yet.
+   */
+  async install(): Promise<boolean> {
+    if (process.platform === 'win32') {
+      void vscode.env.openExternal(vscode.Uri.parse('https://github.com/ykirpichev/agentvc/blob/main/docs/install.md'))
+      return false
+    }
+    const folder = vscode.workspace.workspaceFolders?.[0]
+    const task = new vscode.Task(
+      { type: 'shell', id: 'agentvc.install' },
+      folder ?? vscode.TaskScope.Global,
+      `Install agentvc on ${machine()}`,
+      'agentvc',
+      new vscode.ShellExecution(INSTALL_COMMAND),
+    )
+    task.presentationOptions = { reveal: vscode.TaskRevealKind.Always, panel: vscode.TaskPanelKind.Dedicated, clear: true }
+    const exec = await vscode.tasks.executeTask(task)
+    const code = await new Promise<number | undefined>((resolve) => {
+      const d = vscode.tasks.onDidEndTaskProcess((e) => {
+        if (e.execution !== exec) return
+        d.dispose()
+        resolve(e.exitCode)
+      })
+    })
+    if (code !== 0) {
+      void vscode.window.showErrorMessage(`agentvc: the installer failed (exit ${code ?? '?'}); see the terminal.`)
+      await this.connect()
+      return false
+    }
+    const state = await this.connect()
+    if (state === 'nocli') {
+      void vscode.window.showErrorMessage('agentvc: installed, but the CLI is still not found. Set agentvc.cliPath to its full path.')
+      return false
+    }
+    if (state === 'nospace') return this.setUp()
+    return true
+  }
+
+  /**
+   * Creates the space for the open folder (at its git repository's top, so a
+   * monorepo subfolder joins the whole checkout) and starts agentvcd.
+   */
+  async setUp(): Promise<boolean> {
+    const folder = this.workspaceDir()
+    if (!folder) {
+      void vscode.window.showWarningMessage('agentvc: open a folder first.')
+      return false
+    }
+    const cfg = config()
+    if (!cfg.cli) return this.install()
+    const dir = (await gitTop(folder)) ?? folder
+    const ok = await vscode.window.withProgress(
+      { location: vscode.ProgressLocation.Notification, title: `Setting up agentvc in ${path.basename(dir)}…` },
+      async () => {
+        try {
+          await cliRunner(cfg.cli!, dir)(['init'])
+          this.log.appendLine(`agentvc init in ${dir}`)
+        } catch (e) {
+          if (!(e instanceof AgentvcError && e.code === 'space_exists')) {
+            void vscode.window.showErrorMessage(`agentvc: set up failed: ${errorText(e)}`)
+            return false
+          }
+        }
+        return true
+      },
+    )
+    if (!ok) return false
+    const state = await this.connect({ forceStart: true })
+    return state === 'connected' || state === 'cli'
   }
 
   private useDaemon(d: DaemonBackend): ConnState {
@@ -302,6 +401,13 @@ export class Connection implements vscode.Disposable {
     this._onDidChange.dispose()
     this._onDidChangeState.dispose()
   }
+}
+
+/** The top of the git repository holding `dir`, if any. */
+function gitTop(dir: string): Promise<string | undefined> {
+  return new Promise((resolve) => {
+    execFile('git', ['rev-parse', '--show-toplevel'], { cwd: dir }, (err, stdout) => resolve(err ? undefined : stdout.trim() || undefined))
+  })
 }
 
 function samePath(a: string, b: string): boolean {
