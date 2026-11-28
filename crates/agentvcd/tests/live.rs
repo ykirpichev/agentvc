@@ -10,11 +10,15 @@ use http_body_util::BodyExt;
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
+/// The daemon token these tests run with.
+const TOKEN: &str = "test-token";
+
 async fn send(app: &axum::Router, method: &str, uri: &str) -> (StatusCode, Value) {
     let req = Request::builder()
         .method(method)
         .uri(uri)
         .header("host", "localhost:7420")
+        .header("x-agentvc-token", TOKEN)
         .body(Body::empty())
         .unwrap();
     let res = app.clone().oneshot(req).await.unwrap();
@@ -64,7 +68,7 @@ async fn live_lists_running_attempts_with_overlaps() {
         )
         .unwrap();
 
-    let app = agentvcd::router(AppState::start(&Config::new(w)).unwrap());
+    let app = agentvcd::router(AppState::start(&Config::new(w).with_token(TOKEN)).unwrap());
     let (s, v) = send(&app, "GET", "/api/live").await;
     assert_eq!(s, StatusCode::OK, "{v}");
     let ids: Vec<i64> = v

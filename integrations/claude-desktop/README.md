@@ -50,7 +50,8 @@ It is a Claude Code mod (a plugin with a hooks module). It polls the local
 daemon's JSON API (`/api/graph`, `/api/workspaces`, `/api/tasks`, `/api/live`)
 every 2 seconds through Claude Code's own HTTP client, so it needs nothing
 from the browser and agentvcd's localhost-only guard needs no change. Actions
-post to the same endpoints the web UI uses.
+post to the same endpoints the web UI uses, with the daemon token from
+`$AGENTVC_HOME/agentvcd.token` (default `~/.agentvc`).
 
 The tree is laid out by the web UI's own code: `sync-shared.sh` copies
 `ui/src/core/graph.ts`, `core/next.ts`, `core/stack.ts`, `core/words.ts`,

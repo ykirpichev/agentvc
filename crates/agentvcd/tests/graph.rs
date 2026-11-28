@@ -12,6 +12,9 @@ use http_body_util::BodyExt;
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
+/// The daemon token these tests run with.
+const TOKEN: &str = "test-token";
+
 fn git(dir: &Path, args: &[&str]) -> String {
     let out = std::process::Command::new("git")
         .arg("-C")
@@ -63,7 +66,7 @@ fn fixture(conflict: bool) -> (tempfile::TempDir, String) {
 }
 
 fn app(dir: &Path) -> axum::Router {
-    let mut config = Config::new(dir);
+    let mut config = Config::new(dir).with_token(TOKEN);
     config.actor = agentvcd::human_actor(Some("Ana"));
     agentvcd::router(AppState::start(&config).unwrap())
 }
@@ -77,7 +80,8 @@ async fn send(
     let req = Request::builder()
         .method(method)
         .uri(uri)
-        .header("host", "localhost:7420");
+        .header("host", "localhost:7420")
+        .header("x-agentvc-token", TOKEN);
     let req = match body {
         Some(b) => req
             .header("content-type", "application/json")

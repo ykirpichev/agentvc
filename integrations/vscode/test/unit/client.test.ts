@@ -1,5 +1,7 @@
 import * as assert from 'node:assert/strict'
-import { AgentvcError, CliBackend, DaemonBackend, type CliRunner } from '../../src/client'
+import * as os from 'node:os'
+import * as path from 'node:path'
+import { AgentvcError, CliBackend, DaemonBackend, tokenFile, type CliRunner } from '../../src/client'
 
 function fakeFetch(routes: Record<string, [number, unknown]>, seen: string[] = []): typeof fetch {
   return (async (input: string | URL | Request, init?: RequestInit) => {
@@ -22,6 +24,30 @@ describe('DaemonBackend', () => {
     await d.abandon(3, 'dead end')
     assert.equal(seen[1], 'POST http://127.0.0.1:7420/api/attempts/3/abandon {"reason":"dead end"}')
     assert.equal(d.eventsUrl, 'ws://127.0.0.1:7420/api/events')
+  })
+
+  it('sends the daemon token with changes, not with reads (#199)', async () => {
+    const heard: Array<[string, string | null]> = []
+    const f = (async (input: string | URL | Request, init?: RequestInit) => {
+      const h = new Headers(init?.headers)
+      heard.push([`${init?.method ?? 'GET'} ${String(input)}`, h.get('x-agentvc-token')])
+      return new Response(JSON.stringify({ attempt: { id: 3 }, closed_siblings: [] }), { status: 200 })
+    }) as typeof fetch
+    const d = new DaemonBackend('http://127.0.0.1:7420', f, 1000, async () => 'sekret')
+    await d.tasks()
+    await d.promote(3)
+    assert.deepEqual(heard, [
+      ['GET http://127.0.0.1:7420/api/tasks', null],
+      ['POST http://127.0.0.1:7420/api/attempts/3/promote', 'sekret'],
+    ])
+    const none = new DaemonBackend('http://x', f, 1000, async () => null)
+    await none.stop(1)
+    assert.equal(heard[2][1], null)
+  })
+
+  it('reads the token from $AGENTVC_HOME/agentvcd.token', () => {
+    assert.equal(tokenFile({ AGENTVC_HOME: '/h' }), path.join('/h', 'agentvcd.token'))
+    assert.equal(tokenFile({}), path.join(os.homedir(), '.agentvc', 'agentvcd.token'))
   })
 
   it('returns null for a file missing at a ref, and throws stable codes otherwise', async () => {

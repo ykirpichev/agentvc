@@ -4,6 +4,7 @@
 
 import { execFile } from 'node:child_process'
 import { readFile } from 'node:fs/promises'
+import * as os from 'node:os'
 import * as path from 'node:path'
 import type {
   ActionResponse,
@@ -59,6 +60,23 @@ export interface Backend {
 
 type FetchLike = typeof fetch
 
+/** Where agentvcd keeps the token changes need (#199): `$AGENTVC_HOME/agentvcd.token`. */
+export function tokenFile(env: NodeJS.ProcessEnv = process.env): string {
+  return path.join(env.AGENTVC_HOME || path.join(os.homedir(), '.agentvc'), 'agentvcd.token')
+}
+
+/** The daemon token, or null when there is none yet. */
+export async function readDaemonToken(): Promise<string | null> {
+  try {
+    return (await readFile(tokenFile(), 'utf8')).trim() || null
+  } catch {
+    return null
+  }
+}
+
+/** The header that carries it. */
+export const TOKEN_HEADER = 'x-agentvc-token'
+
 /** agentvcd's JSON API. */
 export class DaemonBackend implements Backend {
   readonly kind = 'daemon' as const
@@ -68,6 +86,8 @@ export class DaemonBackend implements Backend {
     baseUrl: string,
     private readonly fetchImpl: FetchLike = fetch,
     private readonly timeoutMs = 10_000,
+    /** Read before each change, so a new token is picked up. */
+    readonly token: () => Promise<string | null> = readDaemonToken,
   ) {
     this.baseUrl = baseUrl.replace(/\/+$/, '')
   }
@@ -108,10 +128,11 @@ export class DaemonBackend implements Backend {
     return this.request<T>(`/api${p}${q ? `?${q}` : ''}`)
   }
 
-  private post<T>(p: string, body?: unknown): Promise<T> {
+  private async post<T>(p: string, body?: unknown): Promise<T> {
+    const token = await this.token()
     return this.request<T>(`/api${p}`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { 'content-type': 'application/json', ...(token ? { [TOKEN_HEADER]: token } : {}) },
       body: body === undefined ? undefined : JSON.stringify(body),
     })
   }

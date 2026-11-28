@@ -53,6 +53,7 @@ import type {
   SearchResponse,
 } from './types'
 import { apiUrl } from '../core/base'
+import { tokenHeaders } from '../core/token'
 
 /** An error from the daemon, carrying its stable `code`. */
 export class ApiError extends Error {
@@ -90,7 +91,9 @@ async function del<T>(path: string): Promise<T> {
 async function request<T>(url: string, init: RequestInit = {}): Promise<T> {
   let res: Response
   try {
-    res = await fetch(url, { ...init, headers: { accept: 'application/json', ...init.headers } })
+    // Reads go without the token; anything that changes the space needs it.
+    const auth = (init.method ?? 'GET') === 'GET' ? {} : tokenHeaders()
+    res = await fetch(url, { ...init, headers: { accept: 'application/json', ...auth, ...init.headers } })
   } catch (e) {
     throw new ApiError(0, 'offline', `cannot reach agentvcd (${String(e)})`)
   }

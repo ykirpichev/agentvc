@@ -174,6 +174,29 @@ test('Sync and Submit stack act on this window', async ($, on) => {
   await ui.unmount()
 })
 
+test('changes carry the daemon token from $AGENTVC_HOME, reads do not (#199)', async ($, on) => {
+  const clock = mock.clock(on)
+  engine(on)
+  const heard: Array<[string, unknown]> = []
+  on('env.get', (_, e) => ({ value: (e as { name: string }).name === 'AGENTVC_HOME' ? '/home/me/.avc' : undefined }))
+  on('fs.read', (_, e) => {
+    if ((e as { path: string }).path !== '/home/me/.avc/agentvcd.token') throw new Error('ENOENT')
+    return { value: 'T0K\n' }
+  })
+  on('http.fetch', (_, e) => {
+    const h = (e.init?.headers ?? {}) as Record<string, string>
+    heard.push([`${e.init?.method ?? 'GET'} ${new URL(e.url).pathname}`, h['x-agentvc-token']])
+    return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify(FIXTURE[new URL(e.url).pathname + new URL(e.url).search] ?? { outcome: 'applied', request_id: 'r1', workspace: MAIN_WS, result: { restack: { conflict: null } } }) } }
+  })
+  await $.session.start({ cwd: HERE, surface: 'desktop', isInteractive: true })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await ui.press({ key: 'sync' })
+  expect(heard.filter(([c]) => c.startsWith('GET')).every(([, t]) => t === undefined)).toBe(true)
+  expect(heard.find(([c]) => c.startsWith('POST'))).toEqual([`POST /api/workspaces/${MAIN_WS}/stack`, 'T0K'])
+  await ui.unmount()
+})
+
 test('a branch checks out, and moves onto another branch by press', async ($, on) => {
   const clock = mock.clock(on)
   engine(on)

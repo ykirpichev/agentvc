@@ -16,6 +16,9 @@ use http_body_util::BodyExt;
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
+/// The daemon token these tests run with.
+const TOKEN: &str = "test-token";
+
 fn git(dir: &Path, args: &[&str]) {
     let out = Command::new("git")
         .args(args)
@@ -95,6 +98,7 @@ async fn send(
         .method(method)
         .uri(uri)
         .header("host", "localhost:7420")
+        .header("x-agentvc-token", TOKEN)
         .header("content-type", "application/json");
     if relayed {
         req = req.header("x-agentvc-relay", "1");
@@ -118,7 +122,7 @@ async fn send(
 async fn comment_send_reply_resolve() {
     let (_tmp, main) = fixture();
     shared_env();
-    let state = AppState::start(&Config::new(&main)).unwrap();
+    let state = AppState::start(&Config::new(&main).with_token(TOKEN)).unwrap();
     let app = agentvcd::router(state);
     let (_, ws) = send(&app, "GET", "/api/workspaces", None, false).await;
     let wid = ws["workspaces"][0]["id"].as_str().unwrap().to_string();
@@ -283,7 +287,7 @@ async fn comment_send_reply_resolve() {
 async fn a_review_sent_while_an_agent_works_starts_its_next_turn() {
     let (_tmp, main) = fixture();
     shared_env();
-    let state = AppState::start(&Config::new(&main)).unwrap();
+    let state = AppState::start(&Config::new(&main).with_token(TOKEN)).unwrap();
     let app = agentvcd::router(state);
     let (s, v) = send(
         &app,

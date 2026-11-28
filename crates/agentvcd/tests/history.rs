@@ -11,10 +11,14 @@ use http_body_util::BodyExt;
 use serde_json::Value;
 use tower::ServiceExt;
 
+/// The daemon token these tests run with.
+const TOKEN: &str = "test-token";
+
 async fn get(app: &axum::Router, uri: &str) -> (StatusCode, Value) {
     let req = Request::builder()
         .uri(uri)
         .header("host", "localhost:7420")
+        .header("x-agentvc-token", TOKEN)
         .body(Body::empty())
         .unwrap();
     let res = app.clone().oneshot(req).await.unwrap();
@@ -51,7 +55,7 @@ async fn query_and_blame() {
         )
         .unwrap();
     drop(space);
-    let app = agentvcd::router(AppState::start(&Config::new(w)).unwrap());
+    let app = agentvcd::router(AppState::start(&Config::new(w).with_token(TOKEN)).unwrap());
 
     let (st, v) = get(&app, "/api/query?task=t1&touched=x.py&meta=tests=pass").await;
     assert_eq!(st, StatusCode::OK, "{v}");

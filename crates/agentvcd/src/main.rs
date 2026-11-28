@@ -1,7 +1,9 @@
 //! `agentvcd`: serve the review UI and JSON API for one agentvc space.
 //!
 //! Binds to 127.0.0.1 only. Prints one JSON line with `--json` once it is
-//! listening, so scripts and agents can read the URL.
+//! listening, so scripts and agents can read the URL. Changes through the API
+//! need the token in `$AGENTVC_HOME/agentvcd.token` (#199); the review UI's
+//! pages carry it.
 
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
@@ -134,6 +136,24 @@ async fn main() -> ExitCode {
         None => None,
     };
 
+    // The token every change must carry, shared by this user's daemons and
+    // kept across restarts so an open review UI keeps working.
+    if let Some(path) = agentvcd::auth::token_file() {
+        match agentvcd::auth::load_or_create_token(&path) {
+            Ok(t) => {
+                config.token = Some(t);
+                config.token_file = Some(path);
+            }
+            Err(e) => {
+                return fail(
+                    cli.json,
+                    "token_file",
+                    format!("cannot keep the daemon token in {}: {e}", path.display()),
+                )
+            }
+        }
+    }
+
     let state = match AppState::start(&config) {
         Ok(s) => s,
         Err(e) => return fail(cli.json, e.code(), e.to_string()),
@@ -153,7 +173,7 @@ async fn main() -> ExitCode {
     if cli.json {
         println!(
             "{}",
-            json!({ "ok": true, "url": url, "workdir": state.workdir(), "actor": state.actor(), "space": space_name, "cloud": cli.cloud })
+            json!({ "ok": true, "url": url, "workdir": state.workdir(), "actor": state.actor(), "space": space_name, "cloud": cli.cloud, "token_file": state.token_file() })
         );
     } else {
         println!(

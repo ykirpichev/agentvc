@@ -11,6 +11,9 @@ use http_body_util::BodyExt;
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
+/// The daemon token these tests run with.
+const TOKEN: &str = "test-token";
+
 /// Task t1 with three attempts forked from a1:
 /// a2 passed (lib.rs -> 2, adds new.txt, a passing check costing $0.25),
 /// a3 passed (lib.rs -> 2 too, edits keep.txt, $0.50 as a string),
@@ -64,7 +67,7 @@ fn fixture() -> tempfile::TempDir {
 }
 
 fn app(dir: &Path) -> axum::Router {
-    let mut config = Config::new(dir);
+    let mut config = Config::new(dir).with_token(TOKEN);
     config.actor = agentvcd::human_actor(Some("Ana"));
     agentvcd::router(AppState::start(&config).unwrap())
 }
@@ -90,7 +93,8 @@ async fn send(
     let req = Request::builder()
         .method(method)
         .uri(uri)
-        .header("host", "localhost:7420");
+        .header("host", "localhost:7420")
+        .header("x-agentvc-token", TOKEN);
     let req = match body {
         Some(b) => req
             .header("content-type", "application/json")
@@ -354,6 +358,7 @@ async fn actions_change_status() {
     // Writes are refused from foreign origins like every other request.
     let req = Request::post("/api/attempts/a1/mark")
         .header("host", "localhost:7420")
+        .header("x-agentvc-token", TOKEN)
         .header("origin", "https://evil.example")
         .header("content-type", "application/json")
         .body(Body::from(r#"{"status":"failed"}"#))

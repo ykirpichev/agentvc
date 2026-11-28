@@ -32,6 +32,31 @@ agentvc stack create my-fix -am "Fix it"   # or start work from the UI
 
 Check it with `agentvc --version`.
 
+### Who can use the daemon
+
+`agentvcd` listens on 127.0.0.1 only and answers only requests addressed to
+`localhost`, `127.0.0.1` or `[::1]` (the `Host` header, nothing else in it)
+whose `Origin`, when there is one, is the daemon itself: other websites and
+pages on other localhost ports get `forbidden_host` or `forbidden_origin`.
+Reads and the UI's pages need nothing more. Anything that changes the space
+or runs code (every `POST`, `PUT`, `PATCH` and `DELETE`, including starting
+agents) also needs the daemon token in an `x-agentvc-token` header, else
+`401 token_required` (or `403 bad_token`). The token is in
+`$AGENTVC_HOME/agentvcd.token` (default `~/.agentvc/agentvcd.token`, mode
+600), made on first start and shared by your daemons. The review UI's pages
+carry it (other sites cannot read them: the `Host` check stops DNS rebinding
+and agentvcd sends no CORS headers); the VS Code / Cursor extension and the
+Claude panel read the file, and so can scripts:
+
+```sh
+curl -X POST -H "x-agentvc-token: $(cat ~/.agentvc/agentvcd.token)" \
+  localhost:7420/api/attempts/a3/mark -d '{"status":"passed"}' -H 'content-type: application/json'
+```
+
+Delete the file and restart `agentvcd` to change the token, then reload open
+review tabs. The token keeps web pages out; it does not stop other programs
+that can reach the port, which can read a page as well.
+
 ## 2. VS Code
 
 Download `agentvc.vsix` from the [latest release](https://github.com/ykirpichev/agentvc/releases/latest), then:

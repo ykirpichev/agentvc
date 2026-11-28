@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Sends agentvcd's token (`$AGENTVC_HOME/agentvcd.token`) with actions;
+  agentvcd now refuses changes without it (#199).
 - The review panel takes the editor's own look: its font, inputs, dropdowns,
   buttons and focus ring follow the current VS Code or Cursor theme.
 - Agent settings read like the editor's Settings, and the model is a dropdown

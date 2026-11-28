@@ -197,6 +197,11 @@ in their git directory, so they never show up as workspaces.
 
 ## Daemon API
 
+Every call that changes something needs the daemon token
+(`x-agentvc-token`, from `$AGENTVC_HOME/agentvcd.token`; see
+[install](install.md#who-can-use-the-daemon)), so no other local user or
+web page can start agents or set their commands.
+
 - `GET /api/agents[?all=1]`: agents newest first, plus `needs_you`,
   `working`, `limit`, `machine` and `can_steer`.
 - `POST /api/agents` with `{workspace, from, at?, prompt, mode: "new"|"revise", runner?, model?, check?, permissions?, command?}`.
