@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.1
 
 - The panel sets itself up: *Install agentvc on <host>* when the CLI is
   missing (the remote host in a Remote-SSH window), *Set up agentvc here* when
