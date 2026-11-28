@@ -44,6 +44,13 @@ pub enum AgentCmd {
         /// Defaults to the workspace's.
         #[arg(long)]
         permissions: Option<String>,
+        /// Land its work by itself when it finishes with its checks passing
+        /// (the default unless the workspace turns it off).
+        #[arg(long, overrides_with = "no_auto_land")]
+        auto_land: bool,
+        /// Wait for `agentvc agent land` instead.
+        #[arg(long)]
+        no_auto_land: bool,
         /// What the agent should do.
         #[arg(required = true, num_args = 1.., trailing_var_arg = true)]
         prompt: Vec<String>,
@@ -172,6 +179,8 @@ pub fn run(cwd: &Path, cmd: AgentCmd) -> anyhow::Result<(Value, String)> {
             command,
             runner,
             permissions,
+            auto_land,
+            no_auto_land,
             prompt,
         } => {
             let a = agent::start(
@@ -187,6 +196,11 @@ pub fn run(cwd: &Path, cmd: AgentCmd) -> anyhow::Result<(Value, String)> {
                     command,
                     runner,
                     permissions,
+                    auto_land: match (auto_land, no_auto_land) {
+                        (true, _) => Some(true),
+                        (_, true) => Some(false),
+                        _ => None,
+                    },
                     exe: exe()?,
                 },
             )?;

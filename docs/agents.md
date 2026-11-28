@@ -37,6 +37,21 @@ losing track of them.
    Landing goes through the workspace's edit queue. If an agent is working
    in that workspace's own checkout, the edit waits until it stops.
 
+6. **Auto-land** (on by default): when a turn ends with its checks passing
+   (or there are none), the agent lands by itself, as a new branch or a new
+   version as chosen at start, and you go straight to reviewing the branch
+   on your stack. Failing checks, failures and stops still wait for you. A
+   landing that can't happen (a revised branch moved meanwhile) leaves the
+   agent ready for review with the reason. Turn it off per workspace
+   (`agentvc workspace agents --auto-land false`, or the Agent settings
+   form), or per agent (`agent start --no-auto-land` / `--auto-land`, or the
+   "Land automatically" box in Start agent).
+7. **A landed agent keeps listening.** Reply to it, or send review comments
+   on the branch its work landed on, and it gets a fresh worktree at that
+   branch's tip; its next result lands as a new version of the branch
+   (by itself with auto-land). It stays listed while that branch is on the
+   stack.
+
 ## In the review UI
 
 - **Sidebar**: each agent is a line under the branch it started from (under
@@ -69,7 +84,8 @@ state across three workspaces.
 | `stopped` | Stopped | 4th | `land`, `reply` to continue, or `discard` |
 | `queued` | Waiting for a slot | no | nothing: it starts when a slot frees up |
 | `running` | Working | no | watch its last step, or `stop` it |
-| `landed`, `discarded` | | no | kept for history (`ls --all`) |
+| `landed` | Landed | no | review its branch; `reply` (or review comments on that branch) sends it back to revise it |
+| `discarded` | | no | kept for history (`ls --all`) |
 
 An agent is **stale** when its start branch moved after the agent started.
 It can still land as a new branch, and the stack's restack moves it on top.
@@ -121,10 +137,11 @@ agentvc workspace agents --clear                           # back to the default
 | `permissions` | `auto` (default), `edits`, `ask`, `bypass` | Claude Code: auto mode (a safety check approves routine steps, risky ones come to you); edit files and ask before commands; ask before every change; never ask (no checks) |
 | `sandbox` | `true`, `false` (default) | Claude Code: run commands in its sandbox, so they write only inside the agent's worktree |
 | `max` | number | agents working at once in this workspace; the rest wait |
+| `auto_land` | `true` (default), `false` | land finished work with passing checks by itself, or wait for Land |
 
 They are kept in the workspace's `stack.json`, so `stack submit` publishes
 them with the workspace and other machines see them. A start can override
-any of them (`agent start --runner/--model/--check/--permissions`, or "Just
+any of them (`agent start --runner/--model/--check/--permissions/--no-auto-land`, or "Just
 for this agent" in the UI). Unset fields fall back to the repo's
 `git config` below, then the defaults. (Through a hosted service, now
 paused, nobody can set `command` or `check` (`remote_shell_off`) or choose
@@ -166,7 +183,7 @@ Repo-wide defaults and the machine's cap:
 | `git config` | Default | Meaning |
 | --- | --- | --- |
 | `agentvc.agent-check` | none | check command run when an agent stops, e.g. `cargo test --workspace` |
-| `agentvc.agent-runner`, `-model`, `-permissions`, `-sandbox`, `-command` | | defaults for the workspace settings above |
+| `agentvc.agent-runner`, `-model`, `-permissions`, `-sandbox`, `-command`, `-auto-land` | | defaults for the workspace settings above |
 | `agentvc.agents-max` | 8 | safety cap: agents working at once on this machine across all workspaces; the rest wait as `queued` |
 | `agentvc.agent-worktrees` | `~/.agentvc/worktrees/<repo>-<hash>` | where agent worktrees go (never under `.git`: Claude Code refuses to edit there) |
 
@@ -205,4 +222,4 @@ says how to allow it.
 `allow_required`, `not_running`, `not_ready`, `nothing_to_land`,
 `branch_moved`, `agent_closed`, `not_an_agent`, `remote_agents_off`,
 `bad_setting`, `command_required`, `remote_shell_off`, `message_required`,
-`bad_branch`, `branch_exists`, `nothing_to_commit`.
+`bad_branch`, `branch_exists`, `nothing_to_commit`, `landing_queued`.

@@ -23,7 +23,7 @@ git -C "$D/invoices" config agentvc.agents-max 4
 git -C "$D/invoices" config agentvc.agent-worktrees "$D/agents"
 start() { # workspace from command check prompt...
   local ws=$1 from=$2 cmd=$3 check=$4; shift 4
-  (cd "$D/win-$ws" && $AV agent start --json --from "$from" --command "$cmd" ${check:+--check "$check"} "$@" | sed -n 's/.*"id": *"\(ag[0-9]*\)".*/\1/p' | head -1)
+  (cd "$D/win-$ws" && $AV agent start --json --from "$from" --command "$cmd" ${check:+--check "$check"} "${AUTO:---no-auto-land}" "$@" | sed -n 's/.*"id": *"\(ag[0-9]*\)".*/\1/p' | head -1)
 }
 step() { printf 'sleep 1; echo "%s"; ' "$@"; }
 wait_state() { # id state
@@ -35,14 +35,14 @@ wait_state() { # id state
 
 # Ready to review: a small change with passing checks.
 r1=$(start dates iso-dates "$(step 'Read src/parse/date.ts' 'Edit src/parse/date.ts')printf '\nexport const MIN_YEAR = 1900\n' >> src/parse/date.ts" "npm test" "Reject dates before 1900, with tests")
-# Ready, then land it: shows up as a new branch on the stack.
-r2=$(start export csv-header "$(step 'Edit src/report/export.ts')printf '\nexport const csvQuote = (s: string) => JSON.stringify(s)\n' >> src/report/export.ts" "npm test" "Quote CSV fields that contain commas")
+# Lands by itself (auto-land): shows up as a new branch on the stack.
+r2=$(AUTO=--auto-land start export csv-header "$(step 'Edit src/report/export.ts')printf '\nexport const csvQuote = (s: string) => JSON.stringify(s)\n' >> src/report/export.ts" "npm test" "Quote CSV fields that contain commas")
 # Tests failing.
 t1=$(start pdf pdf-fonts "$(step 'Read src/pdf/fonts.ts' 'Edit src/pdf/fonts.ts')printf 'export const fallback = \"Helvetica\"\n' >> src/pdf/fonts.ts" "npm test" "Fall back to Helvetica when a font is missing")
 # Failed.
 f1=$(start export csv-docs "$(step 'Read README.md')sleep 0.3; echo 'error: could not find docs/export.md' >&2; exit 2" "" "Move the CSV docs into docs/export.md")
-for a in $r1 $r2 $t1 $f1; do wait_state "$a" '(ready|tests_failing|failed)'; done
-$AV agent land "$r2" >/dev/null
+for a in $r1 $t1 $f1; do wait_state "$a" '(ready|tests_failing|failed)'; done
+wait_state "$r2" landed
 
 # A ready agent whose start branch moved since (stale).
 st=$(start pdf pdf-logo "$(step 'Edit src/pdf/images.ts')printf 'export const logoWidth = 120\n' >> src/pdf/images.ts" "npm test" "Scale the logo to 120px")

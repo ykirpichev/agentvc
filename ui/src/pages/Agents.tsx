@@ -13,7 +13,7 @@ import { DiffView } from '../components/DiffView'
 import { ReviewBar, ThreadList } from '../components/Comments'
 import { scrollToThread, useThreads } from '../core/comments'
 import { useToast } from '../components/Toaster'
-import { agentLink, agentState, agentsOn, CLAUDE_MODELS, CONFLICT_WORDS, DEFAULT_PERMISSIONS, needsYou, PERMISSION_WORDS, PERMISSIONS_LINK, resultWords, RUNNER_WORDS, settingsLine, TOOL_MODEL_HOME, working } from '../core/agents'
+import { agentLink, agentState, agentsOn, canFollowUp, CLAUDE_MODELS, CONFLICT_WORDS, DEFAULT_PERMISSIONS, needsYou, PERMISSION_WORDS, PERMISSIONS_LINK, resultWords, RUNNER_WORDS, settingsLine, TOOL_MODEL_HOME, working } from '../core/agents'
 import { branchLink, codeLink } from '../core/links'
 import { joinPath } from '../core/editor'
 import { duration, money, plural, timeAgo } from '../lib/format'
@@ -328,6 +328,9 @@ export function StartAgent({
   const [runner, setRunner] = useState<AgentRunner | ''>('')
   const [model, setModel] = useState('')
   const [check, setCheck] = useState('')
+  // Unset follows the workspace (auto-land is on unless it turns it off).
+  const [autoLandPick, setAutoLand] = useState<boolean | undefined>(undefined)
+  const autoLand = autoLandPick ?? settings?.auto_land ?? true
   const toast = useToast()
   const { refresh } = useLive()
   const [busy, setBusy] = useState(false)
@@ -344,6 +347,7 @@ export function StartAgent({
         runner: runner || undefined,
         model: model.trim() || undefined,
         check: check.trim() || undefined,
+        auto_land: autoLandPick,
       })
       toast.ok(<>Started <Link to={agentLink(r.agent.id)}>{r.agent.title}</Link>.</>, { undo: false })
       setPrompt('')
@@ -385,6 +389,9 @@ export function StartAgent({
             </button>
           </div>
         )}
+        <label className="ag-check" title="When it finishes with its checks passing, its work goes onto the stack by itself: no Land click">
+          <input type="checkbox" checked={autoLand} onChange={(e) => setAutoLand(e.target.checked)} /> Land automatically
+        </label>
         <button type="button" className="linkish" onClick={() => setOpts((o) => !o)}>
           Just for this agent
         </button>
@@ -419,8 +426,12 @@ export function StartAgent({
       )}
       <p className="muted ag-hint">
         {mode === 'new'
-          ? `It works in its own copy; your checkout is not touched. After you review it, it lands as a new branch on top of ${label}.`
-          : `It works in its own copy. After you review it, it becomes the new version of ${label} and the branches above are updated.`}
+          ? autoLand
+            ? `It works in its own copy; your checkout is not touched. When it finishes with its checks passing, it lands as a new branch on top of ${label}, ready for you to review.`
+            : `It works in its own copy; your checkout is not touched. After you review it, it lands as a new branch on top of ${label}.`
+          : autoLand
+            ? `It works in its own copy. When it finishes with its checks passing, it becomes the new version of ${label} and the branches above are updated, ready for you to review.`
+            : `It works in its own copy. After you review it, it becomes the new version of ${label} and the branches above are updated.`}
       </p>
       <p className="muted ag-hint">
         Runs with {settingsLine(settings)}
@@ -711,6 +722,18 @@ export function AgentSettingsForm({ workspace }: { workspace: string }) {
             </Select>
           </Setting>
         )}
+        <Setting id={id('auto_land')} name="Land automatically" help="When an agent finishes with its checks passing, its work goes onto the stack by itself (as chosen at start: new branch on top or new version), ready to review. Off: wait for Land.">
+          <Select
+            id={id('auto_land')}
+            value={s.auto_land === undefined ? '' : s.auto_land ? 'on' : 'off'}
+            disabled={!steer}
+            onChange={(v) => set({ auto_land: v === '' ? undefined : v === 'on' })}
+          >
+            <option value="">Default ({defaults.auto_land === false ? 'off' : 'on'})</option>
+            <option value="on">On</option>
+            <option value="off">Off</option>
+          </Select>
+        </Setting>
         <Setting id={id('max')} name="At once" help={`Agents working at the same time in this workspace. This machine runs at most ${machine_limit}.`}>
           <input
             id={id('max')}
@@ -807,7 +830,7 @@ export function AgentPage() {
   const { agent: a, steps } = data.data
   const q = a.question
   const files = a.result?.changes ?? a.result?.paths.map((path) => ({ path, kind: 'modified' as const })) ?? []
-  const canReply = q?.kind === 'ask' || a.state === 'ready' || a.state === 'tests_failing' || a.state === 'failed' || a.state === 'stopped'
+  const canReply = q?.kind === 'ask' || a.state === 'ready' || a.state === 'tests_failing' || a.state === 'failed' || a.state === 'stopped' || canFollowUp(a)
   const clashed = new Set(a.conflict?.paths ?? [])
   const shown = open ?? (a.mode === 'resolve' ? (files.find((f) => clashed.has(f.path))?.path ?? null) : null)
   return (
@@ -823,7 +846,9 @@ export function AgentPage() {
               <span className="mono">{a.branch}</span>
             </>
           ) : null}
-          {a.landed ? ` · landed on ${a.landed.branch}${a.landed.outcome === 'queued' ? ' (waiting for that workspace)' : ''}` : ''}
+          {a.landed
+            ? ` · landed ${a.landed.automatic ? 'automatically ' : ''}on ${a.landed.branch}${a.landed.outcome === 'queued' ? ' (waiting for that workspace)' : ''}`
+            : ''}
           {(a.state !== 'discarded' || a.result?.commit) && (
             <>
               {' · '}
@@ -871,9 +896,28 @@ export function AgentPage() {
       )}
       {!steer && <WatchOnly machine={a.machine} />}
       {steer && !q && <Actions a={a} />}
-      {steer && canReply && (
-        <ReplyBox a={a} placeholder={q?.kind === 'ask' ? 'Answer the agent…' : a.mode === 'resolve' ? 'Redo: say what to resolve differently…' : 'Reply: what should it do next?'} />
+      {canFollowUp(a) && (
+        <p className="muted ag-hint">
+          Its work is on <Link to={branchLink(a.workspace, a.landed!.branch)}>{a.landed!.branch}</Link>. Review it there; a reply or review comments send it
+          back to work, and its next result lands as a new version of {a.landed!.branch}
+          {a.auto_land ? ' by itself' : ''}.
+        </p>
       )}
+      {steer && canReply && (
+        <ReplyBox
+          a={a}
+          placeholder={
+            q?.kind === 'ask'
+              ? 'Answer the agent…'
+              : a.mode === 'resolve'
+                ? 'Redo: say what to resolve differently…'
+                : canFollowUp(a)
+                  ? `Reply: what should it change on ${a.landed!.branch}?`
+                  : 'Reply: what should it do next?'
+          }
+        />
+      )}
+      {a.land_error && a.state !== 'landed' && <p className="ag-err">Did not land by itself: {a.land_error}</p>}
       {a.mode === 'resolve' && a.conflict && (
         <section className="conf-box conf-agent" aria-label="The clash">
           <header>
@@ -945,7 +989,7 @@ export function AgentPage() {
                     kind={f.kind}
                     codeRef={`agent:${a.id}`}
                     localFile={a.state === 'landed' || a.state === 'discarded' ? undefined : joinPath(a.worktree, f.path)}
-                    comments={{ target, threads, readOnly: !steer || a.state === 'landed' || a.state === 'discarded' }}
+                    comments={{ target, threads, readOnly: !steer || a.state === 'discarded' || (a.state === 'landed' && !canFollowUp(a)) }}
                   />
                 )}
               </div>

@@ -1044,8 +1044,8 @@ pub struct Submitted {
 }
 
 /// The agent working on `target`, if any: the agent itself, or the newest
-/// agent (not landed or discarded) whose branch, start branch (when it
-/// revises it) or landing is this branch.
+/// agent whose branch or start branch (when it revises it) is this branch,
+/// or whose work landed on it.
 pub fn agent_for(cwd: &Path, target: &Target) -> Option<crate::agent::Agent> {
     match target.kind {
         TargetKind::Agent => crate::agent::show(cwd, &target.name).ok().map(|d| d.agent),
@@ -1055,10 +1055,19 @@ pub fn agent_for(cwd: &Path, target: &Target) -> Option<crate::agent::Agent> {
             let mut all = crate::agent::list(cwd, true).ok()?.agents;
             all.sort_by_key(|a| std::cmp::Reverse(a.created_at));
             all.into_iter().find(|a| {
-                !a.state.is_closed()
-                    && a.workspace == ws
-                    && (a.branch == target.name
-                        || (a.mode == crate::agent::Mode::Revise && a.start.branch == target.name))
+                a.workspace == ws
+                    && if a.state.is_closed() {
+                        // A landed agent takes review comments on the branch
+                        // its work landed on, and revises it.
+                        a.landed.as_ref().is_some_and(|l| {
+                            l.branch == target.name
+                                && l.outcome == crate::workspace::RequestStatus::Applied
+                        })
+                    } else {
+                        a.branch == target.name
+                            || (a.mode == crate::agent::Mode::Revise
+                                && a.start.branch == target.name)
+                    }
             })
         }
     }
@@ -1222,7 +1231,7 @@ pub fn submit(
             agent: None,
         });
     };
-    if a.state.is_done() {
+    if a.state.is_done() || a.state == crate::agent::AgentState::Landed {
         if let Some(exe) = exe {
             let text = format_review(&threads);
             let started = crate::agent::reply(cwd, &a.id, &text, exe)?;
@@ -1334,10 +1343,13 @@ pub fn queued_for_agent(cwd: &Path, a: &crate::agent::Agent) -> Result<Option<St
     if !file.exists() {
         return Ok(None);
     }
-    let targets = vec![
+    let mut targets = vec![
         Target::agent(&a.id),
         Target::branch(&a.workspace, &a.branch),
     ];
+    if a.mode == crate::agent::Mode::Revise {
+        targets.push(Target::branch(&a.workspace, &a.start.branch));
+    }
     let pending = undelivered(&read_store(&file)?, &targets, Some(&a.id));
     if pending.is_empty() {
         return Ok(None);

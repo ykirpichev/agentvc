@@ -236,7 +236,7 @@ async fn comment_send_reply_resolve() {
         "/api/agents",
         Some(json!({
             "workspace": "main", "from": "b1", "prompt": "Add c",
-            "command": "printf 'c1\\nc2\\n' > c.txt",
+            "command": "printf 'c1\\nc2\\n' > c.txt", "auto_land": false,
         })),
         false,
     )

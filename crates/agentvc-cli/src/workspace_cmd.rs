@@ -53,6 +53,10 @@ pub enum WorkspaceCmd {
         /// Agents working at once in this workspace.
         #[arg(long)]
         max: Option<usize>,
+        /// Land an agent's work by itself when it finishes with its checks
+        /// passing (default true), or wait for Land: true or false.
+        #[arg(long)]
+        auto_land: Option<bool>,
         /// What `stack restack|sync --resolve` (and the review UI) do with a
         /// branch that conflicts: agent (default: an agent resolves it in
         /// its own worktree for you to review) or manual (stop here).
@@ -398,6 +402,7 @@ pub fn run(cwd: &Path, cmd: WorkspaceCmd) -> anyhow::Result<(Value, String)> {
             permissions,
             sandbox,
             max,
+            auto_land,
             conflicts,
             clear,
         } => {
@@ -410,6 +415,7 @@ pub fn run(cwd: &Path, cmd: WorkspaceCmd) -> anyhow::Result<(Value, String)> {
                 permissions,
                 sandbox,
                 max,
+                auto_land,
                 conflicts,
             };
             let r = if clear || !given.is_empty() {
@@ -433,7 +439,7 @@ pub fn run(cwd: &Path, cmd: WorkspaceCmd) -> anyhow::Result<(Value, String)> {
                 text.push_str(&format!("  command      {c}\n"));
             }
             text.push_str(&format!(
-                "  model        {}\n  check        {}\n  permissions  {}\n  sandbox      {}\n  at once      {} (machine cap {})",
+                "  model        {}\n  check        {}\n  permissions  {}\n  sandbox      {}\n  auto-land    {}\n  at once      {} (machine cap {})",
                 eff.model.clone().unwrap_or_else(|| {
                     let runner = eff.runner.as_deref().unwrap_or("claude");
                     match r.tool_models.get(runner) {
@@ -444,6 +450,7 @@ pub fn run(cwd: &Path, cmd: WorkspaceCmd) -> anyhow::Result<(Value, String)> {
                 or(&eff.check, "none"),
                 or(&eff.permissions, agent::DEFAULT_PERMISSIONS),
                 if eff.sandbox.unwrap_or(false) { "on" } else { "off" },
+                if eff.auto_land.unwrap_or(agent::DEFAULT_AUTO_LAND) { "on" } else { "off" },
                 eff.max.map(|m| m.to_string()).unwrap_or_else(|| "no limit".into()),
                 r.machine_limit
             ));

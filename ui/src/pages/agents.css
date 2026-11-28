@@ -481,6 +481,19 @@
   margin: 4px 0 0;
 }
 
+.ag-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text-2);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.ag-check input {
+  margin: 0;
+}
+
 /* Workspace agent settings, laid out like the editor's Settings: a name, one
    line on what it does, then the control at a readable width. */
 .set-list {

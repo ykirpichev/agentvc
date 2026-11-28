@@ -18,6 +18,12 @@
 //! plain git in its worktree count the same way ([`Agent::stack`]); landing
 //! puts the whole chain on the workspace's stack, in order.
 //!
+//! With auto-land (a workspace setting, on by default, overridable per
+//! agent) a turn that ends with its checks passing lands by itself, so the
+//! person goes straight to reviewing the branch. A landed agent still takes
+//! replies and review comments: it gets a fresh worktree at the branch its
+//! work landed on, and its next result lands as a new version of it.
+//!
 //! Everything lives in files under `<git-common-dir>/agentvc/agents/agN/`,
 //! so the CLI, the daemon, the MCP server inside the agent and the worker
 //! process that supervises it all read and write the same state:
@@ -65,6 +71,8 @@ pub const RUNNERS: &[&str] = &["claude", "codex", "cursor", "command"];
 pub const PERMISSIONS: &[&str] = &["auto", "edits", "ask", "bypass"];
 /// The permission level when nothing sets one.
 pub const DEFAULT_PERMISSIONS: &str = "auto";
+/// Whether agents land by themselves when nothing says.
+pub const DEFAULT_AUTO_LAND: bool = true;
 /// What conflicts do, the default first.
 pub const CONFLICTS: &[&str] = &["agent", "manual"];
 
@@ -108,6 +116,11 @@ pub struct AgentSettings {
     /// Agents working at once in this workspace.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max: Option<usize>,
+    /// Land an agent's work by itself when it finishes with its checks
+    /// passing (default on): no Land click, the result is on the stack to
+    /// review.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_land: Option<bool>,
     /// What a restack that conflicts does when you asked agentvc to resolve
     /// it: `agent` (an agent resolves each conflicting branch in its own
     /// worktree and you review the result; default) or `manual` (it stops
@@ -321,6 +334,9 @@ pub struct Landing {
     /// The stack branch that now holds the work.
     pub branch: String,
     pub at: i64,
+    /// Landed by itself when the agent finished (auto-land), not by Land.
+    #[serde(default)]
+    pub automatic: bool,
 }
 
 /// One message of the conversation with the agent.
@@ -418,6 +434,12 @@ pub struct Agent {
     pub error: Option<String>,
     #[serde(default)]
     pub landed: Option<Landing>,
+    /// Lands by itself when a turn ends with its checks passing.
+    #[serde(default)]
+    pub auto_land: bool,
+    /// Why the last automatic landing did not happen; it waits for Land.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub land_error: Option<String>,
     #[serde(default)]
     pub messages: Vec<Message>,
     /// [`Mode::Resolve`]: the restack it resolves. Its worktree starts at
@@ -756,6 +778,8 @@ pub struct StartRequest {
     pub runner: Option<String>,
     /// Claude Code permission level; defaults to the workspace's.
     pub permissions: Option<String>,
+    /// Land by itself when it finishes; defaults to the workspace's.
+    pub auto_land: Option<bool>,
     /// The `agentvc` program, for the worker and the MCP server.
     pub exe: PathBuf,
 }
@@ -803,6 +827,7 @@ impl AgentSettings {
                 .or_else(|| under.permissions.clone()),
             sandbox: self.sandbox.or(under.sandbox),
             max: self.max.or(under.max),
+            auto_land: self.auto_land.or(under.auto_land),
             conflicts: self.conflicts.clone().or_else(|| under.conflicts.clone()),
         }
     }
@@ -818,6 +843,7 @@ fn repo_defaults(w: &Window) -> AgentSettings {
         permissions: config(w, "agentvc.agent-permissions"),
         sandbox: config(w, "agentvc.agent-sandbox").map(|v| v == "true"),
         max: None,
+        auto_land: config(w, "agentvc.agent-auto-land").map(|v| v == "true"),
         conflicts: config(w, "agentvc.agent-conflicts"),
     }
 }
@@ -873,6 +899,7 @@ pub fn set_settings(
         permissions: blank(new.permissions),
         sandbox: new.sandbox,
         max: new.max,
+        auto_land: new.auto_land,
         conflicts: blank(new.conflicts),
     };
     new.validate()?;
@@ -1047,6 +1074,7 @@ fn start_inner(
         permissions: req.permissions.clone(),
         sandbox: None,
         max: None,
+        auto_land: req.auto_land,
         conflicts: None,
     };
     asked.validate()?;
@@ -1218,6 +1246,8 @@ fn start_inner(
         result: None,
         error: None,
         landed: None,
+        auto_land: eff.auto_land.unwrap_or(DEFAULT_AUTO_LAND),
+        land_error: None,
         messages: vec![Message {
             from: "you".into(),
             text: prompt.to_string(),
@@ -1346,6 +1376,8 @@ pub fn start_resolve(
         command: None,
         runner: None,
         permissions: None,
+        // Reviewed before it lands.
+        auto_land: Some(false),
         exe: exe.to_path_buf(),
     };
     start_inner(cwd, &req, Some(h))
@@ -1484,21 +1516,39 @@ pub fn list(cwd: &Path, all: bool) -> Result<AgentList> {
     let w = Window::open(cwd)?;
     let roots = space_roots(&w);
     let here = workspace::machine();
-    let mut windows: std::collections::HashMap<String, Option<Window>> = Default::default();
+    let windows: std::cell::RefCell<std::collections::HashMap<String, Option<Window>>> =
+        Default::default();
     let locals = workspace::space_locals(&w).unwrap_or_default();
-    let mut tips = |a: &Agent| -> Option<String> {
-        let win = windows.entry(a.workspace.clone()).or_insert_with(|| {
+    let with_window = |ws: &str, f: &mut dyn FnMut(&Window) -> Option<String>| {
+        let mut map = windows.borrow_mut();
+        let win = map.entry(ws.to_string()).or_insert_with(|| {
             locals
                 .iter()
-                .find(|l| l.record.id == a.workspace)
+                .find(|l| l.record.id == ws)
                 .and_then(|l| Window::open(&l.path).ok())
         });
-        let win = win.as_ref()?;
-        if a.start.trunk {
-            win.base()
-        } else {
-            win.branch_tip(&a.start.branch)
-        }
+        win.as_ref().and_then(f)
+    };
+    let mut tips = |a: &Agent| -> Option<String> {
+        with_window(&a.workspace, &mut |win| {
+            if a.start.trunk {
+                win.base()
+            } else {
+                win.branch_tip(&a.start.branch)
+            }
+        })
+    };
+    // A landed agent stays listed while the branch its work landed on is in
+    // its workspace's stack: it still takes replies and review comments.
+    let follows_up = |a: &Agent| -> bool {
+        a.state == AgentState::Landed
+            && a.landed.as_ref().is_some_and(|l| {
+                l.outcome == RequestStatus::Applied
+                    && with_window(&a.workspace, &mut |win| {
+                        win.tracks(&l.branch).then(String::new)
+                    })
+                    .is_some()
+            })
     };
     let mut agents: Vec<Agent> = Vec::new();
     for root in &roots {
@@ -1506,7 +1556,8 @@ pub fn list(cwd: &Path, all: bool) -> Result<AgentList> {
         for e in rd.flatten() {
             let dir = e.path();
             let Ok(a) = read_agent(&dir) else { continue };
-            if !all && a.state.is_closed() {
+            let a = settle_landing(&dir, a, &w);
+            if !all && a.state.is_closed() && !follows_up(&a) {
                 continue;
             }
             // Agents made before checkouts shared a space can share an id;
@@ -1593,7 +1644,8 @@ pub fn reply(cwd: &Path, id: &str, text: &str, exe: &Path) -> Result<Agent> {
                 format!("{id} is working; reply when it stops or asks"),
             ))
         }
-        AgentState::Landed | AgentState::Discarded => {
+        AgentState::Landed => reopen(cwd, &dir, &a)?,
+        AgentState::Discarded => {
             return Err(agent_err(
                 "agent_closed",
                 format!("{id} is {:?}", a.state).to_lowercase(),
@@ -1826,6 +1878,10 @@ fn remove_worktree(w: &Window, a: &Agent) {
 /// ([`Mode::Revise`]). Goes through the workspace's edit queue, so it waits
 /// while an agent works in that workspace's own checkout.
 pub fn land(cwd: &Path, id: &str) -> Result<(Agent, EditOutcome)> {
+    land_as(cwd, id, false)
+}
+
+fn land_as(cwd: &Path, id: &str, automatic: bool) -> Result<(Agent, EditOutcome)> {
     let dir = agent_dir(cwd, id)?;
     let a = read_agent(&dir)?;
     if !a.state.is_done() {
@@ -1900,25 +1956,53 @@ pub fn land(cwd: &Path, id: &str) -> Result<(Agent, EditOutcome)> {
         }
     }
     let landed_on = parent;
+    if a.mode == Mode::Revise {
+        // Refuse before the worktree goes, so the agent can go on.
+        let now_at = w.branch_tip(&a.start.branch);
+        if now_at.as_deref() != Some(a.start.commit.as_str()) {
+            return Err(agent_err_with(
+                "branch_moved",
+                format!(
+                    "{} changed since {id} started; land it as a new branch or ask it to start again from there",
+                    a.start.branch
+                ),
+                json!({ "branch": a.start.branch, "tip": now_at, "base": a.start.commit }),
+            ));
+        }
+    }
     // The branches must not stay checked out in the agent's worktree, or
     // the workspace could not check them out.
+    let head = git_in(&a.worktree)
+        .git(&["symbolic-ref", "--short", "-q", "HEAD"], None)
+        .ok()
+        .filter(|b| !b.is_empty())
+        .unwrap_or_else(|| a.branch.clone());
     remove_worktree(&w, &a);
-    // Branches above that conflict go to agents of their own (or stop for
-    // the person), as the workspace's `conflicts` setting says.
     let mut out = None;
-    for op in ops {
-        out = Some(workspace::edit_full(
+    for (i, op) in ops.into_iter().enumerate() {
+        // Branches above that conflict go to agents of their own (or stop
+        // for the person), as the workspace's `conflicts` setting says.
+        match workspace::edit_full(
             cwd,
             &a.workspace,
             op,
             Some(&from),
             false,
             workspace::OnConflict::Resolve,
-        )?);
+        ) {
+            Ok(o) => out = Some(o),
+            Err(e) => {
+                if i == 0 {
+                    // Nothing landed: give the agent its worktree back.
+                    restore_worktree(&w, &a, &head);
+                }
+                return Err(e);
+            }
+        }
     }
     let out = out.expect("at least one branch to land");
-    // Its own branch, when the work went elsewhere (reviews on branches of
-    // their own).
+    // Its own branch, when the work went elsewhere (a revise, or reviews on
+    // branches of their own).
     let own_unused = !parts.contains(&a.branch)
         && w.branch_tip(&a.branch).as_deref() == Some(a.start.commit.as_str());
     if own_unused {
@@ -1933,21 +2017,203 @@ pub fn land(cwd: &Path, id: &str) -> Result<(Agent, EditOutcome)> {
         request_id: out.request_id.clone(),
         branch: landed_on,
         at: now(),
+        automatic,
     };
     let a = update(&dir, |a| {
         a.state = AgentState::Landed;
         a.landed = Some(landing);
+        a.land_error = None;
         Ok(())
     })?;
     add_step(
         &dir,
         "result",
         &format!(
-            "Landed on {}",
-            a.landed.as_ref().map(|l| l.branch.as_str()).unwrap_or("")
+            "Landed on {}{}",
+            a.landed.as_ref().map(|l| l.branch.as_str()).unwrap_or(""),
+            if automatic { " automatically" } else { "" }
         ),
     );
     Ok((a, out))
+}
+
+/// A landing that waited in the workspace's edit queue: once the request
+/// ran, record how it went. A failed one puts the agent back to ready, with
+/// its worktree and the reason (#203).
+fn settle_landing(dir: &Path, a: Agent, here: &Window) -> Agent {
+    let Some(l) = a.landed.clone() else { return a };
+    if a.state != AgentState::Landed || l.outcome != RequestStatus::Queued {
+        return a;
+    }
+    let Ok(w) = agent_window(here.path(), &a) else {
+        return a;
+    };
+    let Some(git_dir) = workspace::find_local(&w, &a.workspace)
+        .ok()
+        .and_then(|ws| Window::open(&ws.path).ok())
+        .map(|ws| ws.git_dir)
+    else {
+        return a;
+    };
+    let Some(req) = workspace::requests(&git_dir)
+        .into_iter()
+        .find(|r| r.id == l.request_id)
+    else {
+        return a;
+    };
+    match req.status {
+        RequestStatus::Queued => a,
+        RequestStatus::Applied => {
+            if a.mode != Mode::New {
+                let _ = w.repo.git(&["branch", "-D", &a.branch], None);
+            }
+            update(dir, |a| {
+                if let Some(l) = a.landed.as_mut() {
+                    l.outcome = RequestStatus::Applied;
+                }
+                Ok(())
+            })
+            .unwrap_or(a)
+        }
+        RequestStatus::Failed | RequestStatus::Cancelled => {
+            let why = req
+                .reason
+                .clone()
+                .unwrap_or_else(|| "the workspace did not apply it".into());
+            let head = a.stack.last().cloned().unwrap_or_else(|| a.branch.clone());
+            restore_worktree(&w, &a, &head);
+            add_step(dir, "line", &format!("Did not land: {why}"));
+            update(dir, |a| {
+                a.state = AgentState::Ready;
+                a.landed = None;
+                a.land_error = Some(why.clone());
+                Ok(())
+            })
+            .unwrap_or(a)
+        }
+    }
+}
+
+/// Check `branch` out in the agent's worktree again after a landing that
+/// changed nothing failed.
+fn restore_worktree(w: &Window, a: &Agent, branch: &str) {
+    if a.worktree.exists() {
+        return;
+    }
+    let wt = a.worktree.to_string_lossy().into_owned();
+    if w.repo
+        .git(&["worktree", "add", "--quiet", &wt, branch], None)
+        .is_ok()
+    {
+        if let Ok(g) = git_in(&a.worktree).git(&["rev-parse", "--absolute-git-dir"], None) {
+            let _ = fs::write(Path::new(&g).join(AGENT_MARKER), &a.id);
+        }
+    }
+}
+
+/// Where an agent's workspace lives on this machine, to run stack edits
+/// from once its worktree is gone.
+fn home_of(a: &Agent, fallback: &Path) -> PathBuf {
+    match &a.setup_from {
+        Some(p) if p.is_dir() => p.clone(),
+        _ if a.worktree.is_dir() => a.worktree.clone(),
+        _ => fallback.to_path_buf(),
+    }
+}
+
+/// Auto-land: put a finished agent's work on the stack by itself. A
+/// landing that can't happen (the branch moved, nothing changed) leaves the
+/// agent ready for review with the reason.
+fn auto_land(dir: &Path, a: &Agent, fallback: &Path) -> Result<Agent> {
+    let cwd = home_of(a, fallback);
+    match land_as(&cwd, &a.id, true) {
+        Ok((landed, _)) => Ok(landed),
+        Err(e) if e.code() == "nothing_to_land" => read_agent(dir),
+        Err(e) => {
+            let why = e.to_string();
+            add_step(dir, "line", &format!("Did not land by itself: {why}"));
+            update(dir, |a| {
+                a.land_error = Some(why);
+                Ok(())
+            })
+        }
+    }
+}
+
+/// A landed agent takes a follow-up: it gets a new worktree at the branch
+/// its work landed on, and its next result lands as a new version of that
+/// branch.
+fn reopen(cwd: &Path, dir: &Path, a: &Agent) -> Result<()> {
+    let l = a
+        .landed
+        .as_ref()
+        .ok_or_else(|| agent_err("agent_closed", format!("{} is closed", a.id)))?;
+    if l.outcome != RequestStatus::Applied {
+        return Err(agent_err(
+            "landing_queued",
+            format!(
+                "{}'s work waits to land in workspace {}; reply once it has",
+                a.id, a.workspace_name
+            ),
+        ));
+    }
+    let w = agent_window(cwd, a)?;
+    let tip = w.branch_tip(&l.branch).ok_or_else(|| {
+        agent_err_with(
+            "no_branch",
+            format!(
+                "{} is gone (merged or deleted); start a new agent",
+                l.branch
+            ),
+            json!({ "branch": l.branch }),
+        )
+    })?;
+    if !w.tracks(&l.branch) {
+        return Err(agent_err_with(
+            "not_in_stack",
+            format!(
+                "{} is no longer in workspace {}'s stack",
+                l.branch, a.workspace_name
+            ),
+            json!({ "branch": l.branch }),
+        ));
+    }
+    let base = format!("agentvc/{}", a.id);
+    let mut branch = base.clone();
+    let mut k = 2;
+    while w.branch_tip(&branch).is_some() {
+        branch = format!("{base}-{k}");
+        k += 1;
+    }
+    if a.worktree.exists() {
+        remove_worktree(&w, a);
+    }
+    let wt = a.worktree.to_string_lossy().into_owned();
+    w.repo.git(
+        &["worktree", "add", "--quiet", "-b", &branch, &wt, &tip],
+        None,
+    )?;
+    if let Ok(g) = git_in(&a.worktree).git(&["rev-parse", "--absolute-git-dir"], None) {
+        let _ = fs::write(Path::new(&g).join(AGENT_MARKER), &a.id);
+    }
+    let on = l.branch.clone();
+    update(dir, |a| {
+        a.start = StartPoint {
+            branch: on.clone(),
+            commit: tip.clone(),
+            trunk: false,
+        };
+        a.mode = Mode::Revise;
+        a.branch = branch.clone();
+        a.stack = Vec::new();
+        a.landed = None;
+        a.land_error = None;
+        a.tests = None;
+        a.result = None;
+        Ok(())
+    })?;
+    add_step(dir, "line", &format!("Working on {on} again"));
+    Ok(())
 }
 
 /// Throw the agent's work away: stop it, remove its worktree and branch.
@@ -2706,6 +2972,12 @@ pub fn work(dir: &Path, exe: &Path) -> Result<Agent> {
             return reply(&cwd, &done.id, &text, exe);
         }
     }
+    // Auto-land: a finished turn with its checks passing goes onto the
+    // stack by itself. Failing checks, failures and stops wait for a person.
+    // A conflict resolution is always reviewed before it lands.
+    if done.state == AgentState::Ready && done.auto_land && done.mode != Mode::Resolve {
+        return auto_land(dir, &done, &common);
+    }
     Ok(done)
 }
 
@@ -2812,6 +3084,8 @@ mod tests {
             command: Some(command.into()),
             runner: None,
             permissions: None,
+            // Tests land by hand unless they test auto-land.
+            auto_land: Some(false),
             exe: PathBuf::new(),
         }
     }
@@ -2861,6 +3135,7 @@ mod tests {
                 permissions: Some("edits".into()),
                 sandbox: Some(true),
                 max: Some(2),
+                auto_land: Some(false),
                 conflicts: None,
             },
         )
@@ -2950,7 +3225,12 @@ mod tests {
             .unwrap();
         assert_eq!(t.parent, "feat");
         assert!(!a.worktree.exists());
-        assert!(list(&work, false).unwrap().agents.is_empty());
+        // It stays listed (for follow-ups) while its branch is on the
+        // stack, but needs nobody.
+        let l = list(&work, false).unwrap();
+        assert_eq!(l.agents.len(), 1);
+        assert_eq!(l.needs_you, 0);
+        assert_eq!(l.agents[0].state, AgentState::Landed);
     }
 
     #[test]
@@ -2974,6 +3254,174 @@ mod tests {
         assert_ne!(tip, old_tip);
         assert_eq!(fs::read_to_string(work.join("b.txt")).unwrap(), "feat 2\n");
         assert!(w.branch_tip(&a.branch).is_none());
+    }
+
+    #[test]
+    fn auto_land_lands_by_itself_and_a_follow_up_revises_the_branch() {
+        let (_t, work) = repo();
+        // Nothing set anywhere: auto-land is on.
+        let a = start_inline(
+            &work,
+            StartRequest {
+                auto_land: None,
+                ..req("Add c", "printf 'c\\n' > c.txt")
+            },
+        );
+        assert_eq!(a.state, AgentState::Landed, "{a:?}");
+        assert!(a.auto_land);
+        let l = a.landed.clone().unwrap();
+        assert!(l.automatic);
+        assert_eq!(l.branch, a.branch);
+        let w = Window::open(&work).unwrap();
+        assert!(w.tracks(&a.branch));
+        let first = w.branch_tip(&a.branch).unwrap();
+        assert!(!a.worktree.exists());
+
+        // A review on the landed branch goes to the agent.
+        let ws = a.workspace.clone();
+        let found =
+            crate::comments::agent_for(&work, &crate::comments::Target::branch(&ws, &a.branch))
+                .unwrap();
+        assert_eq!(found.id, a.id);
+
+        // A follow-up reopens it at that branch and lands a new version.
+        let dir = agent_dir(&work, &a.id).unwrap();
+        update(&dir, |a| {
+            a.command = Some("printf '%s\\n' \"$AGENTVC_AGENT_PROMPT\" >> c.txt".into());
+            Ok(())
+        })
+        .unwrap();
+        let r = reply(&work, &a.id, "more", Path::new("true")).unwrap();
+        assert_eq!(r.state, AgentState::Queued);
+        assert_eq!(r.mode, Mode::Revise);
+        assert_eq!(r.start.branch, a.branch);
+        assert_eq!(r.start.commit, first);
+        assert!(r.worktree.join("c.txt").exists());
+        let b = work_inline(&dir);
+        assert_eq!(b.state, AgentState::Landed, "{b:?}");
+        assert_eq!(b.landed.as_ref().unwrap().branch, a.branch);
+        let w = Window::open(&work).unwrap();
+        let second = w.branch_tip(&a.branch).unwrap();
+        assert_ne!(second, first);
+        assert!(w.repo.is_ancestor(&first, &second));
+        let c = git(&work, &["show", &format!("{second}:c.txt")]);
+        assert_eq!(c, "c\nmore");
+        // Its working branch went away with the revise.
+        assert!(w.branch_tip(&b.branch).is_none());
+    }
+
+    #[test]
+    fn auto_land_waits_on_failing_checks_and_moved_branches() {
+        let (_t, work) = repo();
+        // Failing checks need a person.
+        let a = start_inline(
+            &work,
+            StartRequest {
+                auto_land: None,
+                check: Some("false".into()),
+                ..req("Add c", "printf 'c\\n' > c.txt")
+            },
+        );
+        assert_eq!(a.state, AgentState::TestsFailing);
+        assert!(a.landed.is_none());
+
+        // A revise whose branch moved meanwhile stays ready, with why, and
+        // keeps its worktree.
+        let s = start(
+            &work,
+            &StartRequest {
+                auto_land: Some(true),
+                mode: Mode::Revise,
+                exe: PathBuf::from("true"),
+                ..req("Tweak b", "printf 'feat 2\\n' > b.txt")
+            },
+        )
+        .unwrap();
+        fs::write(work.join("d.txt"), "d\n").unwrap();
+        git(&work, &["add", "."]);
+        git(&work, &["commit", "--quiet", "-m", "move feat"]);
+        let b = work_inline(&agent_dir(&work, &s.id).unwrap());
+        assert_eq!(b.state, AgentState::Ready, "{b:?}");
+        assert!(b.land_error.as_deref().unwrap().contains("changed since"));
+        assert!(b.worktree.exists());
+
+        // The workspace can turn it off.
+        set_settings(
+            &work,
+            None,
+            AgentSettings {
+                auto_land: Some(false),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let c = start_inline(
+            &work,
+            StartRequest {
+                auto_land: None,
+                ..req("Add e", "printf 'e\\n' > e.txt")
+            },
+        );
+        assert_eq!(c.state, AgentState::Ready);
+        assert!(!c.auto_land);
+    }
+
+    #[test]
+    fn a_revise_whose_restack_fails_changes_nothing_and_keeps_the_agent() {
+        // #203: a tracked branch below was deleted with plain git.
+        let (_t, work) = repo();
+        let mut w = Window::open(&work).unwrap();
+        fs::write(work.join("f2.txt"), "f2\n").unwrap();
+        git(&work, &["add", "."]);
+        w.create(Some("feat2"), Some("feat2"), false).unwrap();
+        fs::write(work.join("top.txt"), "top\n").unwrap();
+        git(&work, &["add", "."]);
+        w.create(Some("top"), Some("top"), false).unwrap();
+        let a = start_inline(
+            &work,
+            StartRequest {
+                from: Some("feat2".into()),
+                mode: Mode::Revise,
+                ..req("Tweak f2", "printf 'f2 v2\\n' > f2.txt")
+            },
+        );
+        assert_eq!(a.state, AgentState::Ready);
+        let before = Window::open(&work).unwrap().branch_tip("feat2").unwrap();
+        git(&work, &["branch", "-D", "feat"]);
+        let e = land(&work, &a.id).unwrap_err();
+        assert_eq!(e.code(), "branch_missing", "{e}");
+        let w = Window::open(&work).unwrap();
+        assert_eq!(w.branch_tip("feat2").unwrap(), before, "rolled back");
+        let b = show(&work, &a.id).unwrap().agent;
+        assert_eq!(b.state, AgentState::Ready);
+        assert!(b.worktree.join("f2.txt").exists(), "worktree kept");
+    }
+
+    #[test]
+    fn a_queued_landing_that_fails_puts_the_agent_back() {
+        let (_t, work) = repo();
+        let a = start_inline(&work, req("Add c", "printf 'c\\n' > c.txt"));
+        // An agent works in the workspace's own checkout: the landing waits.
+        workspace::set_activity(&work, workspace::Activity::AgentRunning, Some("agent:x")).unwrap();
+        let (l, _) = land(&work, &a.id).unwrap();
+        let landing = l.landed.unwrap();
+        assert_eq!(landing.outcome, RequestStatus::Queued);
+        // The request fails when it runs.
+        let w = Window::open(&work).unwrap();
+        let path = w
+            .git_dir
+            .join("agentvc")
+            .join("requests")
+            .join(format!("{}.json", landing.request_id));
+        let mut r: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        r["status"] = json!("failed");
+        r["reason"] = json!("restack conflict in b.txt");
+        fs::write(&path, r.to_string()).unwrap();
+        let b = show(&work, &a.id).unwrap().agent;
+        assert_eq!(b.state, AgentState::Ready, "{b:?}");
+        assert!(b.landed.is_none());
+        assert_eq!(b.land_error.as_deref(), Some("restack conflict in b.txt"));
+        assert!(b.worktree.join("c.txt").exists());
     }
 
     #[test]

@@ -39,11 +39,20 @@ export const working = (agents: Agent[]) => agents.filter((a) => a.state === 'ru
 export const agentsOn = (agents: Agent[], ws: string, branch: string) =>
   agents.filter((a) => a.workspace === ws && a.start.branch === branch && a.state !== 'landed' && a.state !== 'discarded')
 
-/** The agent a review of `branch` goes to, like the daemon picks it: the newest open agent working on that branch itself. */
+/** A landed agent still takes replies and reviews: it revises the branch its work landed on. */
+export const canFollowUp = (a: Agent) => a.state === 'landed' && a.landed?.outcome === 'applied'
+
+/** The agent a review of `branch` goes to, like the daemon picks it: the newest open agent working on that branch itself, or whose work landed on it. */
 export const agentWorkingOn = (agents: Agent[], ws: string, branch: string) =>
   [...agents]
     .sort((a, b) => b.created_at - a.created_at)
-    .find((a) => a.workspace === ws && a.state !== 'landed' && a.state !== 'discarded' && (a.branch === branch || (a.mode !== 'new' && a.start.branch === branch)))
+    .find(
+      (a) =>
+        a.workspace === ws &&
+        (a.state === 'landed'
+          ? canFollowUp(a) && a.landed?.branch === branch
+          : a.state !== 'discarded' && (a.branch === branch || (a.mode !== 'new' && a.start.branch === branch))),
+    )
 
 export const agentLink = (id: string) => `/review/a/${encodeURIComponent(id)}`
 
@@ -138,6 +147,7 @@ export function settingsLine(s: AgentSettings | undefined): string {
   if (runner === 'claude') parts.push(PERMISSION_SHORT[s?.permissions ?? DEFAULT_PERMISSIONS])
   if (runner === 'claude' && s?.sandbox) parts.push('sandboxed')
   if (s?.max) parts.push(`up to ${s.max} at once`)
+  if (s?.auto_land === false) parts.push('lands when you click Land')
   if (s?.conflicts === 'manual') parts.push('you resolve conflicts')
   return parts.join(' · ')
 }
