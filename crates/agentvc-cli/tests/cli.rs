@@ -2437,3 +2437,99 @@ fn folders_of_one_github_repo_are_separate_workspaces_in_one_or_more_spaces() {
     let l = agentvc_home(&home, &tmp.path().join("d/mono"), &["workspace", "ls"]);
     assert_eq!(l["workspaces"].as_array().unwrap().len(), 1, "{l}");
 }
+
+#[test]
+fn tool_worktrees_nest_under_their_folder_and_prune_keeps_work() {
+    let tmp = tempdir();
+    let home = tmp.path().join("home");
+    git(
+        tmp.path(),
+        &["init", "--quiet", "--bare", "-b", "main", "origin.git"],
+    );
+    let repo = tmp.path().join("mono");
+    git(tmp.path(), &["clone", "--quiet", "origin.git", "mono"]);
+    fs::write(repo.join("README"), "hi\n").unwrap();
+    git(&repo, &["add", "-A"]);
+    git(&repo, &["commit", "--quiet", "-m", "init"]);
+    git(&repo, &["push", "--quiet", "origin", "HEAD:main"]);
+    // Claude Code makes worktrees like these for its sub-agents.
+    let wts = repo.join(".claude/worktrees");
+    fs::create_dir_all(&wts).unwrap();
+    fs::write(repo.join(".git/info/exclude"), ".claude/\n").unwrap();
+    for (name, branch) in [
+        ("agent-aaa", "wt-a"),
+        ("agent-bbb", "wt-b"),
+        ("agent-ccc", "wt-c"),
+    ] {
+        let p = wts.join(name);
+        git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                "-b",
+                branch,
+                p.to_str().unwrap(),
+            ],
+        );
+    }
+    // b has uncommitted work, c a commit only its own branch has.
+    fs::write(wts.join("agent-bbb/new.txt"), "wip\n").unwrap();
+    fs::write(wts.join("agent-ccc/c.txt"), "c\n").unwrap();
+    git(&wts.join("agent-ccc"), &["add", "-A"]);
+    git(&wts.join("agent-ccc"), &["commit", "--quiet", "-m", "c"]);
+    // A plain worktree for an editor window is not a tool's.
+    let plain = tmp.path().join("mono-window");
+    git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "--quiet",
+            "-b",
+            "win",
+            plain.to_str().unwrap(),
+        ],
+    );
+
+    let l = agentvc_home(&home, &repo, &["workspace", "ls"]);
+    let ws = l["workspaces"].as_array().unwrap();
+    assert_eq!(ws.len(), 5, "{l}");
+    let main_id = ws.iter().find(|w| w["kind"] == "main").unwrap()["id"].clone();
+    let tools: Vec<&Value> = ws.iter().filter(|w| w["tool"] == "Claude Code").collect();
+    assert_eq!(tools.len(), 3, "{l}");
+    assert!(tools.iter().all(|w| w["nested_in"] == main_id), "{l}");
+    let win = ws.iter().find(|w| w["name"] == "mono-window").unwrap();
+    assert!(
+        win.get("tool").is_none() && win.get("nested_in").is_none(),
+        "{win}"
+    );
+
+    // A dry run removes nothing.
+    let r = agentvc_home(&home, &repo, &["workspace", "prune"]);
+    assert_eq!(r["applied"], false, "{r}");
+    let names = |v: &Value| -> Vec<String> {
+        v.as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["name"].as_str().unwrap().to_string())
+            .collect()
+    };
+    assert_eq!(names(&r["remove"]), ["agent-aaa"], "{r}");
+    let mut kept = names(&r["keep"]);
+    kept.sort();
+    assert_eq!(kept, ["agent-bbb", "agent-ccc"], "{r}");
+    assert!(wts.join("agent-aaa").exists());
+
+    let r = agentvc_home(&home, &repo, &["workspace", "prune", "--yes"]);
+    assert_eq!(r["applied"], true, "{r}");
+    assert_eq!(names(&r["remove"]), ["agent-aaa"], "{r}");
+    assert!(!wts.join("agent-aaa").exists());
+    assert!(wts.join("agent-bbb/new.txt").exists());
+    assert!(plain.exists());
+    // Its branch stays.
+    assert_eq!(git(&repo, &["branch", "--list", "wt-a"]).trim(), "wt-a");
+    let l = agentvc_home(&home, &repo, &["workspace", "ls"]);
+    assert_eq!(l["workspaces"].as_array().unwrap().len(), 4, "{l}");
+}

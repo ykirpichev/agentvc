@@ -41,6 +41,7 @@ space agentvc (s3f9a01c2, github.com/ykirpichev/agentvc)
 | `agentvc space join [KEY\|none] [--reset]` | Show or change which space this checkout belongs to (was `workspace space`, which still works) |
 | `agentvc workspace new DIR [--clone [--space KEY]] [--name N] [--seed auto\|copy\|off] [--seed-path P]` | Make a workspace cheaply (below) and print the space it joined |
 | `agentvc workspace ls` | Every workspace of the space with its stack, folder and machine |
+| `agentvc workspace prune [--yes] [--all]` | Remove coding tools' leftover agent worktrees that hold no work (below); without `--yes` it only lists them |
 
 All take `--json`. `workspace ls --json` and `GET /api/workspaces` carry
 `space_info` (`id`, `name`, `key`, `source`) and `machine`; each workspace
@@ -117,6 +118,31 @@ The web UI, the VS Code/Cursor panel and the Claude Code pane show the space
 on top, then each workspace with its folder and machine. Hover a workspace for
 its id, full path, kind (checkout folder or worktree of which clone) and who
 created it.
+
+The list stays short however many folders a space has: this window's
+workspace comes first, then the ones where something is going on (unmerged
+branches, an agent at work, queued edits). Three or more idle ones fold into
+one line, "18 idle workspaces", which opens to one short line each.
+
+### Coding tools' agent worktrees
+
+Claude Code, Cursor and Codex make git worktrees for their own sub-agents
+(`.claude/worktrees/agent-…`, `.cursor/worktrees/…`, `.codex/worktrees/…`).
+They are worktrees of the same repo, so agentvc sees them, but they are not
+workspaces anyone chose: `workspace ls --json` marks them with `tool` (e.g.
+`Claude Code`) and `nested_in` (the workspace whose folder holds them, else
+the checkout's main worktree), and the UIs list them under that workspace,
+the idle ones folded into "3 idle Claude Code worktrees". (agentvc's own
+agents' worktrees are never listed.)
+
+The tools often leave these behind. `agentvc workspace prune` lists the ones
+that can go and `--yes` removes them with `git worktree remove`. It only
+removes a worktree that loses nothing: no uncommitted or untracked files, no
+unmerged agentvc branches, no queued edits, no agent at work, and no commits
+that no other branch or remote branch has. Its git branch stays. `--all`
+considers every linked worktree, not just tools' ones; clone folders are
+never removed. Worktrees whose folder is already gone drop out of the list
+on their own, and `prune --yes` forgets them in git too.
 
 ## Not yet
 

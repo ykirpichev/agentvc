@@ -629,6 +629,10 @@ export interface WorkspaceInfo {
   other_checkout: boolean
   /** How agents started here run; empty fields fall back to the repo's defaults. */
   agent_settings?: AgentSettings
+  /** The coding tool that made this worktree for one of its agents, e.g. `Claude Code`. */
+  tool?: string
+  /** For a tool's worktree: the workspace it belongs under. */
+  nested_in?: string
 }
 
 export interface WorkspaceList {

@@ -1607,6 +1607,78 @@ pub struct WorkspaceInfo {
     pub other_checkout: bool,
     /// How agents started here run (`agentvc workspace agents`).
     pub agent_settings: crate::agent::AgentSettings,
+    /// The coding tool that made this worktree for one of its own agents
+    /// (e.g. `Claude Code` for `.claude/worktrees/agent-…`), when it is one.
+    /// Such worktrees are listed under [`Self::nested_in`], not on their own.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool: Option<String>,
+    /// The workspace a tool worktree belongs to: the one whose folder holds
+    /// it, else its checkout's main worktree.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nested_in: Option<String>,
+}
+
+/// Where coding tools put the worktrees they make for their own agents.
+const TOOL_WORKTREES: &[(&str, &str)] = &[
+    (".claude/worktrees", "Claude Code"),
+    (".cursor/worktrees", "Cursor"),
+    (".codex/worktrees", "Codex"),
+];
+
+/// The tool that made the worktree at `path` for one of its agents, and
+/// the folder it was made from when the tool keeps it inside that folder.
+pub fn tool_worktree(path: &Path) -> Option<(&'static str, Option<PathBuf>)> {
+    let p = path.to_string_lossy().replace('\\', "/");
+    TOOL_WORKTREES.iter().find_map(|(dir, tool)| {
+        let at = p.find(&format!("/{dir}/"))?;
+        let owner = PathBuf::from(&p[..at]);
+        // `~/.cursor/worktrees/...` is the tool's own folder, not a repo's.
+        let home = dirs_home().map(|h| canon(&h));
+        let owner = (Some(canon(&owner)) != home).then_some(owner);
+        Some((*tool, owner))
+    })
+}
+
+fn dirs_home() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+}
+
+/// Mark the tool worktrees in `out` and nest each under its workspace.
+fn nest_tool_worktrees(out: &mut [WorkspaceInfo]) {
+    let places: Vec<(String, PathBuf, PathBuf, Kind)> = out
+        .iter()
+        .map(|w| (w.id.clone(), canon(&w.path), canon(&w.checkout), w.kind))
+        .collect();
+    for w in out.iter_mut() {
+        if w.kind != Kind::Worktree {
+            continue;
+        }
+        let Some((tool, owner)) = tool_worktree(&w.path) else {
+            continue;
+        };
+        let owner = owner.map(|o| canon(&o));
+        let me = canon(&w.path);
+        let parent = owner
+            .as_ref()
+            .and_then(|o| {
+                places
+                    .iter()
+                    .filter(|(id, p, _, _)| *id != w.id && p == o)
+                    .map(|(id, ..)| id.clone())
+                    .next()
+            })
+            .or_else(|| {
+                let co = canon(&w.checkout);
+                places
+                    .iter()
+                    .find(|(id, p, c, k)| *id != w.id && *k == Kind::Main && *c == co && *p != me)
+                    .map(|(id, ..)| id.clone())
+            });
+        w.tool = Some(tool.to_string());
+        w.nested_in = parent;
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -1697,6 +1769,7 @@ pub fn list(cwd: &Path, space: Option<&Space>, remote: bool) -> Result<Workspace
         }
         list_group(all, space, &running, &owner, &here, &mut here_id, &mut out)?;
     }
+    nest_tool_worktrees(&mut out);
     if remote {
         let mut rest = remote_workspaces(&here, &own)?;
         rest.retain(|r| !out.iter().any(|o| o.id == r.id));
@@ -1823,9 +1896,162 @@ fn list_group(
             checkout: l.checkout.clone(),
             other_checkout: l.other_checkout,
             agent_settings: w.state.agents.clone(),
+            tool: None,
+            nested_in: None,
         });
     }
     Ok(())
+}
+
+// ---- pruning -----------------------------------------------------------------
+
+/// One worktree `prune` looked at.
+#[derive(Clone, Debug, Serialize)]
+pub struct PruneItem {
+    pub workspace: String,
+    pub name: String,
+    pub path: PathBuf,
+    pub folder: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool: Option<String>,
+    /// Why it stays, for a kept one; why it failed, for one that could not
+    /// be removed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// What `prune` removed (or would remove) and what it kept.
+#[derive(Clone, Debug, Serialize)]
+pub struct PruneReport {
+    /// It removed them; otherwise this only says what it would remove.
+    pub applied: bool,
+    pub remove: Vec<PruneItem>,
+    pub keep: Vec<PruneItem>,
+}
+
+/// Why the worktree of `w` must stay, or `None` when removing it loses
+/// nothing: no uncommitted changes, no unmerged branches, no queued edits,
+/// no agent at work and no commits that only it has.
+fn keep_reason(w: &WorkspaceInfo) -> Option<String> {
+    if w.here {
+        return Some("this is the workspace you are in".into());
+    }
+    if w.state == Activity::AgentRunning {
+        return Some("an agent is working there".into());
+    }
+    if w.pending.is_some() || w.requests.iter().any(|r| r.status == RequestStatus::Queued) {
+        return Some("it has edits in progress".into());
+    }
+    if w.branches
+        .iter()
+        .any(|b| b.pr.as_ref().and_then(|p| p.state.as_deref()) != Some("merged"))
+    {
+        return Some("it has unmerged branches".into());
+    }
+    let repo = HostRepo {
+        workdir: w.path.clone(),
+    };
+    match repo.git(&["status", "--porcelain"], None) {
+        Ok(o) if o.is_empty() => {}
+        Ok(_) => return Some("it has uncommitted changes".into()),
+        Err(_) => return Some("git status failed there".into()),
+    }
+    let own = repo
+        .git(&["symbolic-ref", "-q", "HEAD"], None)
+        .ok()
+        .filter(|r| !r.is_empty());
+    // Every other branch and remote branch; `--exclude` patterns differ
+    // between git versions, so the list goes on stdin.
+    let others: String = repo
+        .git(
+            &[
+                "for-each-ref",
+                "--format=%(refname)",
+                "refs/heads",
+                "refs/remotes",
+            ],
+            None,
+        )
+        .unwrap_or_default()
+        .lines()
+        .filter(|r| Some(*r) != own.as_deref())
+        .map(|r| format!("^{r}\n"))
+        .collect();
+    let args = ["rev-list", "--count", "HEAD", "--stdin"];
+    match repo
+        .git(&args, Some(&others))
+        .ok()
+        .and_then(|n| n.parse::<usize>().ok())
+    {
+        Some(0) => None,
+        Some(n) => Some(format!(
+            "{n} commit{} there {} on no other branch",
+            if n == 1 { "" } else { "s" },
+            if n == 1 { "is" } else { "are" }
+        )),
+        None => Some("could not check its commits".into()),
+    }
+}
+
+/// Remove this space's leftover worktrees on this machine: by default the
+/// ones coding tools made for their own agents (`.claude/worktrees/...`),
+/// with `all` every linked worktree. Only worktrees that lose nothing go
+/// (see [`keep_reason`]); their branches stay. Without `apply` it only
+/// says what it would remove. Main worktrees (clone folders) are never
+/// touched. Also forgets worktrees whose folders are gone.
+pub fn prune(cwd: &Path, all: bool, apply: bool) -> Result<PruneReport> {
+    let l = list(cwd, None, false)?;
+    let mut remove = Vec::new();
+    let mut keep = Vec::new();
+    for w in &l.workspaces {
+        if w.kind != Kind::Worktree || !w.this_machine || !(all || w.tool.is_some()) {
+            continue;
+        }
+        let item = PruneItem {
+            workspace: w.id.clone(),
+            name: w.name.clone(),
+            path: w.path.clone(),
+            folder: w.folder.clone(),
+            tool: w.tool.clone(),
+            reason: keep_reason(w),
+        };
+        if item.reason.is_some() {
+            keep.push(item);
+            continue;
+        }
+        if apply {
+            let main = HostRepo {
+                workdir: w.checkout.clone(),
+            };
+            let path = w.path.to_string_lossy().into_owned();
+            if let Err(e) = main.git(&["worktree", "remove", &path], None) {
+                keep.push(PruneItem {
+                    reason: Some(format!("git could not remove it: {e}")),
+                    ..item
+                });
+                continue;
+            }
+        }
+        remove.push(item);
+    }
+    if apply {
+        let mut checkouts: Vec<&PathBuf> = l
+            .workspaces
+            .iter()
+            .filter(|w| w.this_machine && w.kind != Kind::Remote)
+            .map(|w| &w.checkout)
+            .collect();
+        checkouts.sort();
+        checkouts.dedup();
+        for c in checkouts {
+            let _ = HostRepo { workdir: c.clone() }.git(&["worktree", "prune"], None);
+        }
+    }
+    Ok(PruneReport {
+        applied: apply,
+        remove,
+        keep,
+    })
 }
 
 // ---- publishing -------------------------------------------------------------
@@ -2070,6 +2296,8 @@ fn remote_workspaces(w: &Window, locals: &[Local]) -> Result<Vec<WorkspaceInfo>>
             checkout: rec.path.clone(),
             other_checkout: false,
             agent_settings: state.map(|s| s.agents).unwrap_or_default(),
+            tool: None,
+            nested_in: None,
         });
     }
     Ok(out)
