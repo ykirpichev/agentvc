@@ -7,7 +7,9 @@
 //! agent:
 //!
 //! - both sides inserted at the same point (a new enum variant, `mod` line,
-//!   CLI subcommand, test, README section): keep both;
+//!   CLI subcommand, test, README section): keep both, unless both define
+//!   the same name or write the same statement (the same fix in different
+//!   words), which is a conflict;
 //! - both sides made the same change, or one side only reformatted;
 //! - non-overlapping edits inside one hunk (one side renamed a word, the
 //!   other appended to the line): merged token by token;
@@ -599,7 +601,15 @@ fn auto_hunk(
     // insertion already contains the other at its start or end. Two
     // insertions that define the same name (both added `def mul`) are a real
     // conflict: keeping both would let one silently shadow the other (#121).
-    if keep_both && base.iter().all(|l| l.trim().is_empty()) && !defines_same_name(ours, theirs) {
+    // The same goes for two insertions that write the same statement at
+    // their top level (both added `static SEQ` and `let seq = ...`, each
+    // with its own comment): keeping both would run or define it twice
+    // (#211).
+    if keep_both
+        && base.iter().all(|l| l.trim().is_empty())
+        && !defines_same_name(ours, theirs)
+        && !shares_statement(ours, theirs)
+    {
         let (first, second) = if sides.theirs_first {
             (theirs, ours)
         } else {
@@ -662,7 +672,7 @@ const DEF_MODIFIERS: &[&str] = &[
 ];
 
 /// The names a block defines at its own top level (`def mul`, `pub fn mul`,
-/// `export function mul`, `class Mul`, `const MUL =`).
+/// `export function mul`, `class Mul`, `const MUL =`, `static MUL:`).
 fn defined_names(block: &[&str]) -> std::collections::BTreeSet<String> {
     let indent = |l: &str| l.len() - l.trim_start().len();
     let top = block
@@ -677,10 +687,11 @@ fn defined_names(block: &[&str]) -> std::collections::BTreeSet<String> {
         .filter(|l| !l.trim().is_empty() && indent(l) == top)
     {
         let mut words = l.split_whitespace().peekable();
-        let mut saw_const = false;
+        let (mut saw_const, mut saw_static) = (false, false);
         while let Some(w) = words.peek() {
             if DEF_MODIFIERS.contains(w) {
                 saw_const |= *w == "const";
+                saw_static |= *w == "static";
                 words.next();
             } else {
                 break;
@@ -706,10 +717,83 @@ fn defined_names(block: &[&str]) -> std::collections::BTreeSet<String> {
                     names.insert(n);
                 }
             }
+            // `static NAME: T = ...` / `static mut NAME: T` (Rust). Only with
+            // the type colon, so C's `static int x;` names nothing.
+            Some(w) if saw_static => {
+                let w = if w == "mut" { words.next() } else { Some(w) };
+                if let Some(w) = w {
+                    if let Some(n) = name_after(Some(w)) {
+                        if w[n.len()..].starts_with(':') {
+                            names.insert(n);
+                        }
+                    }
+                }
+            }
             _ => {}
         }
     }
     names
+}
+
+/// A line with its comment removed, or `None` when nothing but a comment,
+/// whitespace or punctuation (`}`, `);`) is left. Attributes and decorators
+/// (`#[test]`, `@Override`) count as punctuation here: two different
+/// additions often share them.
+fn statement(line: &str) -> Option<String> {
+    let t = line.trim();
+    let is_comment = ["//", "/*", "*/", "<!--", "-->"]
+        .iter()
+        .any(|p| t.starts_with(p))
+        || t == "*"
+        || t.starts_with("* ")
+        || t == "#"
+        || t.starts_with("# ")
+        || t.starts_with("-- ");
+    if is_comment || t.starts_with("#[") || t.starts_with("#![") || t.starts_with('@') {
+        return None;
+    }
+    // A trailing `// ...` after code, outside any string literal.
+    let mut code = t;
+    let mut quoted = false;
+    let bytes = t.as_bytes();
+    for i in 0..bytes.len() {
+        match bytes[i] {
+            b'"' if i == 0 || bytes[i - 1] != b'\\' => quoted = !quoted,
+            b'/' if !quoted
+                && bytes.get(i + 1) == Some(&b'/')
+                && i > 0
+                && bytes[i - 1].is_ascii_whitespace() =>
+            {
+                code = t[..i].trim_end();
+                break;
+            }
+            _ => {}
+        }
+    }
+    code.chars()
+        .any(char::is_alphanumeric)
+        .then(|| code.split_whitespace().collect::<Vec<_>>().join(" "))
+}
+
+/// Whether two blocks inserted at the same point share a statement at
+/// their own top level, ignoring comments, whitespace and punctuation: the
+/// same fix written twice in different words, not two independent additions.
+/// Lines nested deeper (the bodies of two new tests) may repeat freely.
+fn shares_statement(ours: &[&str], theirs: &[&str]) -> bool {
+    let top = |block: &[&str]| -> BTreeSet<String> {
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let code: Vec<(usize, String)> = block
+            .iter()
+            .filter_map(|l| statement(l).map(|s| (indent(l), s)))
+            .collect();
+        let min = code.iter().map(|(i, _)| *i).min().unwrap_or(0);
+        code.into_iter()
+            .filter(|(i, _)| *i == min)
+            .map(|(_, s)| s)
+            .collect()
+    };
+    let o = top(ours);
+    top(theirs).iter().any(|s| o.contains(s))
 }
 
 fn defines_same_name(ours: &[&str], theirs: &[&str]) -> bool {
@@ -1559,6 +1643,56 @@ mod tests {
             &["fn a() {", "    fn mul() {}", "}"],
             &["fn mul() {}"]
         ));
+    }
+
+    #[test]
+    fn the_same_fix_in_different_words_is_a_conflict() {
+        // #211: two attempts both fixed one race by adding `static SEQ` and
+        // `let seq` before the same line, each with its own comment.
+        let base = "fn index() {\n    let a = 1;\n    let name = format!(\"{a}\");\n}\n";
+        let ours = "fn index() {\n    let a = 1;\n    // Unique per call: parallel rebases race on one name.\n    static SEQ: AtomicU64 = AtomicU64::new(0);\n    let seq = SEQ.fetch_add(1, Ordering::Relaxed);\n    let name = format!(\"{a}\");\n}\n";
+        let theirs = "fn index() {\n    let a = 1;\n    // macOS reuses pids quickly, so add a counter\n    // to keep temp index names apart.\n    static SEQ: AtomicU64 = AtomicU64::new(0);\n    let seq = SEQ.fetch_add(1, Ordering::Relaxed); // per process\n    let name = format!(\"{a}\");\n}\n";
+        let m = auto(base, ours, theirs);
+        assert_eq!(m.conflicts, 1, "{}", m.text);
+        assert!(has_markers(&m.text));
+        // One shared statement is enough, even next to different code.
+        let theirs = "fn index() {\n    let a = 1;\n    let pid = std::process::id();\n    let seq = SEQ.fetch_add(1, Ordering::Relaxed);\n    let name = format!(\"{a}\");\n}\n";
+        let m = auto(base, ours, theirs);
+        assert_eq!(m.conflicts, 1, "{}", m.text);
+        // The same static with another type defines the same name.
+        assert!(defines_same_name(
+            &["static SEQ: AtomicU64 = AtomicU64::new(0);"],
+            &["static mut SEQ: usize = 0;"]
+        ));
+        assert!(!defines_same_name(&["static int a;"], &["static int b;"]));
+        // The same insertion on both sides is still kept once.
+        let m = auto(base, ours, ours);
+        assert_eq!((m.conflicts, m.text.as_str()), (0, ours));
+    }
+
+    #[test]
+    fn independent_additions_sharing_boilerplate_keep_both() {
+        // Two new tests share an attribute, braces and a setup line in their
+        // bodies, but nothing at their top level.
+        let base = "mod tests {\n    use super::*;\n}\n";
+        let ours = "mod tests {\n    use super::*;\n\n    #[test]\n    fn forks() {\n        let s = setup();\n        assert!(s.fork().is_ok());\n    }\n}\n";
+        let theirs = "mod tests {\n    use super::*;\n\n    #[test]\n    fn serves_mcp() {\n        let s = setup();\n        assert!(s.mcp().is_ok());\n    }\n}\n";
+        let m = auto(base, ours, theirs);
+        assert_eq!(m.conflicts, 0, "{}", m.text);
+        assert_eq!(m.text.matches("#[test]").count(), 2);
+        assert!(m.text.contains("fn forks") && m.text.contains("fn serves_mcp"));
+        // README sections with the same kind of heading and a shared rule.
+        let base = "# Tool\n";
+        let ours = "# Tool\n\n## Fork\n\nCopies an attempt.\n\n---\n";
+        let theirs = "# Tool\n\n## Mcp\n\nServes tools over MCP.\n\n---\n";
+        let m = auto(base, ours, theirs);
+        assert_eq!(m.conflicts, 0, "{}", m.text);
+        assert!(m.text.contains("## Fork") && m.text.contains("## Mcp"));
+        assert_eq!(statement("    }); // done"), None);
+        assert_eq!(
+            statement("    let url = \"http://x\"; // note").as_deref(),
+            Some("let url = \"http://x\";")
+        );
     }
 
     #[test]
