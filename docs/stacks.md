@@ -58,8 +58,8 @@ A conflict changes nothing: the command fails with code `conflict` and
 ```sh
 agentvc stack restack --keep-conflicts   # restacks what it can, then git rebase on the conflicting branch
 # resolve in Cursor, git add, then
-git rebase --continue
-agentvc stack restack                    # carries on with the branches above
+agentvc stack continue                   # finishes the rebase, restacks the branches above
+# or give up: agentvc stack abort
 ```
 
 ### An agent resolves it (the default in the review UI)
@@ -119,7 +119,7 @@ Without `--resolve` or `--keep-conflicts` the command line still fails with
 | `stack up / down / top / bottom` | Move along this window's stack |
 
 Every command takes `--json`. Error codes: `needs_restack`, `push_rejected`,
-`remote_branch_exists`, `parent_not_pushed`, `no_remote`, `same_window`, `other_repository`, `branch_exists`, `not_in_stack`,
+`remote_branch_exists`, `parent_not_pushed`, `no_remote`, `not_github`, `same_window`, `other_repository`, `branch_exists`, `not_in_stack`,
 `owned_by_other_window`, `checked_out_elsewhere`, `conflict`,
 `rebase_in_progress`, `merge_commit`, `at_top`, `at_bottom`, `ambiguous`,
 `no_trunk`, `parent_missing`, `branch_missing`, `message_required`,

@@ -23,17 +23,20 @@ import { money, plural, timeAgo } from '../lib/format'
 import { CompareView } from './Compare'
 import { WorkspacesOverview } from '../components/WorkspacesOverview'
 import { NeedsYou } from './Agents'
+import { needsYou } from '../core/agents'
 
 const versionsOf = (graph: Graph, task: number) =>
   visibleVersions(graph, { showClosed: true }).filter((g) => g.attempt.task_id === task)
 
-/** `/review`: the agents that wait on you first, then every workspace. */
+/** `/review`: the agents that wait on you. The Space cards repeat the
+ * sidebar's stacks, so they show only when nothing needs you. */
 export function ReviewHome() {
   const { agents } = useReview()
+  const waiting = agents ? needsYou(agents.agents).length : 0
   return (
     <div className="page rv">
       <NeedsYou list={agents} />
-      <WorkspacesOverview />
+      {waiting === 0 && <WorkspacesOverview />}
     </div>
   )
 }

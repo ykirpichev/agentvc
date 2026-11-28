@@ -79,8 +79,8 @@ pub enum StackCmd {
         #[arg(long)]
         branch: Option<String>,
         /// On conflict, restack what can be and rebase the conflicting
-        /// branch in this worktree (resolve, `git rebase --continue`, then
-        /// run restack again).
+        /// branch in this worktree (resolve, `git add`, then
+        /// `agentvc stack continue`, or `agentvc stack abort`).
         #[arg(long)]
         keep_conflicts: bool,
         /// On conflict, follow the workspace's `conflicts` setting: by
@@ -334,7 +334,7 @@ fn restack_text(r: &RestackResult) -> String {
     }
     if let Some(c) = &r.conflict {
         t += &format!(
-            "{} conflicts in {} at \"{}\": resolve the files, `git add` them, `git rebase --continue`, then `agentvc stack restack`\n",
+            "{} conflicts in {} at \"{}\": resolve the files, `git add` them, then `agentvc stack continue` (or `agentvc stack abort`)\n",
             c.branch,
             c.paths.join(", "),
             c.subject
@@ -492,7 +492,7 @@ fn log_text(l: &LogResult) -> String {
         l.base.as_deref().map(short).unwrap_or("(missing)")
     );
     if l.branches.is_empty() {
-        t += "  no branches yet: `agentvc stack create <name> -m <message>` or `agentvc stack adopt <branch>`\n";
+        t += "  no branches yet: `agentvc stack create <name> -am <message>` or `agentvc stack adopt <branch>`\n";
     }
     for b in &l.branches {
         t += &branch_line(b);

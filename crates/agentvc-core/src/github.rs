@@ -182,6 +182,44 @@ pub fn parse_remote(url: &str) -> Option<String> {
     Some(format!("{owner}/{name}"))
 }
 
+/// The host of a git remote URL (`https://h/o/r`, `ssh://u@h:p/o/r`,
+/// `u@h:o/r`), or `None` for a local path or `file://` URL.
+pub fn remote_host(url: &str) -> Option<String> {
+    let s = url.trim();
+    if let Some((scheme, rest)) = s.split_once("://") {
+        if scheme == "file" {
+            return None;
+        }
+        let auth = rest.split('/').next().unwrap_or("");
+        let host = auth.rsplit('@').next().unwrap_or("");
+        let host = host.split(':').next().unwrap_or("");
+        return (!host.is_empty()).then(|| host.to_ascii_lowercase());
+    }
+    // scp-like `user@host:path` (a colon before any slash).
+    let (before, _) = s.split_once(':')?;
+    if before.contains('/') || before.is_empty() || before.len() == 1 {
+        // `/a:b` is a path, `C:` a Windows drive.
+        return None;
+    }
+    let host = before.rsplit('@').next().unwrap_or("");
+    (!host.is_empty()).then(|| host.to_ascii_lowercase())
+}
+
+/// Whether PRs for `url` can go through the GitHub API: a GitHub host
+/// (github.com or a GitHub Enterprise host named github), a local path (tests,
+/// mirrors), or any host when `AGENTVC_GITHUB_API` points the API elsewhere.
+pub fn remote_is_github(url: &str) -> bool {
+    if std::env::var(API_ENV).is_ok_and(|v| !v.trim().is_empty()) {
+        return true;
+    }
+    match remote_host(url) {
+        None => true,
+        Some(h) => {
+            h == "github.com" || h.ends_with(".github.com") || h.split('.').any(|p| p == "github")
+        }
+    }
+}
+
 /// A GitHub token from `GITHUB_TOKEN`, `GH_TOKEN` or `gh auth token`.
 pub fn token() -> Result<String> {
     for var in ["GITHUB_TOKEN", "GH_TOKEN"] {
@@ -1185,6 +1223,30 @@ fn promoted_by(space: &Space, id: i64) -> Result<Option<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remote_hosts() {
+        for (url, host) in [
+            ("https://github.com/o/r.git", Some("github.com")),
+            ("git@github.com:o/r.git", Some("github.com")),
+            (
+                "ssh://git@gitlab.example.com:2222/o/r",
+                Some("gitlab.example.com"),
+            ),
+            ("https://user:pw@GitLab.com/o/r", Some("gitlab.com")),
+            ("/tmp/origin.git", None),
+            ("file:///tmp/origin.git", None),
+            ("../origin.git", None),
+        ] {
+            assert_eq!(remote_host(url).as_deref(), host, "{url}");
+        }
+        assert!(remote_is_github("git@github.com:o/r.git") || std::env::var(API_ENV).is_ok());
+        if std::env::var(API_ENV).is_err() {
+            assert!(!remote_is_github("https://gitlab.com/o/r.git"));
+            assert!(remote_is_github("https://github.acme.io/o/r.git"));
+            assert!(remote_is_github("/tmp/origin.git"));
+        }
+    }
 
     #[test]
     fn parses_remote_urls() {

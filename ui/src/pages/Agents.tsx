@@ -10,6 +10,7 @@ import type { Agent, AgentConflicts, AgentList, AgentPermissions, AgentRunner, A
 import { useResource } from '../api/useResource'
 import { ErrorNote, Skeleton } from '../components/bits'
 import { DiffView } from '../components/DiffView'
+import { Markdown } from '../components/Markdown'
 import { ReviewBar, ThreadList } from '../components/Comments'
 import { scrollToThread, useThreads } from '../core/comments'
 import { useToast } from '../components/Toaster'
@@ -240,7 +241,7 @@ function NeedCard({ a }: { a: Agent }) {
       <Link className="ag-title" to={agentLink(a.id)}>
         {a.title}
       </Link>
-      {q?.kind === 'ask' && <p className="ag-q">{q.text}</p>}
+      {q?.kind === 'ask' && <Markdown className="ag-q" text={q.text} />}
       {q?.kind === 'approve' && (
         <>
           <p className="muted">It wants to run:</p>
@@ -890,7 +891,7 @@ export function AgentPage() {
 
       {q && (
         <div className="ag-card ag-card-ask">
-          {q.kind === 'ask' ? <p className="ag-q">{q.text}</p> : <pre className="ag-cmd">{q.text}</pre>}
+          {q.kind === 'ask' ? <Markdown className="ag-q" text={q.text} /> : <pre className="ag-cmd">{q.text}</pre>}
           {steer && q.kind === 'approve' && <Actions a={a} />}
         </div>
       )}
@@ -941,7 +942,7 @@ export function AgentPage() {
           {a.messages.map((m, i) => (
             <li key={i} className={`ag-msg ag-msg-${m.from}`}>
               <span className="ag-msg-who">{m.from === 'you' ? 'You' : 'Agent'}</span>
-              <span className="ag-msg-text">{m.text}</span>
+              {m.from === 'you' ? <span className="ag-msg-text">{m.text}</span> : <Markdown className="ag-msg-text" text={m.text} />}
             </li>
           ))}
         </ul>

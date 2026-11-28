@@ -26,7 +26,8 @@ curl -fsSL https://raw.githubusercontent.com/ykirpichev/agentvc/main/scripts/get
 # Claude Code and by-hand steps: docs/install.md
 
 cd ~/src/my-repo
-agentvcd                                   # review UI at http://localhost:7420 for the whole space
+agentvcd                                   # review UI at http://localhost:7420; runs in the
+                                           # foreground, so the rest goes in a second terminal
 agentvc stack create my-fix -am "Fix it"   # a branch on this workspace's stack
 agentvc stack submit                       # push and open one PR per branch
 agentvc agent start --from my-fix "Add tests for the fix"   # an agent on top of it
@@ -161,10 +162,15 @@ To review attempts inside Cursor, install the VS Code extension
 ## Build
 
 ```sh
+(cd ui && npm ci && npm run build)   # the review UI; agentvcd embeds ui/dist
 cargo build
 cargo run -p agentvc-cli -- --help
 cargo test --workspace
 ```
+
+Without the UI build, `agentvcd` serves a page saying the review UI has not
+been built. `scripts/install.sh` does both and installs into `~/.cargo/bin`;
+for everyday use, prefer the release install above (`get.sh`, `~/.local/bin`).
 
 ## License
 

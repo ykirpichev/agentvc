@@ -81,7 +81,7 @@ The token is the one `agentvc pr` uses (`GITHUB_TOKEN`, `GH_TOKEN` or
 ```sh
 agentvc comment add my-branch --path src/x.rs --line 10-12 --draft "Use a const"
 agentvc comment add ag3 "Also add a test"          # on an agent; aN for a try
-agentvc comment ls [my-branch|ag3] [--open] [--drafts] [--here]
+agentvc comment ls [my-branch|ag3] [--open] [--no-drafts] [--here]   # drafts show as `draft`
 agentvc comment reply c4 "Done in the last commit"
 agentvc comment resolve c4                         # agents: --as-agent marks it addressed
 agentvc comment send my-branch --agent             # your drafts, as one review

@@ -1445,7 +1445,11 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
             text,
         });
     }
-    let space = Space::discover(&cwd)?;
+    let space = match Space::discover(&cwd) {
+        Ok(s) => s,
+        Err(Error::NoSpace(at)) => return Err(no_store_error(&at).into()),
+        Err(e) => return Err(e.into()),
+    };
     let current = || -> anyhow::Result<i64> { Ok(space.attempt_for_path(&cwd)?.id) };
 
     Ok(match cli.cmd {
@@ -3978,6 +3982,20 @@ fn run_hook(event: &str, cwd: &std::path::Path, as_json: bool) -> Out {
             None => String::new(),
         },
         json: if as_json { json } else { Value::Null },
+    }
+}
+
+/// `no_space` for a command that needs the attempt store (`.agentvc`):
+/// say what is missing and what creates it, since `agentvc space` and
+/// `agentvc stack` work without it.
+fn no_store_error(at: &std::path::Path) -> Error {
+    Error::Stack {
+        code: "no_space",
+        message: format!(
+            "no attempt store (.agentvc) at or above {}: run `agentvc init` here to create it (starting `agentvcd` here also does). `agentvc space`, `stack` and `workspace` work without it",
+            at.display()
+        ),
+        details: Some(json!({ "hint": "agentvc init" })),
     }
 }
 

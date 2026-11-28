@@ -1053,7 +1053,12 @@ pub static TOOLS: &[Tool] = &[
             if target.is_none() {
                 argv.flag("here", Some(true));
             }
-            Ok(argv.flag("open", Some(!all)).pos(target).done())
+            // Agents never see a reviewer's unsent drafts.
+            Ok(argv
+                .flag("open", Some(!all))
+                .flag("no-drafts", Some(all && target.is_some()))
+                .pos(target)
+                .done())
         },
     },
     Tool {

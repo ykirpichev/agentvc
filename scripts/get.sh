@@ -78,6 +78,16 @@ case ":$PATH:" in
 $dir is not on your PATH. Add this to your shell profile:
   export PATH=\"$dir:\$PATH\"" ;;
 esac
+# An older install (say ~/.cargo/bin from scripts/install.sh) earlier on PATH
+# would shadow this one.
+for b in agentvc agentvcd; do
+  found=$(command -v "$b" 2>/dev/null || true)
+  if [ -n "$found" ] && [ "$found" != "$dir/$b" ]; then
+    echo "
+warning: \`$b\` on your PATH is $found ($("$found" --version 2>/dev/null || echo "unknown version")),
+which comes before $dir/$b. Remove it, or put $dir earlier on your PATH."
+  fi
+done
 echo "
 $("$dir/agentvc" --version 2>/dev/null || echo agentvc) is ready. Restart agentvcd if it is running.
 In a repository: agentvcd   (review UI on http://localhost:7420)

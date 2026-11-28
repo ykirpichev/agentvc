@@ -130,6 +130,12 @@ fn errors_have_stable_codes() {
     let v = agentvc(tmp.path(), &["log"]);
     assert_eq!(v["ok"], false);
     assert_eq!(v["error"]["code"], "no_space");
+    // doctor and config say what creates the store.
+    for cmd in [&["doctor"][..], &["config"][..]] {
+        let v = agentvc(tmp.path(), cmd);
+        assert_eq!(v["error"]["code"], "no_space", "{cmd:?}: {v}");
+        assert_eq!(v["error"]["hint"], "agentvc init", "{cmd:?}: {v}");
+    }
 
     agentvc(tmp.path(), &["init"]);
     let v = agentvc(tmp.path(), &["show", "a99"]);
