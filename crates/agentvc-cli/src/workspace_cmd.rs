@@ -53,6 +53,11 @@ pub enum WorkspaceCmd {
         /// Agents working at once in this workspace.
         #[arg(long)]
         max: Option<usize>,
+        /// What `stack restack|sync --resolve` (and the review UI) do with a
+        /// branch that conflicts: agent (default: an agent resolves it in
+        /// its own worktree for you to review) or manual (stop here).
+        #[arg(long)]
+        conflicts: Option<String>,
         /// Clear every setting first (then apply any given here).
         #[arg(long)]
         clear: bool,
@@ -393,6 +398,7 @@ pub fn run(cwd: &Path, cmd: WorkspaceCmd) -> anyhow::Result<(Value, String)> {
             permissions,
             sandbox,
             max,
+            conflicts,
             clear,
         } => {
             use agentvc_core::agent::{self, AgentSettings};
@@ -404,6 +410,7 @@ pub fn run(cwd: &Path, cmd: WorkspaceCmd) -> anyhow::Result<(Value, String)> {
                 permissions,
                 sandbox,
                 max,
+                conflicts,
             };
             let r = if clear || !given.is_empty() {
                 let base = if clear {
@@ -439,6 +446,10 @@ pub fn run(cwd: &Path, cmd: WorkspaceCmd) -> anyhow::Result<(Value, String)> {
                 if eff.sandbox.unwrap_or(false) { "on" } else { "off" },
                 eff.max.map(|m| m.to_string()).unwrap_or_else(|| "no limit".into()),
                 r.machine_limit
+            ));
+            text.push_str(&format!(
+                "\n  conflicts    {}",
+                or(&eff.conflicts, agent::CONFLICTS[0])
             ));
             (json!(r), text)
         }

@@ -550,6 +550,13 @@
 .conf-box > header {
   background: var(--promoted-bg);
 }
+/* a clash an agent is resolving: calmer than one waiting on you */
+.conf-box.conf-agent {
+  border-color: var(--accent);
+}
+.conf-box.conf-agent > header {
+  background: var(--accent-soft);
+}
 .move-card ul {
   margin: 0;
   padding: 10px 12px 10px 30px;

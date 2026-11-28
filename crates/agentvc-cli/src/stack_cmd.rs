@@ -76,6 +76,12 @@ pub enum StackCmd {
         /// run restack again).
         #[arg(long)]
         keep_conflicts: bool,
+        /// On conflict, follow the workspace's `conflicts` setting: by
+        /// default an agent resolves each conflicting branch in its own
+        /// worktree (see `agentvc agent ls`) while the rest restacks; with
+        /// `manual`, as --keep-conflicts.
+        #[arg(long, conflicts_with = "keep_conflicts")]
+        resolve: bool,
         /// Change the stack of another workspace (id, name or directory)
         /// instead: applied now if it is idle, else queued until its agent
         /// stops. See `agentvc workspace`.
@@ -96,6 +102,12 @@ pub enum StackCmd {
         keep_merged: bool,
         #[arg(long)]
         keep_conflicts: bool,
+        /// On conflict, follow the workspace's `conflicts` setting: by
+        /// default an agent resolves each conflicting branch in its own
+        /// worktree (see `agentvc agent ls`) while the rest restacks; with
+        /// `manual`, as --keep-conflicts.
+        #[arg(long, conflicts_with = "keep_conflicts")]
+        resolve: bool,
         /// Change the stack of another workspace (id, name or directory)
         /// instead: applied now if it is idle, else queued until its agent
         /// stops. See `agentvc workspace`.
@@ -318,6 +330,72 @@ fn restack_text(r: &RestackResult) -> String {
     t
 }
 
+/// What `--resolve` did: what restacked, and the agents resolving the rest.
+fn resolve_text(o: &workspace::EditOutcome) -> String {
+    let Some(v) = &o.result else {
+        return format!(
+            "queued as {}: {}; cancel with `agentvc workspace cancel {}`",
+            o.request_id,
+            o.reason.as_deref().unwrap_or("busy"),
+            o.request_id
+        );
+    };
+    let r = v.get("restack").unwrap_or(v);
+    let str_of = |x: &Value, k: &str| x.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+    let mut t = String::new();
+    for u in r
+        .get("updated")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        t += &format!(
+            "restacked {} onto {}\n",
+            str_of(u, "branch"),
+            short(&str_of(u, "onto"))
+        );
+    }
+    if let Some(c) = r.get("conflict").filter(|c| !c.is_null()) {
+        let paths: Vec<String> = c
+            .get("paths")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|p| p.as_str().map(str::to_string))
+            .collect();
+        t += &format!(
+            "{} conflicts in {}: stopped in its worktree (conflicts: manual); resolve, `git add`, `agentvc stack continue`\n",
+            str_of(c, "branch"),
+            paths.join(", ")
+        );
+    }
+    for a in v
+        .get("resolving")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let branch = a.get("branch").and_then(Value::as_str).unwrap_or("?");
+        match a.get("agent").and_then(Value::as_str) {
+            Some(id) => {
+                t += &format!(
+                    "{branch} conflicts: agent {id} is resolving it; review with `agentvc agent show {id}`, accept with `agentvc agent land {id}`\n"
+                )
+            }
+            None => {
+                t += &format!(
+                    "{branch} conflicts; could not start an agent: {}\n",
+                    a.get("error").and_then(Value::as_str).unwrap_or("?")
+                )
+            }
+        }
+    }
+    if t.is_empty() {
+        t = "everything is up to date\n".into();
+    }
+    t
+}
+
 fn branch_line(b: &BranchInfo) -> String {
     let mut s = format!(
         "{}{} {}",
@@ -421,6 +499,16 @@ fn log_text(l: &LogResult) -> String {
 
 /// The edit a stack command asks of another workspace (`--workspace`).
 fn remote_edit(cmd: &StackCmd) -> Option<(String, bool, Op)> {
+    match edit_of(cmd) {
+        Some((Some(ws), queue, op, _)) => Some((ws, queue, op)),
+        _ => None,
+    }
+}
+
+/// The edit a stack command stands for: (`--workspace`, `--queue`, op,
+/// `--resolve`).
+fn edit_of(cmd: &StackCmd) -> Option<(Option<String>, bool, Op, bool)> {
+    let mut resolve = false;
     let (ws, queue, op) = match cmd {
         StackCmd::Move {
             branch,
@@ -440,9 +528,13 @@ fn remote_edit(cmd: &StackCmd) -> Option<(String, bool, Op)> {
             branch,
             workspace,
             queue,
+            resolve: r,
             ..
         } => (
-            workspace,
+            {
+                resolve = *r;
+                workspace
+            },
             queue,
             Op::Restack {
                 branch: branch.clone(),
@@ -474,15 +566,34 @@ fn remote_edit(cmd: &StackCmd) -> Option<(String, bool, Op)> {
             },
         ),
         StackCmd::Sync {
-            workspace, queue, ..
-        } => (workspace, queue, Op::Sync),
+            workspace,
+            queue,
+            resolve: r,
+            ..
+        } => {
+            resolve = *r;
+            (workspace, queue, Op::Sync)
+        }
         _ => return None,
     };
-    ws.clone().map(|w| (w, *queue, op))
+    Some((ws.clone(), *queue, op, resolve))
 }
 
 /// Run `agentvc stack ...`; returns (json, text).
 pub fn run(cwd: &Path, cmd: StackCmd) -> anyhow::Result<(Value, String)> {
+    if let Some((target, queue, op, true)) = edit_of(&cmd) {
+        let target = target.unwrap_or_else(|| cwd.to_string_lossy().into_owned());
+        let o = workspace::edit_full(
+            cwd,
+            &target,
+            op,
+            Some("cli"),
+            queue,
+            workspace::OnConflict::Resolve,
+        )?;
+        let text = resolve_text(&o);
+        return Ok((json!(o), text));
+    }
     if let Some((target, queue, op)) = remote_edit(&cmd) {
         let from = Window::open(cwd)
             .ok()

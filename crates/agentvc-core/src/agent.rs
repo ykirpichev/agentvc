@@ -59,6 +59,8 @@ pub const RUNNERS: &[&str] = &["claude", "codex", "cursor", "command"];
 pub const PERMISSIONS: &[&str] = &["auto", "edits", "ask", "bypass"];
 /// The permission level when nothing sets one.
 pub const DEFAULT_PERMISSIONS: &str = "auto";
+/// What conflicts do, the default first.
+pub const CONFLICTS: &[&str] = &["agent", "manual"];
 
 /// Claude Code's `--permission-mode` for an agentvc permission level.
 pub fn claude_permission_mode(level: Option<&str>) -> &'static str {
@@ -100,6 +102,12 @@ pub struct AgentSettings {
     /// Agents working at once in this workspace.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max: Option<usize>,
+    /// What a restack that conflicts does when you asked agentvc to resolve
+    /// it: `agent` (an agent resolves each conflicting branch in its own
+    /// worktree and you review the result; default) or `manual` (it stops
+    /// in the workspace for you).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conflicts: Option<String>,
 }
 
 impl AgentSettings {
@@ -154,6 +162,9 @@ pub enum Mode {
     New,
     /// A new version of the start branch.
     Revise,
+    /// The resolution of the start branch's conflicting restack
+    /// ([`Agent::conflict`]); landing finishes that restack.
+    Resolve,
 }
 
 /// One state per agent; the UI shows it as one dot.
@@ -386,6 +397,14 @@ pub struct Agent {
     pub landed: Option<Landing>,
     #[serde(default)]
     pub messages: Vec<Message>,
+    /// [`Mode::Resolve`]: the restack it resolves. Its worktree starts at
+    /// `partial` with `tree` (conflict markers included) checked out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conflict: Option<crate::stack::HandOff>,
+    /// [`Mode::Resolve`]: files that still had conflict markers when it
+    /// stopped.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub markers_left: Vec<String>,
     /// Computed on read: the start branch moved since the agent started.
     #[serde(default)]
     pub stale: bool,
@@ -739,6 +758,9 @@ impl AgentSettings {
         if let Some(p) = &self.permissions {
             check_choice("permissions", p, PERMISSIONS)?;
         }
+        if let Some(c) = &self.conflicts {
+            check_choice("conflicts", c, CONFLICTS)?;
+        }
         if self.max == Some(0) {
             return Err(agent_err("bad_setting", "max must be at least 1"));
         }
@@ -758,6 +780,7 @@ impl AgentSettings {
                 .or_else(|| under.permissions.clone()),
             sandbox: self.sandbox.or(under.sandbox),
             max: self.max.or(under.max),
+            conflicts: self.conflicts.clone().or_else(|| under.conflicts.clone()),
         }
     }
 }
@@ -772,6 +795,7 @@ fn repo_defaults(w: &Window) -> AgentSettings {
         permissions: config(w, "agentvc.agent-permissions"),
         sandbox: config(w, "agentvc.agent-sandbox").map(|v| v == "true"),
         max: None,
+        conflicts: config(w, "agentvc.agent-conflicts"),
     }
 }
 
@@ -826,6 +850,7 @@ pub fn set_settings(
         permissions: blank(new.permissions),
         sandbox: new.sandbox,
         max: new.max,
+        conflicts: blank(new.conflicts),
     };
     new.validate()?;
     if new.runner.as_deref() == Some("command") && new.command.is_none() {
@@ -963,6 +988,20 @@ fn workspace_settings(w: &Window, id: &str) -> AgentSettings {
 /// worker in the background. Returns at once; the agent is `queued` until
 /// its machine has a free slot.
 pub fn start(cwd: &Path, req: &StartRequest) -> Result<Agent> {
+    if req.mode == Mode::Resolve {
+        return Err(agent_err(
+            "bad_mode",
+            "resolve agents start from a conflicting restack (`agentvc stack restack --resolve`)",
+        ));
+    }
+    start_inner(cwd, req, None)
+}
+
+fn start_inner(
+    cwd: &Path,
+    req: &StartRequest,
+    conflict: Option<&crate::stack::HandOff>,
+) -> Result<Agent> {
     let prompt = req.prompt.trim();
     if prompt.is_empty() {
         return Err(agent_err("prompt_required", "tell the agent what to do"));
@@ -985,6 +1024,7 @@ pub fn start(cwd: &Path, req: &StartRequest) -> Result<Agent> {
         permissions: req.permissions.clone(),
         sandbox: None,
         max: None,
+        conflicts: None,
     };
     asked.validate()?;
     let eff = asked.over(&w.state.agents).over(&repo_defaults(&w));
@@ -996,12 +1036,15 @@ pub fn start(cwd: &Path, req: &StartRequest) -> Result<Agent> {
         ));
     }
     let trunk = w.state.trunk.clone();
-    let from = req
-        .from
-        .clone()
-        .or_else(|| w.current_branch())
-        .unwrap_or_else(|| trunk.clone());
-    let is_trunk = from == trunk;
+    let from = match conflict {
+        Some(h) => h.branch.clone(),
+        None => req
+            .from
+            .clone()
+            .or_else(|| w.current_branch())
+            .unwrap_or_else(|| trunk.clone()),
+    };
+    let is_trunk = from == trunk && conflict.is_none();
     let tip = if is_trunk {
         w.base()
     } else {
@@ -1014,8 +1057,9 @@ pub fn start(cwd: &Path, req: &StartRequest) -> Result<Agent> {
             json!({ "branch": from, "workspace": ws.record.id }),
         )
     })?;
-    let commit = match &req.at {
-        Some(at) => {
+    let commit = match (&req.at, conflict) {
+        (_, Some(h)) => h.partial.clone(),
+        (Some(at), None) => {
             let c = w
                 .repo
                 .rev(at)
@@ -1028,7 +1072,7 @@ pub fn start(cwd: &Path, req: &StartRequest) -> Result<Agent> {
             }
             c
         }
-        None => tip,
+        (None, None) => tip,
     };
     if req.mode == Mode::Revise && is_trunk {
         return Err(agent_err(
@@ -1051,7 +1095,7 @@ pub fn start(cwd: &Path, req: &StartRequest) -> Result<Agent> {
     let (id, dir) = new_agent_dir(&root, &space_roots(&here))?;
     let title = title_of(prompt);
     let branch = match req.mode {
-        Mode::Revise => format!("agentvc/{id}"),
+        Mode::Revise | Mode::Resolve => format!("agentvc/{id}"),
         Mode::New => {
             let base = match slug(&title) {
                 s if s.is_empty() => id.clone(),
@@ -1087,6 +1131,16 @@ pub fn start(cwd: &Path, req: &StartRequest) -> Result<Agent> {
     }
     if let Ok(g) = git_in(&wt).git(&["rev-parse", "--absolute-git-dir"], None) {
         let _ = fs::write(Path::new(&g).join(AGENT_MARKER), &id);
+    }
+    if let Some(h) = conflict {
+        // The merge with its conflict markers, uncommitted: the agent's
+        // commit then holds the whole resolved change.
+        if let Err(e) = git_in(&wt).git(&["read-tree", "--reset", "-u", &h.tree], None) {
+            let _ = w.repo.git(&["worktree", "remove", "--force", &wt_s], None);
+            let _ = w.repo.git(&["branch", "-D", &branch], None);
+            let _ = fs::remove_dir_all(&dir);
+            return Err(e);
+        }
     }
     let created = now();
     let a = Agent {
@@ -1144,6 +1198,8 @@ pub fn start(cwd: &Path, req: &StartRequest) -> Result<Agent> {
             text: prompt.to_string(),
             at: created,
         }],
+        conflict: conflict.cloned(),
+        markers_left: Vec::new(),
         stale: false,
         urgency: None,
         waiting_since: None,
@@ -1151,6 +1207,147 @@ pub fn start(cwd: &Path, req: &StartRequest) -> Result<Agent> {
     write_agent(&dir, &a)?;
     add_step(&dir, "you", prompt);
     launch(&req.exe, &dir)
+}
+
+// ---- resolving conflicts -----------------------------------------------------
+
+/// Whether conflicts in `w` go to an agent: its `conflicts` setting, then
+/// `git config agentvc.agent-conflicts`, is not `manual`.
+pub fn resolves_conflicts(w: &Window) -> bool {
+    let setting = w
+        .state
+        .agents
+        .conflicts
+        .clone()
+        .or_else(|| config(w, "agentvc.agent-conflicts"));
+    setting.as_deref() != Some("manual")
+}
+
+/// The `agentvc` program agents run with when the caller has none at hand:
+/// `$AGENTVC_BIN`, this program if it is `agentvc`, one next to it, else
+/// `agentvc` on `PATH`.
+pub fn agentvc_program() -> PathBuf {
+    if let Some(p) = std::env::var_os("AGENTVC_BIN").filter(|p| !p.is_empty()) {
+        return PathBuf::from(p);
+    }
+    let name = if cfg!(windows) {
+        "agentvc.exe"
+    } else {
+        "agentvc"
+    };
+    if let Ok(e) = std::env::current_exe() {
+        if e.file_name().is_some_and(|n| n == name) {
+            return e;
+        }
+        let p = e.with_file_name(name);
+        if p.exists() {
+            return p;
+        }
+    }
+    PathBuf::from(name)
+}
+
+fn short(id: &str) -> &str {
+    &id[..id.len().min(10)]
+}
+
+/// What a resolve agent is asked to do.
+fn resolve_prompt(h: &crate::stack::HandOff) -> String {
+    let parent = h.parent.trim_start_matches("origin/");
+    let files: String = h.paths.iter().map(|p| format!("- {p}\n")).collect();
+    let rest = match h.rest {
+        0 => String::new(),
+        1 => " The branch has one more commit after it; agentvc replays it on your resolution."
+            .into(),
+        n => format!(
+            " The branch has {n} more commits after it; agentvc replays them on your resolution."
+        ),
+    };
+    format!(
+        "Resolve the clash restacking {branch} onto {parent}\n\n\
+agentvc is restacking branch `{branch}` onto the new tip of `{parent}` ({onto}). Its commit {c} \"{subject}\" \
+changes the same lines as `{parent}` in:\n{files}\n\
+Those files hold the merge with diff3 conflict markers: `<<<<<<< {onto}` starts what `{parent}` has now, \
+`|||||||` what both started from, and `>>>>>>> {branch} {c}` ends this branch's change. Everything else \
+already merged.{rest}\n\n\
+Edit each file so it keeps what both sides meant, remove every marker, and leave the rest of the change as it is. \
+To see the two sides: `git diff {c}^ {c} -- <path>` (this branch's change) and `git diff {c}^ HEAD -- <path>` \
+(what {parent} changed). Build and test what you touched if you can. Do not commit, rebase or switch branches: \
+agentvc puts your resolution on the stack once the person accepts it. Finish with one line per file on how you \
+resolved it.",
+        branch = h.branch,
+        onto = short(&h.onto),
+        c = short(&h.commit),
+        subject = h.subject,
+    )
+}
+
+/// Start an agent that resolves a conflicting restack of workspace
+/// `workspace` (see [`crate::stack::HandOff`]), with the workspace's agent
+/// settings. Returns the agent already working on the same conflict, if
+/// there is one.
+pub fn start_resolve(
+    cwd: &Path,
+    workspace: &str,
+    h: &crate::stack::HandOff,
+    exe: &Path,
+) -> Result<Agent> {
+    let w = Window::open(cwd)?;
+    let root = agents_root(&w.common_dir);
+    if let Ok(rd) = fs::read_dir(&root) {
+        for e in rd.flatten() {
+            let Ok(a) = read_agent(&e.path()) else {
+                continue;
+            };
+            let same = a.mode == Mode::Resolve
+                && a.workspace == workspace
+                && !a.state.is_closed()
+                && a.conflict.as_ref().is_some_and(|c| {
+                    c.branch == h.branch && c.old == h.old && c.commit == h.commit
+                });
+            if same {
+                return Ok(a);
+            }
+        }
+    }
+    let req = StartRequest {
+        workspace: Some(workspace.to_string()),
+        from: Some(h.branch.clone()),
+        at: None,
+        prompt: resolve_prompt(h),
+        mode: Mode::Resolve,
+        model: None,
+        check: None,
+        command: None,
+        runner: None,
+        permissions: None,
+        exe: exe.to_path_buf(),
+    };
+    start_inner(cwd, &req, Some(h))
+}
+
+/// Files of a resolve agent's result that still hold conflict markers.
+fn markers_in(a: &Agent) -> Vec<String> {
+    let Some(h) = &a.conflict else {
+        return Vec::new();
+    };
+    h.paths
+        .iter()
+        .filter(|p| {
+            fs::read_to_string(a.worktree.join(p)).is_ok_and(|t| {
+                let mut open = false;
+                for l in t.lines() {
+                    if l.starts_with("<<<<<<< ") {
+                        open = true;
+                    } else if open && l.starts_with(">>>>>>> ") {
+                        return true;
+                    }
+                }
+                false
+            })
+        })
+        .cloned()
+        .collect()
 }
 
 /// Spawn the worker; a failure to spawn fails the agent rather than losing it.
@@ -1221,7 +1418,10 @@ fn refresh(
     }
     if a.state.is_done() {
         if let Some(t) = tips(&a) {
-            a.stale = t != a.start.commit;
+            // A resolution is stale once its branch moved off the tip whose
+            // restack it resolves.
+            let base = a.conflict.as_ref().map_or(&a.start.commit, |c| &c.old);
+            a.stale = t != *base;
         }
     }
     a.urgency = a.compute_urgency();
@@ -1630,12 +1830,46 @@ pub fn land(cwd: &Path, id: &str) -> Result<(Agent, EditOutcome)> {
             },
             a.start.branch.clone(),
         ),
+        Mode::Resolve => {
+            let conflict = a
+                .conflict
+                .clone()
+                .ok_or_else(|| agent_err("bad_mode", format!("{id} has no conflict to resolve")))?;
+            let left = markers_in(&a);
+            if !left.is_empty() {
+                return Err(agent_err_with(
+                    "unresolved_conflicts",
+                    format!("conflict markers are left in {}", left.join(", ")),
+                    json!({ "paths": left }),
+                ));
+            }
+            let tree = w
+                .repo
+                .git(&["rev-parse", &format!("{tip}^{{tree}}")], None)?;
+            (
+                Op::Resolve {
+                    branch: a.start.branch.clone(),
+                    tree,
+                    conflict,
+                },
+                a.start.branch.clone(),
+            )
+        }
     };
     // The branch must not stay checked out in the agent's worktree, or the
     // workspace could not check it out.
     remove_worktree(&w, &a);
-    let out = workspace::edit(cwd, &a.workspace, op, Some(&from), false)?;
-    if a.mode == Mode::Revise && out.outcome == RequestStatus::Applied {
+    // Branches above that conflict go to agents of their own (or stop for
+    // the person), as the workspace's `conflicts` setting says.
+    let out = workspace::edit_full(
+        cwd,
+        &a.workspace,
+        op,
+        Some(&from),
+        false,
+        workspace::OnConflict::Resolve,
+    )?;
+    if a.mode != Mode::New && out.outcome == RequestStatus::Applied {
         let _ = w.repo.git(&["branch", "-D", &a.branch], None);
     }
     let landing = Landing {
@@ -2130,6 +2364,7 @@ pub fn work(dir: &Path, exe: &Path) -> Result<Agent> {
     let committed = commit_work(&cur);
     let result = result_of(&cur);
     let stopped = cur.stop_requested;
+    let markers = markers_in(&cur);
     let failed = !status.success() && !stopped;
     let check = match (&cur.check, failed || stopped) {
         (Some(c), false) => {
@@ -2162,8 +2397,15 @@ pub fn work(dir: &Path, exe: &Path) -> Result<Agent> {
         if let Err(e) = &committed {
             a.error = Some(format!("could not commit the agent's work: {e}"));
         }
+        a.markers_left = markers.clone();
         a.state = if stopped {
             AgentState::Stopped
+        } else if !failed && !markers.is_empty() {
+            a.error = Some(format!(
+                "conflict markers are left in {}",
+                markers.join(", ")
+            ));
+            AgentState::Failed
         } else if failed {
             if a.error.is_none() {
                 a.error = Some(match status.code() {
@@ -2366,6 +2608,7 @@ mod tests {
                 permissions: Some("edits".into()),
                 sandbox: Some(true),
                 max: Some(2),
+                conflicts: None,
             },
         )
         .unwrap();
@@ -2631,5 +2874,197 @@ echo '{"type":"result","total_cost_usd":0.25,"num_turns":3,"is_error":false,"res
         assert_eq!(b.messages.last().unwrap().text, "Done: added x");
         let s = steps(&dir, 0);
         assert!(s.iter().any(|s| s.kind == "tool"));
+    }
+
+    /// `feat` also changes a.txt, and origin/main changes the same line.
+    fn conflicting(work: &Path) -> crate::stack::HandOff {
+        fs::write(work.join("a.txt"), "feat\n").unwrap();
+        git(work, &["commit", "--quiet", "-am", "edit a on feat"]);
+        let t = work.parent().unwrap();
+        let other = t.join("other");
+        git(
+            t,
+            &[
+                "clone",
+                "--quiet",
+                t.join("origin.git").to_str().unwrap(),
+                other.to_str().unwrap(),
+            ],
+        );
+        fs::write(other.join("a.txt"), "main\n").unwrap();
+        git(&other, &["commit", "--quiet", "-am", "edit a on main"]);
+        git(&other, &["push", "--quiet", "origin", "main"]);
+        git(work, &["fetch", "--quiet", "origin"]);
+        let mut w = Window::open(work).unwrap();
+        let old = w.branch_tip("feat").unwrap();
+        w.hand_off = true;
+        let r = w.restack(None, false).unwrap();
+        assert!(r.conflict.is_none());
+        assert_eq!(r.handed_off.len(), 1, "{r:?}");
+        let h = r.handed_off[0].clone();
+        assert_eq!(h.branch, "feat");
+        assert_eq!(h.old, old);
+        assert_eq!(h.paths, vec!["a.txt"]);
+        assert_eq!(h.subject, "edit a on feat");
+        // Nothing moved: the branch waits for its resolution.
+        assert_eq!(Window::open(work).unwrap().branch_tip("feat").unwrap(), old);
+        h
+    }
+
+    fn resolve_inline(work: &Path, h: &crate::stack::HandOff) -> Agent {
+        let ws = workspace::find_local(&Window::open(work).unwrap(), &work.to_string_lossy())
+            .unwrap()
+            .record
+            .id;
+        let a = start_resolve(work, &ws, h, Path::new("true")).unwrap();
+        assert_eq!(a.mode, Mode::Resolve);
+        // The same conflict again reuses the agent.
+        assert_eq!(
+            start_resolve(work, &ws, h, Path::new("true")).unwrap().id,
+            a.id
+        );
+        let text = fs::read_to_string(a.worktree.join("a.txt")).unwrap();
+        assert!(
+            text.contains("<<<<<<< ") && text.contains(">>>>>>> "),
+            "{text}"
+        );
+        assert!(a.prompt.contains("a.txt") && a.prompt.contains("edit a on feat"));
+        work_inline(&agent_dir(work, &a.id).unwrap())
+    }
+
+    #[test]
+    fn a_resolve_agent_finishes_the_restack_once_landed() {
+        let (_t, work) = repo();
+        set_settings(
+            &work,
+            None,
+            AgentSettings {
+                runner: Some("command".into()),
+                command: Some("printf 'main and feat\\n' > a.txt".into()),
+                check: Some("grep -q feat a.txt".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let h = conflicting(&work);
+        let a = resolve_inline(&work, &h);
+        assert_eq!(a.state, AgentState::Ready, "{a:?}");
+        assert!(a.markers_left.is_empty());
+        assert!(a.tests.as_ref().unwrap().passed);
+        assert!(!list(&work, false).unwrap().agents[0].stale);
+
+        let (landed, out) = land(&work, &a.id).unwrap();
+        assert_eq!(out.outcome, RequestStatus::Applied, "{out:?}");
+        assert_eq!(landed.state, AgentState::Landed);
+        let w = Window::open(&work).unwrap();
+        let tip = w.branch_tip("feat").unwrap();
+        let main = w.repo.rev("origin/main").unwrap();
+        // Both commits on the new main, the resolved one with its message.
+        assert_eq!(git(&work, &["rev-parse", &format!("{tip}~2")]), main);
+        assert_eq!(
+            git(&work, &["log", "-1", "--format=%s", &tip]),
+            "edit a on feat"
+        );
+        assert_eq!(
+            git(&work, &["show", &format!("{tip}:a.txt")]),
+            "main and feat"
+        );
+        assert_eq!(w.state.branches[0].parent_rev, main);
+        assert!(w.branch_tip(&a.branch).is_none());
+    }
+
+    #[test]
+    fn markers_left_fail_the_resolution_and_a_moved_branch_is_refused() {
+        let (_t, work) = repo();
+        set_settings(
+            &work,
+            None,
+            AgentSettings {
+                runner: Some("command".into()),
+                command: Some("true".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let h = conflicting(&work);
+        let a = resolve_inline(&work, &h);
+        assert_eq!(a.state, AgentState::Failed);
+        assert_eq!(a.markers_left, vec!["a.txt"]);
+        let e = land(&work, &a.id).unwrap_err();
+        assert_eq!(e.code(), "unresolved_conflicts");
+
+        // A resolution for a branch that moved on is refused.
+        fs::write(a.worktree.join("a.txt"), "fixed\n").unwrap();
+        git(&a.worktree, &["commit", "--quiet", "-am", "fix"]);
+        fs::write(work.join("c.txt"), "more\n").unwrap();
+        git(&work, &["add", "c.txt"]);
+        git(&work, &["commit", "--quiet", "-m", "more"]);
+        assert!(list(&work, false).unwrap().agents[0].stale);
+        let e = land(&work, &a.id).unwrap_err();
+        assert_eq!(e.code(), "branch_moved");
+    }
+
+    #[test]
+    fn resolve_edits_start_agents_unless_conflicts_are_manual() {
+        let (_t, work) = repo();
+        set_settings(
+            &work,
+            None,
+            AgentSettings {
+                runner: Some("command".into()),
+                command: Some("true".into()),
+                conflicts: Some("manual".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let _ = conflicting(&work);
+        let ws = work.to_string_lossy().into_owned();
+        // Manual: stops in the workspace, as keep_conflicts.
+        let out = workspace::edit_full(
+            &work,
+            &ws,
+            Op::Restack { branch: None },
+            None,
+            false,
+            workspace::OnConflict::Resolve,
+        )
+        .unwrap();
+        let v = out.result.unwrap();
+        assert_eq!(v["conflict"]["branch"], "feat", "{v}");
+        assert!(v.get("resolving").is_none());
+        workspace::finish(&work, &ws, true).unwrap();
+
+        // Agent (the default): the branch is handed to an agent.
+        let mut s = settings(&work, None).unwrap().settings;
+        s.conflicts = None;
+        set_settings(&work, None, s).unwrap();
+        assert!(resolves_conflicts(&Window::open(&work).unwrap()));
+        let out = workspace::edit_full(
+            &work,
+            &ws,
+            Op::Restack { branch: None },
+            None,
+            false,
+            workspace::OnConflict::Resolve,
+        )
+        .unwrap();
+        let v = out.result.unwrap();
+        assert!(v["conflict"].is_null(), "{v}");
+        assert_eq!(v["resolving"][0]["branch"], "feat", "{v}");
+        let id = v["resolving"][0]["agent"].as_str().unwrap().to_string();
+        let a = read_agent(&agent_dir(&work, &id).unwrap()).unwrap();
+        assert_eq!(a.mode, Mode::Resolve);
+        let _ = discard(&work, &id);
+        // Settings refuse anything else.
+        let bad = set_settings(
+            &work,
+            None,
+            AgentSettings {
+                conflicts: Some("sometimes".into()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(bad.unwrap_err().code(), "bad_setting");
     }
 }

@@ -1,7 +1,7 @@
 // Agents in plain words: one state each, shown as one dot and a few words,
 // and the order of the "Needs you" list. Shared by every surface.
 
-import type { Agent, AgentPermissions, AgentRunner, AgentSettings, AgentState } from '../api/types'
+import type { Agent, AgentConflicts, AgentPermissions, AgentRunner, AgentSettings, AgentState, Resolving } from '../api/types'
 
 export type AgentTone = 'ask' | 'bad' | 'ok' | 'run' | 'mute'
 
@@ -43,12 +43,37 @@ export const agentsOn = (agents: Agent[], ws: string, branch: string) =>
 export const agentWorkingOn = (agents: Agent[], ws: string, branch: string) =>
   [...agents]
     .sort((a, b) => b.created_at - a.created_at)
-    .find((a) => a.workspace === ws && a.state !== 'landed' && a.state !== 'discarded' && (a.branch === branch || (a.mode === 'revise' && a.start.branch === branch)))
+    .find((a) => a.workspace === ws && a.state !== 'landed' && a.state !== 'discarded' && (a.branch === branch || (a.mode !== 'new' && a.start.branch === branch)))
 
 export const agentLink = (id: string) => `/review/a/${encodeURIComponent(id)}`
 
 /** Where its work goes, in words. */
-export const resultWords = (a: Agent) => (a.mode === 'revise' ? `new version of ${a.start.branch}` : `new branch on ${a.start.branch}`)
+export const resultWords = (a: Agent) =>
+  a.mode === 'resolve'
+    ? `resolves ${a.start.branch} on ${(a.conflict?.parent ?? 'its parent').replace(/^origin\//, '')}`
+    : a.mode === 'revise'
+      ? `new version of ${a.start.branch}`
+      : `new branch on ${a.start.branch}`
+
+/** The open agent resolving `branch`'s restack in workspace `ws`, if any. */
+export const resolverOf = (agents: Agent[], ws: string, branch: string) =>
+  agents.find((a) => a.mode === 'resolve' && a.workspace === ws && a.start.branch === branch && a.state !== 'landed' && a.state !== 'discarded')
+
+/** Say what a `resolve` edit handed to agents; returns the agent to open when there is one. */
+export function resolvingWords(r: Resolving[] | undefined): { text: string; agent?: string } | null {
+  if (!r?.length) return null
+  const ok = r.filter((x) => x.agent)
+  const bad = r.filter((x) => !x.agent)
+  const parts: string[] = []
+  if (ok.length) parts.push(`${ok.map((x) => x.branch).join(', ')} clash${ok.length === 1 ? 'es' : ''} with ${ok.length === 1 ? 'its parent' : 'their parents'}; an agent is resolving ${ok.length === 1 ? 'it' : 'them'} for you to review.`)
+  if (bad.length) parts.push(`${bad.map((x) => x.branch).join(', ')}: could not start an agent (${bad[0]!.error ?? 'unknown error'}).`)
+  return { text: parts.join(' '), agent: ok.length === 1 ? ok[0]!.agent : undefined }
+}
+
+export const CONFLICT_WORDS: Record<AgentConflicts, string> = {
+  agent: 'An agent resolves them, you review',
+  manual: 'Stop and let me resolve them',
+}
 
 export const RUNNER_WORDS: Record<AgentRunner, string> = {
   claude: 'Claude Code',
@@ -113,5 +138,6 @@ export function settingsLine(s: AgentSettings | undefined): string {
   if (runner === 'claude') parts.push(PERMISSION_SHORT[s?.permissions ?? DEFAULT_PERMISSIONS])
   if (runner === 'claude' && s?.sandbox) parts.push('sandboxed')
   if (s?.max) parts.push(`up to ${s.max} at once`)
+  if (s?.conflicts === 'manual') parts.push('you resolve conflicts')
   return parts.join(' · ')
 }

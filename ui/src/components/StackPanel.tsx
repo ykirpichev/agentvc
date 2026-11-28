@@ -217,7 +217,7 @@ function AgentRow({ a, selected, onOpen }: { a: Agent; selected: boolean; onOpen
       aria-selected={selected}
       className={`sp-row sp-agent ${selected ? 'sel' : ''}`}
       onClick={onOpen}
-      title={`${a.title}\n${st.label}${a.last_step ? ` · ${a.last_step}` : ''}\n${a.mode === 'revise' ? 'Revises' : 'New branch on'} ${a.start.branch}`}
+      title={`${a.title}\n${st.label}${a.last_step ? ` · ${a.last_step}` : ''}\n${a.mode === 'resolve' ? 'Resolves the clash of' : a.mode === 'revise' ? 'Revises' : 'New branch on'} ${a.start.branch}`}
     >
       <span className="sp-gutter" aria-hidden />
       <span className="sp-agent-body">

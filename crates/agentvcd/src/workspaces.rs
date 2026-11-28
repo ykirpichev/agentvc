@@ -9,6 +9,10 @@
 //! - `POST /api/requests/{id}/cancel`: cancel a queued edit.
 //! - `GET /api/workspaces/{id}/branches/{name}`: a branch's own commits and
 //!   files.
+//! - `"resolve": true` on an edit hands each conflicting branch to an agent
+//!   (the workspace's `conflicts` setting, `agent` by default; `manual` acts
+//!   as `keep_conflicts`): the result lists them under `resolving`
+//!   (`[{branch, agent | error}]`), and the other branches restack.
 //! - A restack stopped on a conflict (`"keep_conflicts": true` on an edit):
 //!   `GET /api/workspaces/{id}/conflicts`, `POST .../conflicts/resolve`
 //!   `{"path", "hunks": [{"index", "take", "text"}]}` (hunks from the
@@ -74,6 +78,10 @@ pub(crate) struct EditBody {
     /// Stop a conflicting restack in the worktree, to resolve it here.
     #[serde(default)]
     keep_conflicts: bool,
+    /// Resolve conflicts as the workspace's `conflicts` setting says: an
+    /// agent per conflicting branch (default), or as `keep_conflicts`.
+    #[serde(default)]
+    resolve: bool,
 }
 
 /// Blocking work off the async runtime, without the space lock.
@@ -97,14 +105,14 @@ async fn edit(
     let dir = st.workdir().to_path_buf();
     let from = format!("api:{}", st.actor());
     let out = blocking(move || {
-        workspace::edit_with(
-            &dir,
-            &id,
-            body.op,
-            Some(&from),
-            body.queue,
-            body.keep_conflicts,
-        )
+        let how = if body.resolve {
+            workspace::OnConflict::Resolve
+        } else if body.keep_conflicts {
+            workspace::OnConflict::Keep
+        } else {
+            workspace::OnConflict::Fail
+        };
+        workspace::edit_full(&dir, &id, body.op, Some(&from), body.queue, how)
     })
     .await;
     st.poke_workspaces();

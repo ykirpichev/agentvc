@@ -157,8 +157,12 @@ export const api = {
   /** Every workspace (worktree) of the repo with its stack. */
   workspaces: () => get<WorkspaceList>('/workspaces'),
   /** Change a workspace's stack from here: applied now, or queued while its agent works. */
-  stackEdit: (workspace: string, op: WsOp, keepConflicts = false) =>
-    post<WsEditOutcome>(`/workspaces/${encodeURIComponent(workspace)}/stack`, keepConflicts ? { ...op, keep_conflicts: true } : op),
+  /** `resolve`: conflicts go where the workspace's Conflicts setting says (an agent by default); `keep`: stop in the workspace. */
+  stackEdit: (workspace: string, op: WsOp, conflicts: false | 'resolve' | 'keep' = false) =>
+    post<WsEditOutcome>(
+      `/workspaces/${encodeURIComponent(workspace)}/stack`,
+      conflicts === 'resolve' ? { ...op, resolve: true } : conflicts === 'keep' ? { ...op, keep_conflicts: true } : op,
+    ),
   /** One stacked branch: its own commits and files. */
   branch: (workspace: string, name: string) =>
     get<BranchDetail>(`/workspaces/${encodeURIComponent(workspace)}/branches/${encodeURIComponent(name)}`),

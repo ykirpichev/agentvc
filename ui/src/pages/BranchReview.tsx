@@ -18,7 +18,7 @@ import { useToast } from '../components/Toaster'
 import { canMoveBranch } from '../core/graph'
 import { HELP, prWords, shortSha, WORDS } from '../core/words'
 import { plural, timeAgo } from '../lib/format'
-import { agentsOn, agentWorkingOn, settingsLine } from '../core/agents'
+import { agentLink, agentsOn, agentState, agentWorkingOn, resolverOf, resolvingWords, settingsLine } from '../core/agents'
 import { AgentSettingsForm, AgentsFrom, StartAgent } from './Agents'
 import { branchLink, codeLink, useGo } from '../core/links'
 import { joinPath } from '../core/editor'
@@ -28,6 +28,7 @@ export function BranchReview() {
   const { workspace = '', '*': rest = '' } = useParams()
   const name = decodeURIComponent(rest)
   const toast = useToast()
+  const go = useGo()
   const { refresh } = useLive()
   const list = useResource('workspaces', api.workspaces)
   const w = list.data?.workspaces.find((x) => x.id === workspace)
@@ -45,7 +46,13 @@ export function BranchReview() {
   const run = async (op: WsOp, done: string, keep = false) => {
     setBusy(true)
     try {
-      const r = await api.stackEdit(workspace, op, keep)
+      const r = await api.stackEdit(workspace, op, keep ? 'resolve' : false)
+      const resolving = resolvingWords(r.result?.resolving)
+      if (resolving) {
+        toast.ok(`${done} ${resolving.text}`, { undo: false })
+        if (resolving.agent) go(agentLink(resolving.agent))
+        return
+      }
       const stoppedAt = r.result?.conflict?.branch ?? r.result?.restack?.conflict?.branch
       const mergeStop = r.result?.stopped
       if (mergeStop) {
@@ -147,6 +154,7 @@ export function BranchReview() {
       </div>
 
       {stopped && w.pending && <StackConflicts w={w} />}
+      <Resolver agents={agents} w={w} branch={b.name} />
 
       {!readOnly && !stopped && (
         <div className="br-acts">
@@ -249,6 +257,32 @@ function FileComments({ n }: { n: number }) {
     <span className="file-ncomments" title={`${n} open comment${n === 1 ? '' : 's'}`}>
       <Icon name="comment" size={12} /> {n}
     </span>
+  )
+}
+
+/** An agent resolving this branch's clash with its parent: what clashed, how far it is, and where to review it. */
+function Resolver({ agents, w, branch }: { agents: Parameters<typeof resolverOf>[0]; w: WorkspaceInfo; branch: string }) {
+  const a = resolverOf(agents, w.id, branch)
+  if (!a) return null
+  const st = agentState(a)
+  const parent = (a.conflict?.parent ?? 'its parent').replace(/^origin\//, '')
+  const paths = a.conflict?.paths ?? []
+  return (
+    <section className="conf-box conf-agent" aria-label="Clash being resolved">
+      <header>
+        <b>
+          {branch} clashes with {parent} in {paths.length ? paths.join(', ') : 'some files'}
+        </b>
+        <span className="muted">
+          An agent is resolving it in its own copy; nothing here changes until you accept. · {st.label}
+        </span>
+      </header>
+      <footer className="conf-foot">
+        <Link className="btn btn-primary" to={agentLink(a.id)}>
+          {a.state === 'ready' || a.state === 'tests_failing' || a.state === 'failed' || a.state === 'stopped' ? 'Review the resolution' : 'Watch the agent'}
+        </Link>
+      </footer>
+    </section>
   )
 }
 
