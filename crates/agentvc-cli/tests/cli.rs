@@ -401,6 +401,15 @@ fn fake_github() -> (String, RequestLog) {
                 .find(|(m, p, _)| (m == "POST" || m == "PATCH") && pulls(p))
                 .map(|(_, _, b)| b["body"].clone())
                 .unwrap_or(Value::Null);
+            // And the title it was last sent (a PATCH may leave it out).
+            let last_title = log
+                .iter()
+                .rev()
+                .find(|(m, p, b)| {
+                    (m == "POST" || m == "PATCH") && pulls(p) && b["title"].is_string()
+                })
+                .map(|(_, _, b)| b["title"].clone())
+                .unwrap_or(Value::Null);
             // The one issue comment agentvc keeps (the space), if any.
             let comment = log
                 .iter()
@@ -416,7 +425,7 @@ fn fake_github() -> (String, RequestLog) {
             let merged = PR_MERGED.load(std::sync::atomic::Ordering::SeqCst);
             let pr = serde_json::json!({
                 "number": 7, "html_url": "https://github.com/acme/widget/pull/7",
-                "body": last_body, "state": if merged { "closed" } else { "open" },
+                "body": last_body, "title": last_title, "state": if merged { "closed" } else { "open" },
                 "merged": merged, "draft": false,
                 "merged_at": if merged { Value::from("2026-11-26T00:00:00Z") } else { Value::Null },
                 "merge_commit_sha": "abc123merge", "head": { "sha": "headsha1" },
@@ -1158,6 +1167,232 @@ fn pr_from_a_thread_branch_keeps_prefix_trailers_and_checkout() {
         &["pr", "a3"],
     );
     assert_eq!(v["error"]["code"], "push_not_allowed", "{v}");
+}
+
+/// A space whose `claude/thread` branch pushes to a bare remote, with t1
+/// promoted as a2. Returns (tempdir, work dir).
+fn thread_space_with_promoted_a2() -> (TestDir, std::path::PathBuf) {
+    let tmp = tempdir();
+    let w = tmp.path().join("work");
+    let remote = tmp.path().join("remotes/acme/widget.git");
+    fs::create_dir_all(&w).unwrap();
+    fs::create_dir_all(&remote).unwrap();
+    git(&remote, &["init", "-q", "--bare"]);
+    git(&w, &["init", "-q", "-b", "main"]);
+    fs::write(w.join("lib.rs"), "1\n").unwrap();
+    git(&w, &["add", "-A"]);
+    git(&w, &["commit", "-q", "-m", "base"]);
+    git(&w, &["remote", "add", "origin", remote.to_str().unwrap()]);
+    git(&w, &["checkout", "-q", "-b", "claude/thread"]);
+    agentvc(&w, &["init", "--no-prepare"]);
+    agentvc(&w, &["config", "pr.branch", "claude/thread"]);
+    agentvc(&w, &["task", "new", "make f return 2"]);
+    fork_edit_promote(&w, &["fork", "--task", "t1", "--from", "a1"], "2\n");
+    (tmp, w)
+}
+
+/// Fork with `args`, write `lib.rs` in the new view, promote it.
+fn fork_edit_promote(w: &Path, args: &[&str], text: &str) -> i64 {
+    let v = agentvc(w, args);
+    let id = v["fork"]["attempt"]["id"].as_i64().unwrap();
+    let view = v["fork"]["attempt"]["view_path"].as_str().unwrap();
+    fs::write(Path::new(view).join("lib.rs"), text).unwrap();
+    let v = agentvc(w, &["promote", &format!("a{id}")]);
+    assert_eq!(v["ok"], true, "{v}");
+    id
+}
+
+/// The JSON body of the last request to the PRs endpoint with `method`.
+fn last_pulls_call(log: &RequestLog, method: &str) -> Value {
+    let log = log.lock().unwrap();
+    log.iter()
+        .rfind(|(m, p, _)| m == method && p.contains("/pulls"))
+        .map(|(_, _, b)| b.clone())
+        .unwrap()
+}
+
+#[test]
+fn pr_body_suffix_ends_the_body_and_survives_follow_ups() {
+    let (tmp, w) = thread_space_with_promoted_a2();
+    let footer = "🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\nhttps://claude.ai/code/session_1\n";
+    fs::write(w.join(".agentvc/footer.md"), footer).unwrap();
+    let v = agentvc(&w, &["config", "pr.body-suffix", ".agentvc/footer.md"]);
+    assert_eq!(v["ok"], true, "{v}");
+    let header = tmp.path().join("header.md");
+    fs::write(&header, "Requested by Yury\nVia a thread\n").unwrap();
+
+    let (api, log) = fake_github();
+    let v = agentvc_gh(
+        &w,
+        &api,
+        &[],
+        &["pr", "a2", "--body-prefix", header.to_str().unwrap()],
+    );
+    assert_eq!(v["ok"], true, "{v}");
+    let text = last_pulls_call(&log, "POST")["body"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(text.starts_with("Requested by Yury\nVia a thread\n\n<!-- agentvc:begin"));
+    assert!(
+        text.ends_with("<!-- agentvc:footer -->\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\nhttps://claude.ai/code/session_1\n"),
+        "{text}"
+    );
+
+    // A review fix with no flags and no config for the footer: the PR keeps
+    // header and footer, and the footer stays last.
+    agentvc(&w, &["config", "pr.body-suffix", "--unset"]);
+    fork_edit_promote(&w, &["fork", "--from", "a2"], "2 // reviewed\n");
+    let v = agentvc_gh(&w, &api, &[], &["pr", "a3"]);
+    assert_eq!(v["pr"]["updated"], true, "{v}");
+    let text = last_pulls_call(&log, "PATCH")["body"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(text.contains("a3"), "{text}");
+    assert!(text.starts_with("Requested by Yury\n"), "{text}");
+    assert!(text.trim_end().ends_with("session_1"), "{text}");
+
+    // --body-suffix replaces the footer, still once and last.
+    let other = tmp.path().join("footer2.md");
+    fs::write(&other, "https://claude.ai/code/session_2\n").unwrap();
+    let v = agentvc_gh(
+        &w,
+        &api,
+        &[],
+        &["pr", "a3", "--body-suffix", other.to_str().unwrap()],
+    );
+    assert_eq!(v["ok"], true, "{v}");
+    let text = last_pulls_call(&log, "PATCH")["body"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(!text.contains("session_1"), "{text}");
+    assert!(text.trim_end().ends_with("session_2"), "{text}");
+    assert_eq!(text.matches("<!-- agentvc:footer -->").count(), 1);
+}
+
+#[test]
+fn pr_keeps_a_hand_edited_footer_below_the_end_marker_verbatim() {
+    let (_tmp, w) = thread_space_with_promoted_a2();
+    let (api, log) = fake_github();
+    let v = agentvc_gh(&w, &api, &[], &["pr", "a2"]);
+    assert_eq!(v["ok"], true, "{v}");
+    let footer = "🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\nhttps://claude.ai/code/session_01BiofQWyFLrFt9JBdnoyeNA";
+    for (i, eol) in ["\n", "\r\n"].into_iter().enumerate() {
+        // Someone appends the footer by hand on GitHub (which may send the
+        // body back with CRLF line ends).
+        let body = {
+            let log = log.lock().unwrap();
+            log.iter()
+                .rfind(|(m, p, b)| {
+                    (m == "POST" || m == "PATCH") && p.contains("/pulls") && b["body"].is_string()
+                })
+                .map(|(_, _, b)| b["body"].clone())
+                .unwrap()
+        };
+        let body = body.as_str().unwrap();
+        let generated_end =
+            body.find("<!-- agentvc:end -->").unwrap() + "<!-- agentvc:end -->".len();
+        let edited = format!("{}\n\n{footer}", &body[..generated_end]).replace('\n', eol);
+        log.lock().unwrap().push((
+            "PATCH".into(),
+            "/repos/acme/widget/pulls/7".into(),
+            serde_json::json!({ "body": edited }),
+        ));
+        let id = fork_edit_promote(
+            &w,
+            &["fork", "--from", &format!("a{}", i + 2)],
+            &format!("2 // fix {i}\n"),
+        );
+        let v = agentvc_gh(&w, &api, &[], &["pr", &format!("a{id}")]);
+        assert_eq!(v["pr"]["updated"], true, "{v}");
+        let text = last_pulls_call(&log, "PATCH")["body"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let expected_tail = format!("<!-- agentvc:end -->\n\n{footer}").replace('\n', eol);
+        assert!(text.ends_with(&expected_tail), "{eol:?}: {text:?}");
+        assert!(text.contains(&format!("a{id}")), "{text}");
+    }
+}
+
+#[test]
+fn pr_titles_follow_own_task_and_keep_given_or_edited_titles() {
+    let (_tmp, w) = thread_space_with_promoted_a2();
+    let (api, log) = fake_github();
+
+    // --title on the first PR is the title and the commit subject.
+    let v = agentvc_gh(&w, &api, &[], &["pr", "a2", "--title", "Fix f, properly"]);
+    assert_eq!(v["ok"], true, "{v}");
+    assert_eq!(v["pr"]["title_source"], "flag");
+    assert_eq!(last_pulls_call(&log, "POST")["title"], "Fix f, properly");
+
+    // A review-fix fork does not repeat --title: the title stays, and so
+    // does the commit subject.
+    fork_edit_promote(&w, &["fork", "--from", "a2"], "2 // reviewed\n");
+    let v = agentvc_gh(&w, &api, &[], &["pr", "a3"]);
+    assert_eq!(v["pr"]["updated"], true, "{v}");
+    assert_eq!(v["pr"]["title"], "Fix f, properly", "{v}");
+    assert_eq!(v["pr"]["title_source"], "kept");
+    assert!(last_pulls_call(&log, "PATCH").get("title").is_none());
+    assert_eq!(
+        git(&w, &["log", "-1", "--format=%s", "claude/thread"]),
+        "Fix f, properly"
+    );
+
+    // Someone retitles the PR on GitHub: later runs leave that title...
+    log.lock().unwrap().push((
+        "PATCH".into(),
+        "/repos/acme/widget/pulls/7".into(),
+        serde_json::json!({ "title": "f: return 2 (human)" }),
+    ));
+    fork_edit_promote(&w, &["fork", "--from", "a3"], "2 // again\n");
+    let v = agentvc_gh(&w, &api, &[], &["pr", "a4"]);
+    assert_eq!(v["pr"]["title"], "f: return 2 (human)", "{v}");
+    assert_eq!(v["pr"]["title_source"], "kept");
+    assert!(last_pulls_call(&log, "PATCH").get("title").is_none());
+
+    // ...unless --title says otherwise.
+    let v = agentvc_gh(&w, &api, &[], &["pr", "a4", "--title", "Final"]);
+    assert_eq!(v["pr"]["title_source"], "flag", "{v}");
+    assert_eq!(last_pulls_call(&log, "PATCH")["title"], "Final");
+}
+
+#[test]
+fn pr_of_a_fork_into_a_new_task_takes_its_own_task_title() {
+    let (_tmp, w) = thread_space_with_promoted_a2();
+    let (api, log) = fake_github();
+    let v = agentvc_gh(&w, &api, &[], &["pr", "a2"]);
+    assert_eq!(v["pr"]["title"], "make f return 2", "{v}");
+    assert_eq!(v["pr"]["title_source"], "task");
+
+    // A fork of the promoted a2 into a new task continues the same branch:
+    // the PR agentvc titled after t1 now carries t2's goal, body included.
+    agentvc(&w, &["task", "new", "make g return 3"]);
+    fork_edit_promote(&w, &["fork", "--task", "t2", "--from", "a2"], "3\n");
+    let v = agentvc_gh(&w, &api, &[], &["pr", "a3"]);
+    assert_eq!(v["pr"]["updated"], true, "{v}");
+    assert_eq!(v["pr"]["title"], "make g return 3", "{v}");
+    assert_eq!(v["pr"]["title_source"], "task");
+    let patch = last_pulls_call(&log, "PATCH");
+    assert_eq!(patch["title"], "make g return 3");
+    assert!(
+        patch["body"]
+            .as_str()
+            .unwrap()
+            .contains("**t2**: make g return 3"),
+        "{patch}"
+    );
+    assert_eq!(
+        git(&w, &["log", "-1", "--format=%s", "claude/thread"]),
+        "make g return 3"
+    );
+
+    // A review fix of a3 (no --task) stays on t2, not a2's t1.
+    fork_edit_promote(&w, &["fork", "--from", "a3"], "3 // reviewed\n");
+    let v = agentvc_gh(&w, &api, &[], &["pr", "a4"]);
+    assert_eq!(v["pr"]["title"], "make g return 3", "{v}");
 }
 
 #[test]

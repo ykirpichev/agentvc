@@ -794,7 +794,9 @@ enum Cmd {
         branch: Option<String>,
         #[arg(long)]
         draft: bool,
-        /// PR title and commit subject. Defaults to the task goal.
+        /// PR title and commit subject. Defaults to the attempt's task goal.
+        /// On updates, a title edited on GitHub (or set by an earlier
+        /// --title) is kept unless this is passed.
         #[arg(long)]
         title: Option<String>,
         #[arg(long, default_value = "origin")]
@@ -810,6 +812,12 @@ enum Cmd {
         /// the file in `agentvc config pr.body-prefix`.
         #[arg(long, value_name = "FILE")]
         body_prefix: Option<PathBuf>,
+        /// File (or - for stdin) whose text ends the body, below the
+        /// generated part, for example a "Generated with" footer. Replaces
+        /// an earlier footer and is kept on later updates; defaults to the
+        /// file in `agentvc config pr.body-suffix`.
+        #[arg(long, value_name = "FILE")]
+        body_suffix: Option<PathBuf>,
         /// Extra trailer for the exported commit, as "Key: value".
         /// Repeatable; added to those in `agentvc config pr.trailer`.
         #[arg(long = "trailer", value_name = "KEY: VALUE")]
@@ -836,7 +844,8 @@ enum Cmd {
     ///
     /// Keys: pr.branch (also $AGENTVC_PR_BRANCH), pr.base ($AGENTVC_PR_BASE),
     /// pr.trailer (a list: use --add), pr.body-prefix (a file, relative to
-    /// the space; $AGENTVC_PR_BODY_PREFIX).
+    /// the space; $AGENTVC_PR_BODY_PREFIX), pr.body-suffix (likewise, for the
+    /// footer; $AGENTVC_PR_BODY_SUFFIX).
     #[command(display_order = 7)]
     Config {
         key: Option<String>,
@@ -3078,6 +3087,7 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
             repo,
             force,
             body_prefix,
+            body_suffix,
             trailers,
             squash,
             stack,
@@ -3085,18 +3095,28 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
             verify,
             no_verify,
         } => {
-            let body_prefix = match body_prefix {
-                Some(p) if p.as_os_str() == "-" => {
-                    let mut s = String::new();
-                    std::io::Read::read_to_string(&mut std::io::stdin(), &mut s)?;
-                    Some(s)
-                }
-                Some(p) => Some(
-                    std::fs::read_to_string(cwd.join(&p))
-                        .map_err(|e| anyhow::anyhow!("--body-prefix {}: {e}", p.display()))?,
-                ),
-                None => None,
-            };
+            if body_prefix.as_ref().is_some_and(|p| p.as_os_str() == "-")
+                && body_suffix.as_ref().is_some_and(|p| p.as_os_str() == "-")
+            {
+                anyhow::bail!("only one of --body-prefix and --body-suffix can read stdin");
+            }
+            let read_body_file =
+                |flag: &str, file: Option<PathBuf>| -> anyhow::Result<Option<String>> {
+                    Ok(match file {
+                        Some(p) if p.as_os_str() == "-" => {
+                            let mut s = String::new();
+                            std::io::Read::read_to_string(&mut std::io::stdin(), &mut s)?;
+                            Some(s)
+                        }
+                        Some(p) => Some(
+                            std::fs::read_to_string(cwd.join(&p))
+                                .map_err(|e| anyhow::anyhow!("--{flag} {}: {e}", p.display()))?,
+                        ),
+                        None => None,
+                    })
+                };
+            let body_prefix = read_body_file("body-prefix", body_prefix)?;
+            let body_suffix = read_body_file("body-suffix", body_suffix)?;
             let opts = PrOptions {
                 branch,
                 base,
@@ -3106,6 +3126,7 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
                 title,
                 force,
                 body_prefix,
+                body_suffix,
                 trailers,
                 verify: verify_flag(verify, no_verify),
                 squash,

@@ -979,11 +979,12 @@ pub static TOOLS: &[Tool] = &[
                 ("base", s("Branch the PR merges into. Defaults to the repository's default branch."), false),
                 ("branch", s("Branch to push. Defaults to `agentvc config pr.branch`, $AGENTVC_PR_BRANCH, then agentvc/aN. If it is checked out in the host repo, the checkout moves along."), false),
                 ("draft", b("Open as a draft."), false),
-                ("title", s("PR title and commit subject. Defaults to the task goal."), false),
+                ("title", s("PR title and commit subject. Defaults to the attempt's task goal; on updates a title edited on GitHub (or set by an earlier title) is kept unless this is passed."), false),
                 ("remote", s("Git remote to push to. Defaults to \"origin\"."), false),
                 ("repo", s("GitHub repository as owner/name. Defaults to the remote's."), false),
                 ("force", b("Move the branch even if another attempt exported to it."), false),
                 ("body_prefix", s("File whose text goes above the generated PR body (for example attribution lines). Kept on later updates."), false),
+                ("body_suffix", s("File whose text ends the PR body, below the generated part (for example a \"Generated with\" footer). Replaces an earlier footer; kept on later updates."), false),
                 ("trailers", json!({ "type": "array", "items": { "type": "string" }, "description": "Extra \"Key: value\" trailers for the exported commit." }), false),
                 ("verify", b(VERIFY), false),
             ]
@@ -1003,6 +1004,7 @@ pub static TOOLS: &[Tool] = &[
                 .opt("repo", a.str("repo")?)
                 .flag("force", a.bool("force")?)
                 .opt("body-prefix", a.str("body_prefix")?)
+                .opt("body-suffix", a.str("body_suffix")?)
                 .pos(Some(a.req("attempt")?))
                 .done())
         },

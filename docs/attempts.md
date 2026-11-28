@@ -71,9 +71,13 @@ agentvc gc [--dry-run]                        # pack objects, prune old losers' 
 `agentvc pr` reads a token from `GITHUB_TOKEN`, `GH_TOKEN` or `gh auth token`.
 It writes its part of the PR body between `<!-- agentvc:begin -->` and
 `<!-- agentvc:end -->` markers and keeps any text around them when it updates
-the PR; `--body-prefix FILE` puts text above it, and `--trailer "Key: value"`
+the PR; `--body-prefix FILE` puts text above it, `--body-suffix FILE` ends the
+body with it (a footer, replaced by the next suffix), and `--trailer "Key: value"`
 adds commit trailers. Settings that every `pr` should use go in
-`agentvc config` (`pr.branch`, `pr.base`, `pr.trailer --add`, `pr.body-prefix`).
+`agentvc config` (`pr.branch`, `pr.base`, `pr.trailer --add`, `pr.body-prefix`,
+`pr.body-suffix`). The title is the attempt's own task goal; on an update, a
+title edited on GitHub or set by an earlier `--title` is kept unless `--title`
+is passed again.
 Exporting to the branch that is checked out moves the checkout along with it.
 Record `tests` and `cost` with `snapshot --meta` and they show up in the PR body.
 

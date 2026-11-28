@@ -33,12 +33,19 @@ pub struct PrOptions {
     pub remote: Option<String>,
     /// `owner/name` on GitHub. Defaults to the one in the remote's URL.
     pub repo: Option<String>,
+    /// PR title and commit subject. Without one, a new PR is titled with
+    /// the attempt's own task goal, and an update keeps the PR's title when
+    /// someone edited it on GitHub or an earlier `pr` set it with `title`
+    /// (see [`open_pr`]).
     pub title: Option<String>,
     /// Move the branch even if another attempt exported to it.
     pub force: bool,
     /// Text put above the generated body (attribution lines, notes). Kept on
     /// later updates that pass none.
     pub body_prefix: Option<String>,
+    /// Text put below the generated body, as its last lines (attribution
+    /// footers). Kept on later updates that pass none; see [`compose_body`].
+    pub body_suffix: Option<String>,
     /// Extra `Key: value` trailers for the exported commit, added to those
     /// in `agentvc config pr.trailer`.
     pub trailers: Vec<String>,
@@ -56,14 +63,27 @@ pub struct PrOptions {
 pub const BODY_BEGIN: &str =
     "<!-- agentvc:begin (written by agentvc pr; text outside these markers is kept on update) -->";
 pub const BODY_END: &str = "<!-- agentvc:end -->";
+/// Starts the footer (`--body-suffix`, `pr.body-suffix`): everything from
+/// this line to the end of the body is the footer, so a new suffix replaces
+/// it while sections added between the generated part and the footer stay.
+pub const BODY_FOOTER: &str = "<!-- agentvc:footer -->";
 
 /// The PR body to send: `generated` between agentvc's markers, with the
-/// text around the markers of `existing` kept. `prefix` replaces the text
-/// above the markers; without one, an existing prefix stays. An existing
-/// body without markers (from before markers, or written by hand) is
-/// replaced.
-pub fn compose_body(existing: Option<&str>, prefix: Option<&str>, generated: &str) -> String {
-    let (mut before, after) = match existing.and_then(split_body) {
+/// text around the markers of `existing` kept.
+///
+/// `prefix` replaces the text above the markers; without one, an existing
+/// prefix stays. `suffix` becomes the footer, the last lines of the body
+/// (attribution lines such as "Generated with ..."), replacing an earlier
+/// footer; without one, the text below the markers stays as it is. An
+/// existing body without markers (from before markers, or written by hand)
+/// is replaced.
+pub fn compose_body(
+    existing: Option<&str>,
+    prefix: Option<&str>,
+    suffix: Option<&str>,
+    generated: &str,
+) -> String {
+    let (mut before, mut after) = match existing.and_then(split_body) {
         Some((b, a)) => (b.to_string(), a.to_string()),
         None => (String::new(), String::new()),
     };
@@ -74,32 +94,57 @@ pub fn compose_body(existing: Option<&str>, prefix: Option<&str>, generated: &st
             format!("{}\n\n", p.trim_end())
         };
     }
+    if let Some(s) = suffix {
+        // The text between the end marker and the footer: sections people
+        // added below the generated part.
+        let mut middle = match marker_line(&after, 0, BODY_FOOTER) {
+            Some(i) => after[..i].to_string(),
+            None => after.clone(),
+        };
+        let footer = s.trim();
+        // A footer pasted by hand below the markers (before footers
+        // existed) is not repeated.
+        if !footer.is_empty() {
+            let m = middle.replace("\r\n", "\n");
+            if let Some(rest) = m.trim_end().strip_suffix(footer) {
+                middle = rest.to_string();
+            }
+        }
+        let middle = middle.trim_end();
+        after = if footer.is_empty() {
+            middle.to_string()
+        } else {
+            format!("{middle}\n\n{BODY_FOOTER}\n{footer}\n")
+        };
+    }
     format!(
         "{before}{BODY_BEGIN}\n{}\n{BODY_END}{after}",
         generated.trim_end()
     )
 }
 
-/// Text before and after agentvc's markers, if the body has both.
+/// Where `marker` starts as a whole line of `body`, at or after `from`.
 ///
 /// Markers count only as whole lines, so a body that mentions them in prose
 /// (like this project's own PRs) is not cut there.
-fn split_body(body: &str) -> Option<(&str, &str)> {
-    let line_at = |from: usize, marker: &str| -> Option<usize> {
-        let mut pos = from;
-        loop {
-            let i = pos + body[pos..].find(marker)?;
-            let starts = i == 0 || body.as_bytes()[i - 1] == b'\n';
-            let rest = &body[i + marker.len()..];
-            let ends = rest.is_empty() || rest.starts_with('\n') || rest.starts_with("\r\n");
-            if starts && ends {
-                return Some(i);
-            }
-            pos = i + marker.len();
+fn marker_line(body: &str, from: usize, marker: &str) -> Option<usize> {
+    let mut pos = from;
+    loop {
+        let i = pos + body[pos..].find(marker)?;
+        let starts = i == 0 || body.as_bytes()[i - 1] == b'\n';
+        let rest = &body[i + marker.len()..];
+        let ends = rest.is_empty() || rest.starts_with('\n') || rest.starts_with("\r\n");
+        if starts && ends {
+            return Some(i);
         }
-    };
-    let begin = line_at(0, BODY_BEGIN)?;
-    let end = line_at(begin + BODY_BEGIN.len(), BODY_END)?;
+        pos = i + marker.len();
+    }
+}
+
+/// Text before and after agentvc's markers, if the body has both.
+fn split_body(body: &str) -> Option<(&str, &str)> {
+    let begin = marker_line(body, 0, BODY_BEGIN)?;
+    let end = marker_line(body, begin + BODY_BEGIN.len(), BODY_END)?;
     Some((&body[..begin], &body[end + BODY_END.len()..]))
 }
 
@@ -112,6 +157,12 @@ pub struct PrResult {
     pub url: String,
     /// True when a PR for this branch was already open and was updated.
     pub updated: bool,
+    /// The PR's title after this run.
+    pub title: String,
+    /// Where the title came from: `flag` (`--title`), `task` (the
+    /// attempt's task goal) or `kept` (the PR's existing title: edited on
+    /// GitHub, or set with `--title` by an earlier run).
+    pub title_source: &'static str,
 }
 
 /// `owner/name` from a git remote URL in any of the usual forms:
@@ -850,7 +901,8 @@ pub fn open_pr(space: &Space, attempt_id: i64, opts: &PrOptions) -> Result<PrRes
     };
     // Re-running `pr` for the same attempt, or for one continued from it
     // (`fork --from aN`, review fixes), refreshes its branch.
-    let ours = match space.last_export_to(&branch)? {
+    let previous = space.last_export_to(&branch)?;
+    let ours = match &previous {
         Some(e) => {
             e.attempt_id == attempt_id
                 || (e.attempt_id != crate::space::ROOT_ATTEMPT
@@ -864,13 +916,33 @@ pub fn open_pr(space: &Space, attempt_id: i64, opts: &PrOptions) -> Result<PrRes
             trailers.push(t.clone());
         }
     }
+
+    // The PR already open for the branch, if any: its title decides ours,
+    // which is also the commit subject.
+    let owner = repo.split('/').next().unwrap_or("");
+    let open = api.call(
+        "GET",
+        &format!("/repos/{repo}/pulls?state=open&head={owner}:{branch}"),
+        None,
+    )?;
+    let existing = open.as_array().and_then(|a| a.first()).cloned();
+    let (title, title_source) = pr_title(
+        space,
+        &attempt,
+        opts.title.as_deref(),
+        existing.as_ref(),
+        previous.as_ref().map(|e| e.attempt_id),
+    )?;
+
     let exp = export(
         space,
         attempt_id,
         &ExportOptions {
             branch: branch.clone(),
             base: None,
-            message: opts.title.clone(),
+            // The task goal is export's own default subject (and a story
+            // keeps its own top subject then).
+            message: (title_source != TITLE_TASK).then(|| title.clone()),
             force: opts.force || ours,
             trailers,
             verify: opts.verify,
@@ -900,45 +972,36 @@ pub fn open_pr(space: &Space, attempt_id: i64, opts: &PrOptions) -> Result<PrRes
         .map_err(|e| push_error(e, &remote, b))?;
     }
 
-    let title = opts.title.clone().unwrap_or_else(|| {
-        attempt
-            .task_id
-            .and_then(|t| space.task(t).ok())
-            .map(|t| t.goal)
-            .unwrap_or_else(|| format!("agentvc attempt a{attempt_id}"))
-    });
-    let title = title.lines().next().unwrap_or("").trim().to_string();
     let generated = pr_body(space, &attempt, &exp)?;
     let prefix = match &opts.body_prefix {
         Some(p) => Some(p.clone()),
-        None => match space.config(config::PR_BODY_PREFIX)? {
-            Some(path) => {
-                let p = space.workdir().join(path);
-                Some(std::fs::read_to_string(&p).map_err(|source| Error::Io { path: p, source })?)
-            }
-            None => None,
-        },
+        None => config_file(space, config::PR_BODY_PREFIX)?,
+    };
+    let suffix = match &opts.body_suffix {
+        Some(s) => Some(s.clone()),
+        None => config_file(space, config::PR_BODY_SUFFIX)?,
     };
 
-    let owner = repo.split('/').next().unwrap_or("");
-    let open = api.call(
-        "GET",
-        &format!("/repos/{repo}/pulls?state=open&head={owner}:{branch}"),
-        None,
-    )?;
-    let (pr, updated) = match open.as_array().and_then(|a| a.first()) {
+    let (pr, updated) = match &existing {
         Some(existing) => {
             let n = existing["number"].as_u64().unwrap_or(0);
-            let body = compose_body(existing["body"].as_str(), prefix.as_deref(), &generated);
-            let v = api.call(
-                "PATCH",
-                &format!("/repos/{repo}/pulls/{n}"),
-                Some(json!({ "title": title, "body": body })),
-            )?;
+            let body = compose_body(
+                existing["body"].as_str(),
+                prefix.as_deref(),
+                suffix.as_deref(),
+                &generated,
+            );
+            let mut patch = json!({ "body": body });
+            // A kept title is not sent, so an edit made on GitHub meanwhile
+            // is not undone either.
+            if title_source != TITLE_KEPT {
+                patch["title"] = json!(title);
+            }
+            let v = api.call("PATCH", &format!("/repos/{repo}/pulls/{n}"), Some(patch))?;
             (v, true)
         }
         None => {
-            let body = compose_body(None, prefix.as_deref(), &generated);
+            let body = compose_body(None, prefix.as_deref(), suffix.as_deref(), &generated);
             let v = api.call(
                 "POST",
                 &format!("/repos/{repo}/pulls"),
@@ -956,7 +1019,10 @@ pub fn open_pr(space: &Space, attempt_id: i64, opts: &PrOptions) -> Result<PrRes
     space.record(
         &attempt.actor,
         "attempt.pr",
-        json!({ "attempt": attempt_id, "url": url, "number": number, "updated": updated }),
+        json!({
+            "attempt": attempt_id, "url": url, "number": number, "updated": updated,
+            "title": title, "title_source": title_source,
+        }),
     )?;
     Ok(PrResult {
         export: exp,
@@ -965,7 +1031,94 @@ pub fn open_pr(space: &Space, attempt_id: i64, opts: &PrOptions) -> Result<PrRes
         number,
         url,
         updated,
+        title,
+        title_source,
     })
+}
+
+const TITLE_FLAG: &str = "flag";
+const TITLE_TASK: &str = "task";
+const TITLE_KEPT: &str = "kept";
+
+fn first_line(s: &str) -> String {
+    s.lines().next().unwrap_or("").trim().to_string()
+}
+
+/// The title agentvc gives an attempt's PR by default: its own task's goal
+/// (a fork works on the task it was forked into, not its parent's).
+fn task_title(space: &Space, attempt: &Attempt) -> String {
+    attempt
+        .task_id
+        .and_then(|t| space.task(t).ok())
+        .map(|t| first_line(&t.goal))
+        .filter(|t| !t.is_empty())
+        .unwrap_or_else(|| format!("agentvc attempt a{}", attempt.id))
+}
+
+/// The PR title and where it comes from.
+///
+/// `--title` always wins. A new PR gets the attempt's task goal. An open PR
+/// keeps its title when agentvc did not write it as a task goal: a person
+/// edited it on GitHub, or an earlier `pr --title` set it (so follow-up
+/// forks need not repeat `--title`). A title agentvc derived from a task is
+/// replaced by this attempt's own task goal, so a fork into a new task
+/// retitles the PR it continues. `previous` is the attempt that last
+/// exported to the branch, used for PRs opened before titles were recorded.
+fn pr_title(
+    space: &Space,
+    attempt: &Attempt,
+    given: Option<&str>,
+    existing: Option<&Value>,
+    previous: Option<i64>,
+) -> Result<(String, &'static str)> {
+    if let Some(t) = given.map(first_line).filter(|t| !t.is_empty()) {
+        return Ok((t, TITLE_FLAG));
+    }
+    let own = task_title(space, attempt);
+    let Some(pr) = existing else {
+        return Ok((own, TITLE_TASK));
+    };
+    let current = pr["title"].as_str().map(first_line).unwrap_or_default();
+    if current.is_empty() || current == own {
+        return Ok((own, TITLE_TASK));
+    }
+    let url = pr["html_url"].as_str();
+    let number = pr["number"].as_u64();
+    let recorded = space.operations(None)?.into_iter().find(|o| {
+        o.kind == "attempt.pr"
+            && o.payload["title"].is_string()
+            && match url {
+                Some(u) => o.payload["url"].as_str() == Some(u),
+                None => o.payload["number"].as_u64() == number,
+            }
+    });
+    let derived = match recorded {
+        Some(o) => {
+            o.payload["title"].as_str() == Some(current.as_str())
+                && o.payload["title_source"] == TITLE_TASK
+        }
+        None => previous
+            .and_then(|id| space.attempt(id).ok())
+            .is_some_and(|a| task_title(space, &a) == current),
+    };
+    Ok(if derived {
+        (own, TITLE_TASK)
+    } else {
+        (current, TITLE_KEPT)
+    })
+}
+
+/// The text of the file a config key names (relative to the space), if set.
+fn config_file(space: &Space, key: &str) -> Result<Option<String>> {
+    match space.config(key)? {
+        Some(path) => {
+            let p = space.workdir().join(path);
+            Ok(Some(
+                std::fs::read_to_string(&p).map_err(|source| Error::Io { path: p, source })?,
+            ))
+        }
+        None => Ok(None),
+    }
 }
 
 /// A refused push says so: git proxies answer 403 for branches the
@@ -1031,7 +1184,7 @@ mod tests {
 
     #[test]
     fn body_keeps_prefix_and_human_sections_across_updates() {
-        let first = compose_body(None, Some("Requested by Yury\n"), "## Task\nold");
+        let first = compose_body(None, Some("Requested by Yury\n"), None, "## Task\nold");
         assert!(
             first.starts_with("Requested by Yury\n\n<!-- agentvc:begin"),
             "{first}"
@@ -1043,7 +1196,7 @@ mod tests {
 
         // A reviewer adds notes below; an update without a prefix keeps both.
         let edited = format!("{first}\n\n## Notes from review\nkeep me\n");
-        let second = compose_body(Some(&edited), None, "## Task\nnew");
+        let second = compose_body(Some(&edited), None, None, "## Task\nnew");
         assert!(second.starts_with("Requested by Yury\n\n"), "{second}");
         assert!(
             second.contains("## Task\nnew\n<!-- agentvc:end -->"),
@@ -1056,7 +1209,12 @@ mod tests {
         );
 
         // A new prefix replaces the old one, still keeping the section.
-        let third = compose_body(Some(&second), Some("Requested by Ann"), "## Task\nnew");
+        let third = compose_body(
+            Some(&second),
+            Some("Requested by Ann"),
+            None,
+            "## Task\nnew",
+        );
         assert!(
             third.starts_with("Requested by Ann\n\n<!-- agentvc:begin"),
             "{third}"
@@ -1065,13 +1223,68 @@ mod tests {
 
         // Markers mentioned in prose, inside the prefix, are not markers.
         let prose = "Our part sits between `<!-- agentvc:begin -->` and `<!-- agentvc:end -->`.";
-        let with_prose = compose_body(None, Some(prose), "## Task\nv1");
-        let updated = compose_body(Some(&with_prose), None, "## Task\nv2");
-        assert_eq!(updated, compose_body(None, Some(prose), "## Task\nv2"));
+        let with_prose = compose_body(None, Some(prose), None, "## Task\nv1");
+        let updated = compose_body(Some(&with_prose), None, None, "## Task\nv2");
+        assert_eq!(
+            updated,
+            compose_body(None, Some(prose), None, "## Task\nv2")
+        );
 
         // A body from before markers is replaced.
-        let legacy = compose_body(Some("old generated body"), None, "gen");
+        let legacy = compose_body(Some("old generated body"), None, None, "gen");
         assert_eq!(legacy, format!("{BODY_BEGIN}\ngen\n{BODY_END}"));
+    }
+
+    #[test]
+    fn body_suffix_ends_the_body_across_updates() {
+        let header = "Requested by Yury\nVia a thread\n";
+        let footer = "🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\nhttps://claude.ai/code/session_1\n";
+        let first = compose_body(None, Some(header), Some(footer), "## Task\nold");
+        assert!(first.starts_with("Requested by Yury\nVia a thread\n\n<!-- agentvc:begin"));
+        assert!(
+            first.ends_with(&format!(
+                "<!-- agentvc:end -->\n\n{BODY_FOOTER}\n{}\n",
+                footer.trim_end()
+            )),
+            "{first}"
+        );
+
+        // An update with neither keeps both, emoji and blank lines included.
+        let second = compose_body(Some(&first), None, None, "## Task\nnew");
+        assert_eq!(
+            second,
+            compose_body(None, Some(header), Some(footer), "## Task\nnew")
+        );
+
+        // A section a reviewer adds below the generated part (GitHub sends
+        // edited bodies back with CRLF) stays, above a new footer.
+        let edited = second.replacen(
+            "<!-- agentvc:end -->\n",
+            "<!-- agentvc:end -->\r\n\r\n## Notes\r\nkeep me\r\n",
+            1,
+        );
+        let third = compose_body(Some(&edited), None, Some("Footer 2"), "## Task\nnew");
+        assert!(third.contains("keep me"), "{third}");
+        assert!(!third.contains("session_1"), "{third}");
+        assert!(
+            third.ends_with("keep me\n\n<!-- agentvc:footer -->\nFooter 2\n"),
+            "{third:?}"
+        );
+        assert_eq!(third.matches(BODY_FOOTER).count(), 1);
+
+        // A footer pasted by hand below the markers is not doubled.
+        let pasted = format!(
+            "{}\n\n{footer}",
+            compose_body(None, None, None, "## Task\nv1")
+        );
+        let fourth = compose_body(Some(&pasted), None, Some(footer), "## Task\nv2");
+        assert_eq!(fourth.matches("session_1").count(), 1, "{fourth}");
+        assert!(fourth.trim_end().ends_with("session_1"), "{fourth}");
+
+        // An empty suffix removes the footer, keeping the notes.
+        let fifth = compose_body(Some(&third), None, Some(""), "## Task\nnew");
+        assert!(!fifth.contains(BODY_FOOTER) && !fifth.contains("Footer 2"));
+        assert!(fifth.ends_with("keep me"), "{fifth:?}");
     }
 
     #[test]
