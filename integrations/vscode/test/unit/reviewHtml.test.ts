@@ -42,6 +42,12 @@ describe('reviewHtml', () => {
     assert.ok(!html.includes('agentvc.startDaemon'))
   })
 
+  it('explains a local copy of the extension in a remote window', () => {
+    const html = offlineHtml({ state: 'localonly', machine: 'spark', folder: '/w', cspSource: 'c', nonce: 'n' })
+    assert.match(html, /runs on your computer/)
+    assert.match(html, /data-cmd="agentvc.install">Install on spark</)
+  })
+
   it('offers one-click set up when the folder has no space, not agentvc init', () => {
     const html = offlineHtml({ state: 'nospace', machine: 'spark', folder: '/w', cspSource: 'c', nonce: 'n' })
     assert.match(html, /data-cmd="agentvc.setup">Set up agentvc here</)

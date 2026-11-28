@@ -1,5 +1,5 @@
 import * as assert from 'node:assert/strict'
-import { machineLabel, resolveBinary, resolveDaemon } from '../../src/setup'
+import { machineLabel, remoteHost, resolveBinary, resolveDaemon } from '../../src/setup'
 
 const fs = (...files: string[]) => (f: string) => files.includes(f)
 
@@ -29,6 +29,12 @@ describe('setup', () => {
   it('finds agentvcd next to the CLI', () => {
     const exists = fs('/opt/x/agentvc', '/opt/x/agentvcd')
     assert.equal(resolveDaemon('agentvcd', '/opt/x/agentvc', { PATH: '', HOME: '/h', platform: 'linux', exists }), '/opt/x/agentvcd')
+  })
+
+  it('reads the host of a remote folder', () => {
+    assert.equal(remoteHost('ssh-remote+spark'), 'spark')
+    const hex = Buffer.from(JSON.stringify({ hostName: 'spark' })).toString('hex')
+    assert.equal(remoteHost(`ssh-remote+${hex}`), 'spark')
   })
 
   it('names the machine the panel talks about', () => {

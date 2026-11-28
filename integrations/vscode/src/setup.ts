@@ -10,6 +10,8 @@ import * as path from 'node:path'
 /** The installer the "Install agentvc" button runs (the release's get.sh). */
 export const INSTALL_URL = 'https://raw.githubusercontent.com/ykirpichev/agentvc/main/scripts/get.sh'
 export const INSTALL_COMMAND = `curl -fsSL ${INSTALL_URL} | sh`
+/** Also installs this extension with the editor CLI found there (in a remote window, on the remote host). */
+export const INSTALL_WITH_EXTENSION_COMMAND = `curl -fsSL ${INSTALL_URL} | sh -s -- --vscode`
 
 export type IsExecutable = (file: string) => boolean
 
@@ -79,6 +81,22 @@ export function resolveDaemon(configured: string, cli: string | undefined, env: 
   if (found || !cli) return found
   const p = (env.platform ?? process.platform) === 'win32' ? path.win32 : path.posix
   return resolveBinary(p.join(p.dirname(cli), 'agentvcd'), env)
+}
+
+/** The host of a remote folder URI's authority: `ssh-remote+spark` -> `spark`. */
+export function remoteHost(authority: string): string {
+  const i = authority.indexOf('+')
+  const host = i >= 0 ? authority.slice(i + 1) : authority
+  // Some hosts are hex-encoded JSON ({"hostName":"spark"}).
+  if (/^[0-9a-f]+$/i.test(host) && host.length % 2 === 0 && host.length > 8) {
+    try {
+      const o = JSON.parse(Buffer.from(host, 'hex').toString('utf8')) as { hostName?: string }
+      if (o.hostName) return o.hostName
+    } catch {
+      /* not JSON */
+    }
+  }
+  return host
 }
 
 /** How the panel names the machine: "spark" for SSH, else "this computer". */
