@@ -49,6 +49,47 @@ pub struct ExportOptions {
     /// With a story, also point a branch `<branch>-<k>` at each change but
     /// the last, for stacked review.
     pub stack: bool,
+    /// A merged PR from this branch, as GitHub reports it (`agentvc pr`
+    /// passes the one it last opened from the branch). See [`Continued`].
+    pub merged_pr: Option<MergedPr>,
+}
+
+/// A pull request that GitHub reports as merged.
+#[derive(Clone, Debug, Default)]
+pub struct MergedPr {
+    pub number: u64,
+    /// The PR's head commit when it merged.
+    pub head: String,
+    /// The commit the merge wrote on the base branch (for a squash merge,
+    /// the squashed commit).
+    pub merge_commit: Option<String>,
+}
+
+/// An existing branch whose head had already landed, continued with a
+/// merge commit instead of being moved (#213).
+///
+/// After a squash merge the branch still points at the old PR head, which
+/// the new export (parented on the new base) does not descend from. When
+/// that head has landed, the export commit gets it as a second parent: the
+/// branch fast-forwards (no force push), the first parent is the base, so
+/// a PR against the base shows only the new work, and the tree is the
+/// attempt's own.
+///
+/// The head has landed when either
+/// - `merged_pr`: it is the head of a PR GitHub reports merged, and the
+///   export's base contains that PR's merge commit; or
+/// - `contained`: it changed something since its merge-base with the
+///   export's base, and a three-way merge of it into the base is clean and
+///   gives exactly the base's tree, so every change it made is already
+///   there (what a squash merge leaves behind).
+#[derive(Clone, Debug, Serialize)]
+pub struct Continued {
+    /// The branch's previous head, now the commit's second parent.
+    pub head: String,
+    /// The merged PR that head belonged to, when known.
+    pub pr: Option<u64>,
+    /// `merged_pr` or `contained`, as above.
+    pub via: &'static str,
 }
 
 /// One commit of an exported story.
@@ -83,6 +124,9 @@ pub struct ExportResult {
     /// story; the last one is `commit`.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub story: Vec<StoryCommit>,
+    /// Set when the branch's old head had landed and the export continued
+    /// it with a merge commit (see [`Continued`]).
+    pub continued_from: Option<Continued>,
 }
 
 /// One recorded export of an attempt.
@@ -433,10 +477,10 @@ pub fn export(space: &Space, attempt_id: i64, opts: &ExportOptions) -> Result<Ex
             ("GIT_COMMITTER_EMAIL", "agentvc@localhost"),
         ]);
     }
-    let commit_tree = |tree: &str, parent: Option<&String>, message: &str| {
+    let commit_tree = |tree: &str, parents: &[&str], message: &str| {
         let mut args = vec!["commit-tree", tree];
-        if let Some(p) = parent {
-            args.extend(["-p", p.as_str()]);
+        for p in parents {
+            args.extend(["-p", p]);
         }
         args.extend(["-F", "-"]);
         repo.git_env(&args, Some(message), &env)
@@ -459,6 +503,36 @@ pub fn export(space: &Space, attempt_id: i64, opts: &ExportOptions) -> Result<Ex
         space.story_for_export(attempt_id)?
     };
     let mut story_commits = Vec::new();
+
+    // A branch whose head is not under the new commit's first parent: if
+    // that head has landed in it, the top commit continues the branch with
+    // it as second parent (#213); otherwise moving it needs --force.
+    let first = match &story {
+        Some(s) => Some(s.base_commit.clone()),
+        None => parent.clone(),
+    };
+    let mut not_landed = None;
+    let continued = match (&existing, &first) {
+        (Some(old), Some(first)) if !repo.is_ancestor(old, first) => {
+            match landed(&repo, old, first, opts.merged_pr.as_ref()) {
+                Ok(c) => Some(c),
+                Err(reason) => {
+                    not_landed = Some(reason);
+                    None
+                }
+            }
+        }
+        _ => None,
+    };
+    let second = continued.as_ref().map(|c| c.head.as_str());
+    fn parents<'a>(first: Option<&'a String>, second: Option<&'a str>, top: bool) -> Vec<&'a str> {
+        first
+            .map(String::as_str)
+            .into_iter()
+            .chain(second.filter(|_| top))
+            .collect()
+    }
+
     let (parent, commit) = match &story {
         None => {
             let message = commit_message(
@@ -475,7 +549,11 @@ pub fn export(space: &Space, attempt_id: i64, opts: &ExportOptions) -> Result<Ex
             } else {
                 message
             };
-            let commit = commit_tree(&snapshot.tree, parent.as_ref(), &message)?;
+            let commit = commit_tree(
+                &snapshot.tree,
+                &parents(parent.as_ref(), second, true),
+                &message,
+            )?;
             (parent, commit)
         }
         Some(story) => {
@@ -504,10 +582,14 @@ pub fn export(space: &Space, attempt_id: i64, opts: &ExportOptions) -> Result<Ex
                 messages.push(m);
                 hooks = h;
             }
-            for (c, message) in story.changes.iter().zip(messages) {
+            for (k, (c, message)) in story.changes.iter().zip(messages).enumerate() {
                 objects_copied +=
                     copy_tree_objects(space, &Oid::from_hex(&c.tree)?, &repo.objects_dir()?)?;
-                let commit = commit_tree(&c.tree, prev.as_ref(), &message)?;
+                let commit = commit_tree(
+                    &c.tree,
+                    &parents(prev.as_ref(), second, k + 1 == n),
+                    &message,
+                )?;
                 prev = Some(commit.clone());
                 story_commits.push(StoryCommit {
                     change_id: c.change_id.clone(),
@@ -524,7 +606,14 @@ pub fn export(space: &Space, attempt_id: i64, opts: &ExportOptions) -> Result<Ex
     // builds on it, as `git push` would allow.
     if let Some(old) = &existing {
         if !opts.force && !repo.is_ancestor(old, &commit) {
-            return Err(Error::BranchExists(opts.branch.clone()));
+            return Err(match not_landed {
+                Some(reason) => Error::BranchNotLanded {
+                    branch: opts.branch.clone(),
+                    head: old[..12.min(old.len())].to_string(),
+                    reason,
+                },
+                None => Error::BranchExists(opts.branch.clone()),
+            });
         }
     }
     let reflog = format!("agentvc export a{attempt_id}");
@@ -570,6 +659,7 @@ pub fn export(space: &Space, attempt_id: i64, opts: &ExportOptions) -> Result<Ex
             "attempt": attempt_id, "snapshot": snapshot.id, "branch": opts.branch,
             "commit": commit, "parent": parent, "replaced": existing,
             "story": story_commits.iter().map(|c| &c.change_id).collect::<Vec<_>>(),
+            "continued_from": continued,
         }),
     )?;
     Ok(ExportResult {
@@ -585,6 +675,77 @@ pub fn export(space: &Space, attempt_id: i64, opts: &ExportOptions) -> Result<Ex
         objects_copied,
         hooks,
         story: story_commits,
+        continued_from: continued,
+    })
+}
+
+/// Whether the branch head `old`, which `base` does not contain, has
+/// landed in `base` anyway (see [`Continued`]); otherwise why not.
+fn landed(
+    repo: &HostRepo,
+    old: &str,
+    base: &str,
+    merged: Option<&MergedPr>,
+) -> std::result::Result<Continued, String> {
+    let short = |c: &str| c[..12.min(c.len())].to_string();
+    let pr = merged.filter(|m| m.head == old);
+    if let Some(m) = pr {
+        match &m.merge_commit {
+            Some(mc) if repo.rev(mc).is_some() && repo.is_ancestor(mc, base) => {
+                return Ok(Continued {
+                    head: old.to_string(),
+                    pr: Some(m.number),
+                    via: "merged_pr",
+                });
+            }
+            _ => {}
+        }
+    }
+    let tree = |c: &str| repo.git(&["rev-parse", &format!("{c}^{{tree}}")], None);
+    let contained = (|| -> Option<bool> {
+        let mb = repo.git(&["merge-base", old, base], None).ok()?;
+        if tree(old).ok()? == tree(&mb).ok()? {
+            // Nothing to land: an empty change is not "landed" work.
+            return Some(false);
+        }
+        // Exit 1 (a conflict) is an error here, so not landed.
+        let merged = repo
+            .git(&["merge-tree", "--write-tree", base, old], None)
+            .ok()?;
+        Some(merged.lines().next() == Some(tree(base).ok()?.as_str()))
+    })()
+    .unwrap_or(false);
+    if contained {
+        return Ok(Continued {
+            head: old.to_string(),
+            pr: pr.map(|m| m.number),
+            via: "contained",
+        });
+    }
+    Err(match pr {
+        Some(m) => format!(
+            "its PR #{} merged{}, but the export's base {} does not contain that merge; \
+             rebase the attempt onto the updated base branch first",
+            m.number,
+            m.merge_commit
+                .as_deref()
+                .map(|c| format!(" as {}", short(c)))
+                .unwrap_or_default(),
+            short(base)
+        ),
+        None => match merged {
+            Some(m) => format!(
+                "PR #{} merged at {}, but the branch has moved since, and its changes are not all in {}",
+                m.number,
+                short(&m.head),
+                short(base)
+            ),
+            None => format!(
+                "it does not build on the export's base {} and not all of its changes are in it \
+                 (no merged PR is known for it), so moving the branch would drop them",
+                short(base)
+            ),
+        },
     })
 }
 
@@ -893,6 +1054,103 @@ mod tests {
         assert_eq!(space.exports(a.id).unwrap().len(), 1);
     }
 
+    /// After a squash merge the branch's old head is in main by content
+    /// only: the next export continues the branch with a merge commit, no
+    /// --force (#213). Work that is not in main still refuses.
+    #[test]
+    fn landed_branch_head_is_continued_with_a_merge_commit() {
+        let (tmp, space, _head) = repo();
+        let w = tmp.path();
+        let task = space.create_task("t", None).unwrap();
+        let a = fork(&space, task.id, "agent");
+        fs::write(a.view_path.join("src/lib.rs"), "pub fn f() -> u32 { 2 }\n").unwrap();
+        let first = export(
+            &space,
+            a.id,
+            &ExportOptions {
+                branch: "thread".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        // Squash-merged into main, then main moves on.
+        fs::write(w.join("src/lib.rs"), "pub fn f() -> u32 { 2 }\n").unwrap();
+        git(w, &["commit", "-q", "-am", "squashed (#1)"]);
+        fs::write(w.join("other"), "o\n").unwrap();
+        git(w, &["add", "other"]);
+        git(w, &["commit", "-q", "-m", "other"]);
+        let main = git(w, &["rev-parse", "main"]);
+
+        let b = fork(&space, task.id, "agent");
+        fs::write(b.view_path.join("b"), "b\n").unwrap();
+        let opts = ExportOptions {
+            branch: "thread".into(),
+            base: Some("main".into()),
+            ..Default::default()
+        };
+        let r = export(&space, b.id, &opts).unwrap();
+        let c = r.continued_from.as_ref().expect("continued");
+        assert_eq!(c.head, first.commit);
+        assert_eq!(c.via, "contained");
+        assert_eq!(c.pr, None);
+        assert_eq!(r.replaced.as_deref(), Some(first.commit.as_str()));
+        assert_eq!(git(w, &["rev-parse", "thread^1"]), main);
+        assert_eq!(git(w, &["rev-parse", "thread^2"]), first.commit);
+        assert_eq!(git(w, &["rev-parse", "thread^{tree}"]), r.tree);
+        assert_eq!(r.parent.as_deref(), Some(main.as_str()));
+
+        // Main changes f again, and the branch gets work of its own that is
+        // not in main: refused, saying why.
+        fs::write(w.join("src/lib.rs"), "pub fn f() -> u32 { 9 }\n").unwrap();
+        git(w, &["commit", "-q", "-am", "main changes f again"]);
+        let thread = git(w, &["rev-parse", "thread"]);
+        let mut c_opts = opts.clone();
+        fs::write(b.view_path.join("b"), "b2\n").unwrap();
+        let foreign = {
+            git(w, &["checkout", "-q", "thread"]);
+            fs::write(w.join("src/lib.rs"), "pub fn f() -> u32 { 3 }\n").unwrap();
+            git(w, &["commit", "-q", "-am", "unmerged work"]);
+            let h = git(w, &["rev-parse", "HEAD"]);
+            git(w, &["checkout", "-q", "main"]);
+            h
+        };
+        let err = export(&space, b.id, &c_opts).unwrap_err();
+        assert_eq!(err.code(), "branch_exists", "{err}");
+        assert!(matches!(err, Error::BranchNotLanded { .. }), "{err}");
+        assert!(err.to_string().contains("not all of its changes"), "{err}");
+        assert_eq!(git(w, &["rev-parse", "thread"]), foreign);
+        // GitHub's word that this head merged (into a main that holds its
+        // merge commit) is enough, though the content check refuses.
+        c_opts.merged_pr = Some(MergedPr {
+            number: 4,
+            head: foreign.clone(),
+            merge_commit: Some(git(w, &["rev-parse", "main"])),
+        });
+        let r = export(&space, b.id, &c_opts).unwrap();
+        let c = r.continued_from.as_ref().expect("continued");
+        assert_eq!((c.via, c.pr), ("merged_pr", Some(4)));
+        assert_eq!(git(w, &["rev-parse", "thread^2"]), foreign);
+        assert!(repo_ancestor(w, &thread, "thread"));
+        // A merged PR whose merge the base does not contain: refused.
+        c_opts.merged_pr = Some(MergedPr {
+            number: 5,
+            head: git(w, &["rev-parse", "thread"]),
+            merge_commit: Some(first.commit.clone()),
+        });
+        let err = export(&space, b.id, &c_opts).unwrap_err();
+        assert!(err.to_string().contains("PR #5 merged"), "{err}");
+    }
+
+    fn repo_ancestor(w: &Path, a: &str, b: &str) -> bool {
+        Command::new("git")
+            .arg("-C")
+            .arg(w)
+            .args(["merge-base", "--is-ancestor", a, b])
+            .status()
+            .unwrap()
+            .success()
+    }
+
     #[test]
     fn existing_branch_needs_force() {
         let (tmp, space, _head) = repo();
@@ -907,7 +1165,7 @@ mod tests {
         fs::write(a.view_path.join("x"), "x\n").unwrap();
         assert!(matches!(
             export(&space, a.id, &opts),
-            Err(Error::BranchExists(_))
+            Err(Error::BranchNotLanded { .. })
         ));
         let second = export(
             &space,
@@ -981,7 +1239,7 @@ mod tests {
         fs::write(a.view_path.join("src/lib.rs"), "pub fn f() -> u32 { 3 }\n").unwrap();
         assert!(matches!(
             export(&space, a.id, &opts),
-            Err(Error::BranchExists(_))
+            Err(Error::BranchNotLanded { .. })
         ));
         // Local edits the export would overwrite: refused, nothing moves.
         fs::write(w.join("src/lib.rs"), "local edit\n").unwrap();

@@ -85,6 +85,31 @@ A promoted attempt keeps recording its view: fix CI or review comments in it, an
 `agentvc snapshot aX` / `agentvc pr aX` pick the fix up (`pr` exports the view as it is
 even without a snapshot). Only abandoned attempts are frozen (#116).
 
+### Shipping again from the same branch (#213)
+
+A cloud thread may push only its own branch. After its PR is squash-merged on GitHub,
+that branch still points at the old PR head, which the next export (parented on the new
+main) does not build on. `agentvc pr` (and `agentvc export`) then checks whether the old
+head has *landed*:
+
+- GitHub says so: the PR agentvc last opened from the branch is merged, its head is the
+  branch's head, and the export's base contains its merge commit; or
+- the content says so: the old head changed something since its merge-base with the
+  export's base, and a three-way merge of it into that base is clean and gives exactly
+  the base's tree, so every change it made is already there (what a squash merge leaves).
+
+If it has, the export commit gets two parents: the new base first, the old head second.
+Its tree is the attempt's own, the branch (and the checkout, when it is checked out)
+fast-forwards, the push needs no force, GitHub's diff against main shows only the new
+work, and squash-merging it gives one clean commit. A new PR is opened; the merged one is
+never updated. The output says `claude/x had merged PR #N; continuing it with a merge
+commit (fast-forward)`, and `--json` carries `export.continued_from: {head, pr, via}`
+(`via` is `merged_pr` or `contained`).
+
+If the old head has not landed (work on the branch that is not in the base, or a merged
+PR the attempt was not rebased past), `pr` refuses with `branch_exists` and says why.
+`--force` still moves the branch regardless.
+
 ### Conflicts that resolve themselves (#91)
 
 `rebase`, `take` and `merge` resolve the usual conflicts between parallel attempts
@@ -250,6 +275,12 @@ thread goes idle. Use your thread's own push branch wherever `<branch>` appears.
    `agentvc pr aX`. Run fmt and clippy in the view first. `GITHUB_TOKEN` is set in
    cloud sessions. Exporting to the branch checked out in the main checkout (the usual case
    in a thread) moves that checkout along; no detach or `--force` needed.
+   Several PRs from one thread branch need no `--force` either (#213): once the first PR
+   is squash-merged, the next `agentvc pr aY` (after `agentvc rebase aY`) sees that the
+   branch's old head has landed and continues the branch with a merge commit, so the push
+   is a fast-forward and a new PR opens with only the new work (see "Shipping again from
+   the same branch" below). Never pass `--force` for this; if `pr` refuses with
+   `branch_exists`, the branch holds work that is not in main, and the message says so.
 6. **PR body:** keep agentvc's generated body; put the required header lines and your
    summary in a file and pass `--body-prefix <file>`, and put the required footer
    (e.g. "🤖 Generated with ..." and the session URL) in another and pass

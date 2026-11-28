@@ -632,6 +632,7 @@ mod tests {
             objects_copied: 0,
             hooks: vec![],
             story: Vec::new(),
+            continued_from: None,
         };
         let body = crate::github::pr_body(&space, &winner, &exp).unwrap();
         let section = body.split_once("## Contributors").expect("section").1;

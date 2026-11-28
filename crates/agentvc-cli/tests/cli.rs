@@ -3184,3 +3184,280 @@ fn stack_undo_reverses_a_restack_finished_with_continue() {
     assert_eq!(git(&a, &["rev-parse", "low"]), low2);
     assert_ne!(low, low2);
 }
+
+/// PRs the stateful fake GitHub of [`fake_github_prs`] holds, by number - 1.
+type Prs = std::sync::Arc<std::sync::Mutex<Vec<Value>>>;
+
+/// A fake GitHub that keeps its PRs: `POST /pulls` opens one numbered from
+/// 1, `GET /pulls?state=open&head=o:b` lists the open ones from branch `b`,
+/// `GET`/`PATCH /pulls/N` read and update one. Tests merge a PR by editing
+/// it in the returned list.
+fn fake_github_prs() -> (String, Prs, RequestLog) {
+    use std::io::{BufRead, BufReader, Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let prs: Prs = Default::default();
+    let log: RequestLog = Default::default();
+    let (state, seen) = (prs.clone(), log.clone());
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let mut stream = stream.unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut line = String::new();
+            if reader.read_line(&mut line).unwrap() == 0 {
+                continue;
+            }
+            let mut parts = line.split_whitespace();
+            let method = parts.next().unwrap().to_string();
+            let path = parts.next().unwrap().replace("%2F", "/");
+            let mut len = 0;
+            loop {
+                let mut h = String::new();
+                reader.read_line(&mut h).unwrap();
+                if h.trim().is_empty() {
+                    break;
+                }
+                if let Some((k, v)) = h.split_once(':') {
+                    if k.eq_ignore_ascii_case("content-length") {
+                        len = v.trim().parse().unwrap();
+                    }
+                }
+            }
+            let mut body = vec![0; len];
+            reader.read_exact(&mut body).unwrap();
+            let body: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+            seen.lock()
+                .unwrap()
+                .push((method.clone(), path.clone(), body.clone()));
+            let mut prs = state.lock().unwrap();
+            let pulls = "/repos/acme/widget/pulls";
+            let number = |p: &str| -> Option<usize> {
+                p.strip_prefix(pulls)?.strip_prefix('/')?.parse().ok()
+            };
+            let reply = match method.as_str() {
+                "GET" if path == "/repos/acme/widget" => {
+                    serde_json::json!({ "default_branch": "main" })
+                }
+                "GET" if path.starts_with(&format!("{pulls}?")) => {
+                    let head = path
+                        .split(['?', '&'])
+                        .find_map(|kv| kv.strip_prefix("head=acme:"))
+                        .unwrap_or_default()
+                        .to_string();
+                    let open = path.contains("state=open");
+                    Value::from(
+                        prs.iter()
+                            .filter(|p| p["head"]["ref"] == head.as_str())
+                            .filter(|p| !open || p["state"] == "open")
+                            .cloned()
+                            .collect::<Vec<_>>(),
+                    )
+                }
+                "POST" if path == pulls => {
+                    let n = prs.len() + 1;
+                    let pr = serde_json::json!({
+                        "number": n,
+                        "html_url": format!("https://github.com/acme/widget/pull/{n}"),
+                        "title": body["title"], "body": body["body"], "state": "open",
+                        "merged": false, "merged_at": null, "merge_commit_sha": null,
+                        "head": { "ref": body["head"], "sha": null },
+                    });
+                    prs.push(pr.clone());
+                    pr
+                }
+                "GET" | "PATCH" if number(&path).is_some() => {
+                    let pr = &mut prs[number(&path).unwrap() - 1];
+                    if method == "PATCH" {
+                        for (k, v) in body.as_object().unwrap() {
+                            pr[k] = v.clone();
+                        }
+                    }
+                    pr.clone()
+                }
+                _ => Value::Null,
+            };
+            drop(prs);
+            let reply = reply.to_string();
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",
+                reply.len()
+            )
+            .unwrap();
+        }
+    });
+    (base, prs, log)
+}
+
+/// A cloud thread may push only its own branch. After its first PR is
+/// squash-merged, the branch still points at the old PR head; the next
+/// `pr` continues it with a merge commit (new main first, old head
+/// second), so the push fast-forwards without --force, and opens a new PR
+/// (#213). Unmerged work on the branch still refuses with branch_exists.
+#[test]
+fn pr_continues_thread_branch_after_squash_merge() {
+    let tmp = tempdir();
+    let w = tmp.path().join("work");
+    let remote = tmp.path().join("remotes/acme/widget.git");
+    fs::create_dir_all(&w).unwrap();
+    fs::create_dir_all(&remote).unwrap();
+    git(&remote, &["init", "-q", "--bare", "-b", "main"]);
+    git(&w, &["init", "-q", "-b", "main"]);
+    fs::write(w.join("lib.rs"), "1\n").unwrap();
+    fs::write(w.join("other.rs"), "a\n").unwrap();
+    git(&w, &["add", "-A"]);
+    git(&w, &["commit", "-q", "-m", "base"]);
+    git(&w, &["remote", "add", "origin", remote.to_str().unwrap()]);
+    git(&w, &["push", "-q", "origin", "main"]);
+    // The thread's own branch, checked out in the main checkout.
+    git(&w, &["checkout", "-q", "-b", "claude/x"]);
+    git(&w, &["push", "-q", "origin", "claude/x"]);
+
+    agentvc(&w, &["init"]);
+    agentvc(&w, &["config", "pr.branch", "claude/x"]);
+    let (api, prs, log) = fake_github_prs();
+    let run = |args: &[&str]| -> Value {
+        let out = Command::cargo_bin("agentvc")
+            .unwrap()
+            .arg("--json")
+            .arg("-C")
+            .arg(&w)
+            .args(args)
+            .env("GITHUB_TOKEN", "test-token")
+            .env("AGENTVC_GITHUB_API", &api)
+            .env_remove("HTTP_PROXY")
+            .env_remove("HTTPS_PROXY")
+            .env_remove("ALL_PROXY")
+            .env_remove("http_proxy")
+            .env_remove("https_proxy")
+            .env_remove("all_proxy")
+            .output()
+            .unwrap();
+        serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
+            panic!(
+                "bad json: {e}\n{}\n{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            )
+        })
+    };
+    // A new task's attempt on the latest origin/main, with one file edited.
+    let attempt = |task: &str, file: &str, text: &str| -> String {
+        agentvc(&w, &["task", "new", task]);
+        let t = format!(
+            "t{}",
+            agentvc(&w, &["task", "list"])["tasks"]
+                .as_array()
+                .unwrap()
+                .len()
+        );
+        let v = agentvc(&w, &["fork", "--task", &t, "--from", "a1"]);
+        let id = format!("a{}", v["fork"]["attempt"]["id"]);
+        let view = v["fork"]["attempt"]["view_path"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let v = agentvc(&w, &["rebase", &id]);
+        assert_eq!(v["ok"], true, "{v}");
+        fs::write(Path::new(&view).join(file), text).unwrap();
+        let v = agentvc(&w, &["promote", &id]);
+        assert_eq!(v["ok"], true, "{v}");
+        id
+    };
+
+    let a = attempt("first change", "lib.rs", "2\n");
+    let v = run(&["pr", &a, "--no-sync"]);
+    assert_eq!(v["ok"], true, "{v}");
+    assert_eq!(v["pr"]["number"], 1);
+    assert!(v["pr"]["export"]["continued_from"].is_null(), "{v}");
+    let old_head = git(&remote, &["rev-parse", "claude/x"]);
+    assert_eq!(old_head, v["pr"]["export"]["commit"].as_str().unwrap());
+
+    // GitHub squash-merges PR #1 onto main (plus an unrelated change), and
+    // leaves the branch where it was.
+    let gh = tmp.path().join("gh");
+    git(
+        tmp.path(),
+        &[
+            "clone",
+            "-q",
+            remote.to_str().unwrap(),
+            gh.to_str().unwrap(),
+        ],
+    );
+    git(&gh, &["merge", "-q", "--squash", "origin/claude/x"]);
+    git(&gh, &["commit", "-q", "-m", "first change (#1)"]);
+    let squash = git(&gh, &["rev-parse", "HEAD"]);
+    fs::write(gh.join("other.rs"), "b\n").unwrap();
+    git(&gh, &["commit", "-q", "-am", "someone else's change"]);
+    git(&gh, &["push", "-q", "origin", "main"]);
+    let new_main = git(&gh, &["rev-parse", "HEAD"]);
+    {
+        let mut prs = prs.lock().unwrap();
+        prs[0]["state"] = "closed".into();
+        prs[0]["merged"] = true.into();
+        prs[0]["merged_at"] = "2026-11-27T00:00:00Z".into();
+        prs[0]["merge_commit_sha"] = squash.clone().into();
+        prs[0]["head"]["sha"] = old_head.clone().into();
+    }
+
+    // The next piece of work from the same thread: no --force needed.
+    let b = attempt("second change", "new.rs", "new\n");
+    let v = run(&["pr", &b, "--no-sync"]);
+    assert_eq!(v["ok"], true, "{v}");
+    let exp = &v["pr"]["export"];
+    assert_eq!(exp["continued_from"]["head"], old_head.as_str(), "{v}");
+    assert_eq!(exp["continued_from"]["pr"], 1, "{v}");
+    assert_eq!(exp["continued_from"]["via"], "merged_pr", "{v}");
+    assert_eq!(v["pr"]["number"], 2, "a new PR, not the merged one: {v}");
+    assert_eq!(v["pr"]["updated"], false);
+    let commit = exp["commit"].as_str().unwrap().to_string();
+    // Pushed as a fast-forward of the old head.
+    assert_eq!(git(&remote, &["rev-parse", "claude/x"]), commit);
+    git(
+        &remote,
+        &["merge-base", "--is-ancestor", &old_head, &commit],
+    );
+    assert_eq!(git(&w, &["rev-parse", &format!("{commit}^1")]), new_main);
+    assert_eq!(git(&w, &["rev-parse", &format!("{commit}^2")]), old_head);
+    // The tree is the attempt's own; the PR's diff against main is only
+    // the new work.
+    let tree = git(&w, &["rev-parse", &format!("{commit}^{{tree}}")]);
+    assert_eq!(tree, exp["tree"].as_str().unwrap());
+    let snap = agentvc(&w, &["show", &b]);
+    let snaps = snap["snapshots"].as_array().unwrap();
+    assert_eq!(snaps.last().unwrap()["tree"], tree.as_str(), "{snap}");
+    assert_eq!(
+        git(
+            &remote,
+            &["diff", "--name-only", &format!("main...{commit}")]
+        ),
+        "new.rs"
+    );
+    // The checked-out thread branch moved along, cleanly.
+    assert_eq!(git(&w, &["rev-parse", "HEAD"]), commit);
+    assert_eq!(
+        git(&w, &["status", "--porcelain", "--untracked-files=no"]),
+        ""
+    );
+    // The merged PR was looked at, never updated.
+    assert!(!log
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|(m, p, _)| m == "PATCH" && p.ends_with("/pulls/1")));
+    assert_eq!(prs.lock().unwrap().len(), 2);
+
+    // Work on the branch that is not in main (a commit pushed by hand):
+    // refused, and it says why.
+    fs::write(w.join("lib.rs"), "foreign\n").unwrap();
+    git(&w, &["commit", "-q", "-am", "foreign work"]);
+    let foreign = git(&w, &["rev-parse", "HEAD"]);
+    let c = attempt("third change", "third.rs", "3\n");
+    let v = run(&["pr", &c, "--no-sync"]);
+    assert_eq!(v["error"]["code"], "branch_exists", "{v}");
+    let msg = v["error"]["message"].as_str().unwrap();
+    assert!(msg.contains("not all of its changes are in it"), "{msg}");
+    assert_eq!(git(&w, &["rev-parse", "claude/x"]), foreign);
+    assert_eq!(git(&remote, &["rev-parse", "claude/x"]), commit);
+}
