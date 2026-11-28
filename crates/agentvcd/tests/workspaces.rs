@@ -16,6 +16,9 @@ use http_body_util::BodyExt;
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
+/// The daemon token these tests run with.
+const TOKEN: &str = "test-token";
+
 fn git(dir: &Path, args: &[&str]) {
     let out = Command::new("git")
         .args(args)
@@ -79,6 +82,7 @@ async fn send(
         .method(method)
         .uri(uri)
         .header("host", "localhost:7420")
+        .header("x-agentvc-token", TOKEN)
         .header("content-type", "application/json")
         .body(match body {
             Some(b) => Body::from(b.to_string()),
@@ -97,7 +101,7 @@ async fn send(
 #[tokio::test]
 async fn list_edit_queue_and_events() {
     let (_tmp, main, w2) = fixture();
-    let mut config = Config::new(&main);
+    let mut config = Config::new(&main).with_token(TOKEN);
     config.poll_interval = Duration::from_millis(50);
     let app = agentvcd::router(AppState::start(&config).unwrap());
 
@@ -213,7 +217,7 @@ async fn list_edit_queue_and_events() {
 #[tokio::test]
 async fn files_at_a_branch_base_and_tip() {
     let (_tmp, main, _w2) = fixture();
-    let config = Config::new(&main);
+    let config = Config::new(&main).with_token(TOKEN);
     let app = agentvcd::router(AppState::start(&config).unwrap());
 
     let (_, v) = send(&app, "GET", "/api/workspaces", None).await;

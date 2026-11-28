@@ -1,3 +1,5 @@
+// First: takes the daemon token out of the address before anything reads it.
+import './core/token'
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import { BrowserRouter } from 'react-router'

@@ -16,6 +16,9 @@ use http_body_util::BodyExt;
 use serde_json::Value;
 use tower::ServiceExt;
 
+/// The daemon token these tests run with.
+const TOKEN: &str = "test-token";
+
 fn git(dir: &Path, args: &[&str]) {
     let out = Command::new("git")
         .args(args)
@@ -71,6 +74,7 @@ fn fixture() -> (tempfile::TempDir, PathBuf, PathBuf) {
 async fn call(app: &axum::Router, uri: &str) -> (StatusCode, Value) {
     let req = Request::get(uri)
         .header("host", "localhost:7420")
+        .header("x-agentvc-token", TOKEN)
         .body(Body::empty())
         .unwrap();
     let res = app.clone().oneshot(req).await.unwrap();
@@ -104,7 +108,7 @@ fn names(v: &Value) -> Vec<String> {
 #[tokio::test]
 async fn tree_search_file_and_blame_over_every_ref_kind() {
     let (_tmp, main, w2) = fixture();
-    let app = agentvcd::router(AppState::start(&Config::new(&main)).unwrap());
+    let app = agentvcd::router(AppState::start(&Config::new(&main).with_token(TOKEN)).unwrap());
     let (_, v) = call(&app, "/api/workspaces").await;
     let ws = v["workspaces"][1]["id"].as_str().unwrap().to_string();
 
@@ -215,12 +219,14 @@ async fn tree_search_file_and_blame_over_every_ref_kind() {
     // The page itself: a path ending in a file name is still a UI route.
     let req = Request::get("/review/code/main/src/lib.rs")
         .header("host", "localhost:7420")
+        .header("x-agentvc-token", TOKEN)
         .body(Body::empty())
         .unwrap();
     let res = app.clone().oneshot(req).await.unwrap();
     assert_eq!(res.status(), StatusCode::OK);
     let req = Request::get("/missing.js")
         .header("host", "localhost:7420")
+        .header("x-agentvc-token", TOKEN)
         .body(Body::empty())
         .unwrap();
     assert_eq!(
@@ -250,7 +256,7 @@ async fn a_10k_file_tree_lists_fast() {
     }
     git(&main, &["add", "."]);
     git(&main, &["commit", "-q", "-m", "many"]);
-    let app = agentvcd::router(AppState::start(&Config::new(&main)).unwrap());
+    let app = agentvcd::router(AppState::start(&Config::new(&main).with_token(TOKEN)).unwrap());
     // The first call copies the commit's tree into the store.
     let (s, v) = call(&app, "/api/tree?ref=main&recursive=1&paths_only=1").await;
     assert_eq!(s, StatusCode::OK, "{v}");

@@ -233,9 +233,11 @@ async fn session(state: &AppState, app: &Router, cfg: &CloudConfig) -> Result<()
                 let tx = tx.clone();
                 let read_only = cfg.read_only;
                 let allow_agents = cfg.allow_agents;
+                let token = state.token().to_string();
                 tokio::spawn(async move {
                     let res = relay(
                         app,
+                        &token,
                         read_only,
                         allow_agents,
                         &method,
@@ -276,9 +278,14 @@ fn error_body(code: &str, message: &str) -> String {
     json!({ "error": { "code": code, "message": message } }).to_string()
 }
 
-/// Run one relayed API call against the local router.
+/// Run one relayed API call against the local router. The service
+/// authenticated the caller, so the call carries the daemon token (`token`);
+/// what it may do is narrowed by `read_only`, `allow_agents` and the relay
+/// header.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn relay(
     app: Router,
+    token: &str,
     read_only: bool,
     allow_agents: bool,
     method: &str,
@@ -316,6 +323,7 @@ pub(crate) async fn relay(
         .method(method)
         .uri(path)
         .header(header::HOST, "localhost")
+        .header(crate::auth::TOKEN_HEADER, token)
         .header(
             crate::agents::RELAY_HEADER,
             if allow_agents { "agents" } else { "1" },
@@ -366,5 +374,37 @@ mod tests {
             "ws://127.0.0.1:8080/connect"
         );
         assert!(connect_url("avc.example.com").is_err());
+    }
+
+    /// The service authenticated the caller, so relayed changes carry the
+    /// daemon token and pass its guard (#199); a bare local call does not.
+    #[tokio::test]
+    async fn relayed_changes_carry_the_token() {
+        let tmp = tempfile::tempdir().unwrap();
+        agentvc_core::Space::init(tmp.path()).unwrap();
+        let state = AppState::start(&crate::Config::new(tmp.path())).unwrap();
+        let app = crate::router(state.clone());
+        let body = Some(r#"{"status":"failed"}"#.to_string());
+        let ct = Some("application/json".to_string());
+        let (status, _, out) = relay(
+            app.clone(),
+            state.token(),
+            false,
+            false,
+            "POST",
+            "/api/attempts/a99/mark",
+            ct,
+            body,
+        )
+        .await;
+        // Past the guard: the attempt simply does not exist.
+        assert_eq!(status, 404, "{out}");
+        let req = Request::post("/api/attempts/a99/mark")
+            .header(header::HOST, "localhost")
+            .header(crate::agents::RELAY_HEADER, "agents")
+            .body(Body::empty())
+            .unwrap();
+        let res = app.oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
     }
 }

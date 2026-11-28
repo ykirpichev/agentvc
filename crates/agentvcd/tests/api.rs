@@ -9,8 +9,11 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use futures_util::StreamExt;
 use http_body_util::BodyExt;
-use serde_json::Value;
+use serde_json::{json, Value};
 use tower::ServiceExt;
+
+/// The daemon token these tests run with.
+const TOKEN: &str = "test-token";
 
 /// A space with task t1, attempts a2 (passed, edits lib.rs, adds new.txt)
 /// and a3 (exploring, untouched).
@@ -49,12 +52,13 @@ fn fixture() -> tempfile::TempDir {
 }
 
 fn app(dir: &Path) -> axum::Router {
-    agentvcd::router(AppState::start(&Config::new(dir)).unwrap())
+    agentvcd::router(AppState::start(&Config::new(dir).with_token(TOKEN)).unwrap())
 }
 
 async fn call(app: &axum::Router, uri: &str) -> (StatusCode, Value) {
     let req = Request::get(uri)
         .header("host", "localhost:7420")
+        .header("x-agentvc-token", TOKEN)
         .body(Body::empty())
         .unwrap();
     let res = app.clone().oneshot(req).await.unwrap();
@@ -179,31 +183,250 @@ async fn errors_have_stable_codes() {
     }
 }
 
+/// Status and error code of one request with these headers.
+async fn raw(
+    app: &axum::Router,
+    method: &str,
+    uri: &str,
+    headers: &[(&str, &str)],
+    body: Option<Value>,
+) -> (StatusCode, String) {
+    let mut req = Request::builder().method(method).uri(uri);
+    for (k, v) in headers {
+        req = req.header(*k, *v);
+    }
+    let req = match body {
+        Some(b) => req
+            .header("content-type", "application/json")
+            .body(Body::from(b.to_string())),
+        None => req.body(Body::empty()),
+    }
+    .unwrap();
+    let res = app.clone().oneshot(req).await.unwrap();
+    let status = res.status();
+    let bytes = res.into_body().collect().await.unwrap().to_bytes();
+    let v: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    (
+        status,
+        v["error"]["code"].as_str().unwrap_or("").to_string(),
+    )
+}
+
 #[tokio::test]
 async fn rejects_foreign_host_and_origin() {
     let tmp = fixture();
     let app = app(tmp.path());
-    for (host, origin) in [
-        ("evil.example:7420", None),
-        ("localhost:7420", Some("https://evil.example")),
+    for (host, origin, code) in [
+        ("evil.example:7420", None, "forbidden_host"),
+        // Userinfo is not a host (#199).
+        ("localhost:1@evil.com", None, "forbidden_host"),
+        (
+            "localhost:7420",
+            Some("https://evil.example"),
+            "forbidden_origin",
+        ),
+        // Another localhost port is another site (#199).
+        (
+            "127.0.0.1:7420",
+            Some("http://localhost:5173"),
+            "forbidden_origin",
+        ),
+        (
+            "localhost:7420",
+            Some("http://localhost:8080"),
+            "forbidden_origin",
+        ),
+        ("localhost:7420", Some("null"), "forbidden_origin"),
     ] {
-        let mut req = Request::get("/api/tasks").header("host", host);
+        let mut h = vec![("host", host)];
         if let Some(o) = origin {
-            req = req.header("origin", o);
+            h.push(("origin", o));
         }
-        let res = app
-            .clone()
-            .oneshot(req.body(Body::empty()).unwrap())
-            .await
-            .unwrap();
-        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+        let (s, c) = raw(&app, "GET", "/api/tasks", &h, None).await;
+        assert_eq!(s, StatusCode::FORBIDDEN, "{host} {origin:?}");
+        assert_eq!(c, code, "{host} {origin:?}");
     }
-    let req = Request::get("/api/tasks")
-        .header("host", "127.0.0.1:7420")
-        .header("origin", "http://localhost:5173")
-        .body(Body::empty())
-        .unwrap();
-    assert_eq!(app.oneshot(req).await.unwrap().status(), StatusCode::OK);
+    // Same origin, or no Origin at all (curl, editors): reads work, and the
+    // page loads without the token.
+    for h in [
+        vec![
+            ("host", "localhost:7420"),
+            ("origin", "http://localhost:7420"),
+        ],
+        vec![
+            ("host", "127.0.0.1:7420"),
+            ("origin", "http://127.0.0.1:7420"),
+        ],
+        vec![("host", "localhost:7420")],
+    ] {
+        assert_eq!(
+            raw(&app, "GET", "/api/tasks", &h, None).await.0,
+            StatusCode::OK
+        );
+        assert_eq!(raw(&app, "GET", "/", &h, None).await.0, StatusCode::OK);
+    }
+}
+
+/// Changes need the daemon token, from any client (#199).
+#[tokio::test]
+async fn changes_need_the_token() {
+    let tmp = fixture();
+    let app = app(tmp.path());
+    let mark = || Some(json!({ "status": "failed" }));
+    let start_agent = || {
+        Some(json!({
+            "workspace": "main", "from": "main", "prompt": "x",
+            "runner": "command", "command": "touch /tmp/agentvc-pwned"
+        }))
+    };
+    let host = ("host", "localhost:7420");
+    let same = ("origin", "http://localhost:7420");
+    let other_port = ("origin", "http://localhost:5173");
+    let tok = ("x-agentvc-token", TOKEN);
+    let bad = ("x-agentvc-token", "nope");
+
+    // No token: refused, with or without a same-origin Origin.
+    for h in [vec![host], vec![host, same]] {
+        let (s, c) = raw(&app, "POST", "/api/attempts/a2/mark", &h, mark()).await;
+        assert_eq!(
+            (s, c.as_str()),
+            (StatusCode::UNAUTHORIZED, "token_required")
+        );
+        let (s, c) = raw(&app, "POST", "/api/agents", &h, start_agent()).await;
+        assert_eq!(
+            (s, c.as_str()),
+            (StatusCode::UNAUTHORIZED, "token_required")
+        );
+        let (s, c) = raw(
+            &app,
+            "PUT",
+            "/api/workspaces/main/agent-settings",
+            &h,
+            Some(json!({ "permissions": "bypass" })),
+        )
+        .await;
+        assert_eq!(
+            (s, c.as_str()),
+            (StatusCode::UNAUTHORIZED, "token_required")
+        );
+        let (s, c) = raw(&app, "DELETE", "/api/comments/1", &h, None).await;
+        assert_eq!(
+            (s, c.as_str()),
+            (StatusCode::UNAUTHORIZED, "token_required")
+        );
+    }
+    // A wrong token.
+    let (s, c) = raw(&app, "POST", "/api/attempts/a2/mark", &[host, bad], mark()).await;
+    assert_eq!((s, c.as_str()), (StatusCode::FORBIDDEN, "bad_token"));
+    // The right token from another localhost page is still refused.
+    let (s, c) = raw(
+        &app,
+        "POST",
+        "/api/attempts/a2/mark",
+        &[host, other_port, tok],
+        mark(),
+    )
+    .await;
+    assert_eq!((s, c.as_str()), (StatusCode::FORBIDDEN, "forbidden_origin"));
+    let (s, c) = raw(
+        &app,
+        "POST",
+        "/api/attempts/a2/mark",
+        &[("host", "localhost:1@evil.com"), tok],
+        mark(),
+    )
+    .await;
+    assert_eq!((s, c.as_str()), (StatusCode::FORBIDDEN, "forbidden_host"));
+    assert!(!std::path::Path::new("/tmp/agentvc-pwned").exists());
+
+    // The token from the page itself, or from a client without Origin.
+    for h in [vec![host, same, tok], vec![host, tok]] {
+        let (s, c) = raw(&app, "POST", "/api/attempts/a2/mark", &h, mark()).await;
+        assert_eq!(s, StatusCode::OK, "{c}");
+    }
+}
+
+/// The UI's pages carry the token, but only to requests the guard lets
+/// through, and nothing lets another site read them (#199).
+#[tokio::test]
+async fn pages_carry_the_token_and_no_cors() {
+    let tmp = fixture();
+    let app = app(tmp.path());
+    let meta = format!(r#"<meta name="agentvc-token" content="{TOKEN}">"#);
+    let get =
+        |uri: &'static str, headers: Vec<(&'static str, &'static str)>, method: &'static str| {
+            let app = app.clone();
+            async move {
+                let mut req = Request::builder().method(method).uri(uri);
+                for (k, v) in headers {
+                    req = req.header(k, v);
+                }
+                let res = app.oneshot(req.body(Body::empty()).unwrap()).await.unwrap();
+                let status = res.status();
+                let cors = res
+                    .headers()
+                    .keys()
+                    .any(|k| k.as_str().starts_with("access-control-"));
+                let cache = res
+                    .headers()
+                    .get("cache-control")
+                    .map(|v| v.to_str().unwrap().to_string());
+                let bytes = res.into_body().collect().await.unwrap().to_bytes();
+                (
+                    status,
+                    cors,
+                    cache,
+                    String::from_utf8_lossy(&bytes).into_owned(),
+                )
+            }
+        };
+    for uri in ["/", "/index.html", "/review/v/2", "/tasks/1"] {
+        for h in [
+            vec![("host", "localhost:7420")],
+            vec![
+                ("host", "127.0.0.1:7420"),
+                ("origin", "http://127.0.0.1:7420"),
+            ],
+        ] {
+            let (s, cors, cache, body) = get(uri, h, "GET").await;
+            assert_eq!(s, StatusCode::OK, "{uri}");
+            assert!(body.contains(&meta), "{uri}: {body}");
+            assert!(!cors, "{uri}");
+            assert_eq!(cache.as_deref(), Some("no-store"), "{uri}");
+        }
+    }
+    for h in [
+        vec![("host", "evil.example:7420")],
+        vec![("host", "localhost:1@evil.com")],
+        vec![
+            ("host", "localhost:7420"),
+            ("origin", "http://localhost:5173"),
+        ],
+        vec![
+            ("host", "localhost:7420"),
+            ("origin", "https://evil.example"),
+        ],
+    ] {
+        let (s, cors, _, body) = get("/", h.clone(), "GET").await;
+        assert_eq!(s, StatusCode::FORBIDDEN, "{h:?}");
+        assert!(!body.contains(TOKEN), "{h:?}");
+        assert!(!cors, "{h:?}");
+    }
+    // No CORS on the API either, preflight included.
+    let (_, cors, _, _) = get("/api/tasks", vec![("host", "localhost:7420")], "GET").await;
+    assert!(!cors);
+    let (s, cors, _, body) = get(
+        "/api/attempts/a2/mark",
+        vec![
+            ("host", "localhost:7420"),
+            ("origin", "http://localhost:5173"),
+            ("access-control-request-method", "POST"),
+        ],
+        "OPTIONS",
+    )
+    .await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    assert!(!cors && !body.contains(TOKEN));
 }
 
 #[tokio::test]
@@ -212,6 +435,7 @@ async fn spa_fallback_serves_html() {
     let app = app(tmp.path());
     let req = Request::get("/tasks/1")
         .header("host", "localhost")
+        .header("x-agentvc-token", TOKEN)
         .body(Body::empty())
         .unwrap();
     let res = app.oneshot(req).await.unwrap();

@@ -50,6 +50,10 @@ start agents, review their diffs and land them.
    review actions and compare work; diffs read attempts' current views, and
    the Branches tree, snapshots and stopping runs need the daemon.
 
+Actions send the daemon token from `$AGENTVC_HOME/agentvcd.token` (default
+`~/.agentvc`), which agentvcd needs for any change; the framed review UI gets
+it from the page agentvcd serves.
+
 Fork and pull requests always run the CLI (`agentvc.cliPath`).
 
 ## Settings

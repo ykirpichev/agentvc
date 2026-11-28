@@ -4,7 +4,8 @@
 // Sync, Submit stack and Undo on top; press a row for its actions, clashes and
 // diff. It is the same view, words and rules as the web, VS Code and Cursor UI
 // (hooks/shared is copied from ui/src). It talks to agentvcd through Claude Code (`$.http.fetch`, never a
-// browser), so the daemon's localhost guard holds.
+// browser), so the daemon's localhost guard holds. Changes carry the daemon token from
+// `$AGENTVC_HOME/agentvcd.token` (#199).
 
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
@@ -63,9 +64,24 @@ let inFlight = false
 let lastJson = ''
 let hasOpened = false
 let cwd = '/'
+/** The daemon token, read again at each poll; null until there is one. */
+let token: string | null = null
 
 /** Links open in the browser; surfaces make links only of https and localhost. */
 const webBase = () => base.replace('//127.0.0.1', '//localhost')
+/** A link into the review UI (its pages carry the token themselves). */
+const webLink = (path: string) => `${webBase()}${path}`
+
+/** `$AGENTVC_HOME/agentvcd.token` (default `~/.agentvc`), or null. */
+async function readToken($: $): Promise<string | null> {
+  try {
+    const home = (await $.env.get('AGENTVC_HOME')) || `${(await $.env.get('HOME')) ?? ''}/.agentvc`
+    const text = await $.fs.read(`${home}/agentvcd.token`)
+    return (typeof text === 'string' ? text.trim() : '') || null
+  } catch {
+    return null
+  }
+}
 const nowS = () => Math.floor(Date.now() / 1000)
 const enc = encodeURIComponent
 
@@ -84,9 +100,14 @@ async function getJson($: $, path: string): Promise<unknown> {
 }
 
 async function postJson($: $, path: string, body: unknown = {}): Promise<unknown> {
+  token = (await readToken($)) ?? token
   const res = await $.http.fetch(base + path, {
     method: 'POST',
-    headers: { accept: 'application/json', 'content-type': 'application/json' },
+    headers: {
+      accept: 'application/json',
+      'content-type': 'application/json',
+      ...(token ? { 'x-agentvc-token': token } : {}),
+    },
     body: JSON.stringify(body),
   })
   if (!res.ok) throw new Error(errorMessage(res.text, res.status))
@@ -113,6 +134,7 @@ async function poll($: $): Promise<void> {
   try {
     let board: AgentvcBoard
     try {
+      token = (await readToken($)) ?? token
       board = await loadBoard(path => getJson($, path), cwd, nowS())
     } catch (err) {
       const prev = await read($, boardAtom)
@@ -511,7 +533,7 @@ function VersionDetail($: $, { el, board, ui, detail, g }: { el: El; board: Agen
   const open = a.status === 'exploring' || a.status === 'passed' || a.status === 'failed'
   const isRunning = board.running.includes(a.id)
   const behind = g.behind ?? 0
-  const link = `${webBase()}/review/v/${a.id}`
+  const link = webLink(`/review/v/${a.id}`)
   return (
     <Box flexDirection="column" gap={1}>
       <Box flexDirection="column">
@@ -595,7 +617,7 @@ function BranchDetail($: $, { el, ui, detail, w, name }: { el: El; ui: AgentvcUi
   const stoppedHere = w.pending?.branch === name
   const lastOk = Math.max(0, ...w.requests.filter(r => r.status === 'applied').map(r => r.created_at))
   const failed = w.requests.find(r => r.status === 'failed' && r.branch === name && r.created_at > lastOk && r.code === 'conflict')
-  const link = `${webBase()}/review/b/${enc(w.id)}/${name.split('/').map(enc).join('/')}`
+  const link = webLink(`/review/b/${enc(w.id)}/${name.split('/').map(enc).join('/')}`)
   return (
     <Box flexDirection="column" gap={1}>
       <Box flexDirection="column">
@@ -863,7 +885,7 @@ export const register: Register = (on, options) => {
           <Button key="refresh" dimColor onPress={() => poll($)}>
             Refresh
           </Button>
-          <Link href={`${webBase()}/review`}>Open review UI</Link>
+          <Link href={webLink('/review')}>Open review UI</Link>
         </Box>
       </Box>
     )
