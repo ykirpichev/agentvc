@@ -6,6 +6,9 @@
   buttons and focus ring follow the current VS Code or Cursor theme.
 - Agent settings read like the editor's Settings, and the model is a dropdown
   of Claude Code models whose default is the one you picked in Claude Code.
+- In diffs, *Open diff* shows the change in the editor's own diff view and
+  *Open file* opens the file in the editor (the checked-out file when it is on
+  this machine), instead of agentvc's file viewer. The browser keeps *View file*.
 
 ## 0.2.1
 

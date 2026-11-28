@@ -576,3 +576,11 @@ h1 .rv-code-link {
 .rv-code-link:hover {
   text-decoration: underline;
 }
+
+/* Inside an editor: "Open diff" and "Open file" side by side. */
+button.diff-view-file {
+  font-size: 12px;
+}
+.diff-view-file + .diff-view-file {
+  margin-left: 12px;
+}

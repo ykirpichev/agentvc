@@ -4,11 +4,13 @@
 
 import * as vscode from 'vscode'
 import { machine, type Connection } from './connection'
-import { WEBVIEW_COMMANDS, frameHtml, nonce, offlineHtml, type Surface } from './reviewHtml'
+import { WEBVIEW_COMMANDS, frameHtml, nonce, offlineHtml, refLabel, safePath, safeRef, type Surface } from './reviewHtml'
+import { fileUri } from './content'
+import type { Ref } from './types'
 
 export const BRANCHES_VIEW = 'agentvc.branches'
 
-type FromWebview = { type?: unknown; path?: unknown; command?: unknown; file?: unknown; line?: unknown }
+type FromWebview = { type?: unknown; path?: unknown; command?: unknown; file?: unknown; line?: unknown; base?: unknown; head?: unknown; ref?: unknown }
 
 export class ReviewHost implements vscode.WebviewViewProvider, vscode.Disposable {
   private view: vscode.WebviewView | undefined
@@ -65,6 +67,8 @@ export class ReviewHost implements vscode.WebviewViewProvider, vscode.Disposable
   private onMessage(m: FromWebview) {
     if (m.type === 'agentvc.open' && typeof m.path === 'string') void this.openPanel(m.path)
     else if (m.type === 'agentvc.openFile' && typeof m.file === 'string') void openFile(m.file, typeof m.line === 'number' ? m.line : undefined)
+    else if (m.type === 'agentvc.openDiff') void openDiff(m.base, m.head, m.path)
+    else if (m.type === 'agentvc.openRef') void openRef(m.ref, m.path)
     else if (m.type === 'agentvc.command' && typeof m.command === 'string' && (WEBVIEW_COMMANDS as readonly string[]).includes(m.command))
       void vscode.commands.executeCommand(m.command)
   }
@@ -123,5 +127,29 @@ export async function openFile(file: string, line?: number): Promise<boolean> {
   }
   const at = line && line > 0 ? new vscode.Position(line - 1, 0) : undefined
   await vscode.window.showTextDocument(uri, { preview: false, selection: at ? new vscode.Range(at, at) : undefined })
+  return true
+}
+
+/**
+ * Show a file's change from the review UI in the editor's own diff view. The
+ * sides are read-only `agentvc:` documents read through the daemon, so this
+ * works for branches, agents and commits that are not checked out here.
+ */
+export async function openDiff(base: unknown, head: unknown, path: unknown): Promise<boolean> {
+  // Checked by safeRef: one of the ref forms the daemon's /file reads.
+  const a = safeRef(base) as Ref | null
+  const b = safeRef(head) as Ref | null
+  const p = safePath(path)
+  if (!a || !b || !p) return false
+  await vscode.commands.executeCommand('vscode.diff', fileUri(a, p), fileUri(b, p), `${p} (${refLabel(a)} ↔ ${refLabel(b)})`, { preview: true })
+  return true
+}
+
+/** Open a file as it is at a ref, read-only, when it is not on this machine. */
+export async function openRef(ref: unknown, path: unknown): Promise<boolean> {
+  const r = safeRef(ref) as Ref | null
+  const p = safePath(path)
+  if (!r || !p) return false
+  await vscode.window.showTextDocument(fileUri(r, p), { preview: true })
   return true
 }

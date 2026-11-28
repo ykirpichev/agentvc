@@ -57,6 +57,10 @@ export type ToHost =
   | { type: 'agentvc.ready'; mode: EmbedMode }
   /** Open a file of this machine in the editor, at a line (1-based). */
   | { type: 'agentvc.openFile'; file: string; line?: number }
+  /** Show `path` from `base` to `head` in the editor's own diff view. */
+  | { type: 'agentvc.openDiff'; base: string; head: string; path: string }
+  /** Open `path` as it is at `ref`, read-only, in the editor. */
+  | { type: 'agentvc.openRef'; ref: string; path: string }
 
 /** Messages a host sends to the page. */
 export type FromHost =

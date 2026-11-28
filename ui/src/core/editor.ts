@@ -50,3 +50,17 @@ export function openInEditor(file: string, line?: number, editor: Editor = prefe
   }
   window.location.href = editorUrl(editor, file, line)
 }
+
+/** Show a file's change in the host editor's own diff view (embedded only). */
+export function openDiffInEditor(base: string, head: string, path: string) {
+  toHost({ type: 'agentvc.openDiff', base, head, path })
+}
+
+/**
+ * Open a file in the host editor: the file on disk when it is on this
+ * machine, else the version at `ref`, read-only (embedded only).
+ */
+export function openFileInEditor(ref: string, path: string, localFile?: string) {
+  if (localFile) toHost({ type: 'agentvc.openFile', file: localFile })
+  else toHost({ type: 'agentvc.openRef', ref, path })
+}

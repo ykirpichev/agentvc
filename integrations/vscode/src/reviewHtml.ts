@@ -48,6 +48,28 @@ export const THEME_VARS = [
   'list-inactiveSelectionBackground',
 ] as const
 
+/**
+ * A ref the review UI may ask the editor to show (`a3`, `s12`, `git:<sha>`,
+ * `main`, `branch:w1/x`, `agent:ag2`, `workspace:w1`), or null.
+ */
+export function safeRef(r: unknown): string | null {
+  return typeof r === 'string' && /^(a\d+|s\d+|git:[0-9a-f]{4,64}|main|(branch|agent|workspace):[\w.\/-]{1,200})$/.test(r) ? r : null
+}
+
+/** A repo-relative file path with no way out of the repo, or null. */
+export function safePath(p: unknown): string | null {
+  if (typeof p !== 'string' || !p || p.length > 1000 || p.includes('\0') || p.includes('\\')) return null
+  if (p.startsWith('/') || /^[A-Za-z]:/.test(p)) return null
+  return p.split('/').some((seg) => seg === '..' || seg === '') ? null : p
+}
+
+/** A short name for a ref in an editor tab title: `git:abc1234…` -> `abc1234`. */
+export function refLabel(r: string): string {
+  if (r.startsWith('git:')) return r.slice(4, 11)
+  const i = r.indexOf(':')
+  return i < 0 ? r : r.slice(r.lastIndexOf('/') + 1 || i + 1)
+}
+
 export function nonce(): string {
   const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'
   let s = ''

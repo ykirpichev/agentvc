@@ -21,6 +21,7 @@ import { plural, timeAgo } from '../lib/format'
 import { agentsOn, agentWorkingOn, settingsLine } from '../core/agents'
 import { AgentSettingsForm, AgentsFrom, StartAgent } from './Agents'
 import { branchLink, codeLink, useGo } from '../core/links'
+import { joinPath } from '../core/editor'
 import { useReview } from './reviewContext'
 
 export function BranchReview() {
@@ -228,6 +229,7 @@ export function BranchReview() {
                     path={f.path}
                     kind={f.kind}
                     codeRef={readOnly ? undefined : `branch:${w.id}/${b.name}`}
+                    localFile={!readOnly && w.this_machine !== false && b.current ? joinPath(w.folder ?? w.path, f.path) : undefined}
                     comments={{ target, threads, readOnly }}
                   />
                 )}
