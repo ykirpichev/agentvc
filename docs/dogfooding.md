@@ -76,7 +76,10 @@ are never touched.
 A follow-up attempt (forked from one whose PR has since merged, squashed or not) is
 rebased against that PR's export rather than its old base: main already holds the export,
 so only the work done after it is merged in, and lines both versions changed don't
-conflict with themselves (#110).
+conflict with themselves (#110). This also holds through several fork levels and when
+the export that landed was taken after the fork point, e.g. the parent was rebased onto
+a newer main and exported again: then the fork point itself is the base, since the
+landed export covers it, so what the ancestor added is not added a second time (#133).
 
 A promoted attempt keeps recording its view: fix CI or review comments in it, and
 `agentvc snapshot aX` / `agentvc pr aX` pick the fix up (`pr` exports the view as it is
