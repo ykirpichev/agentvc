@@ -38,6 +38,8 @@ export class Commands {
       )
     reg('agentvc.refresh', () => this.refresh())
     reg('agentvc.startDaemon', () => this.conn.connect({ forceStart: true }))
+    reg('agentvc.install', () => this.conn.install())
+    reg('agentvc.setup', () => this.conn.setUp())
     reg('agentvc.compareAttempts', (n?: Node, b?: Ref) => this.compareAttempts(n, b))
     reg('agentvc.compareWithParent', (n?: Node) => this.compareWithParent(n))
     reg('agentvc.selectForCompare', (n: Node) => this.selectForCompare(n))

@@ -26,6 +26,14 @@ export class StatusBar implements vscode.Disposable {
       this.item.hide()
       return
     }
+    if (s === 'nocli' && folders.length) {
+      this.current = undefined
+      this.item.text = '$(cloud-download) agentvc'
+      this.item.tooltip = 'agentvc is not installed here. Click to install it.'
+      this.item.command = 'agentvc.install'
+      this.item.show()
+      return
+    }
     if (s === 'offline' || s === 'connecting') {
       this.current = undefined
       this.item.text = s === 'offline' ? '$(debug-disconnect) agentvc' : '$(loading~spin) agentvc'

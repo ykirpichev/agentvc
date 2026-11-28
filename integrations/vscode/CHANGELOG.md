@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- The panel sets itself up: *Install agentvc on <host>* when the CLI is
+  missing (the remote host in a Remote-SSH window), *Set up agentvc here* when
+  the folder has no space, instead of a dead end asking for `agentvc init`.
+- The CLI and daemon are found in `~/.local/bin` and other install folders
+  even when they are not on the editor's PATH; agentvcd is also looked for next
+  to the CLI.
+- Runs on the workspace side in remote windows (`extensionKind: workspace`).
+
 ## 0.2.0
 
 - Branches panel is the shared review UI sidebar: one space, its workspaces

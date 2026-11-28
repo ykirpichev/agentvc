@@ -5,7 +5,7 @@
 export type Surface = 'sidebar' | 'panel'
 
 /** Commands a webview may run; nothing else it sends is acted on. */
-export const WEBVIEW_COMMANDS = ['agentvc.startDaemon', 'agentvc.refresh'] as const
+export const WEBVIEW_COMMANDS = ['agentvc.startDaemon', 'agentvc.refresh', 'agentvc.install', 'agentvc.setup'] as const
 
 export function nonce(): string {
   const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'
@@ -81,18 +81,38 @@ export function frameHtml(o: { base: string; path: string; surface: Surface; fol
 </html>`
 }
 
-/** Shown instead of the frame when no daemon is reachable. */
-export function offlineHtml(o: { state: string; cspSource: string; nonce: string }): string {
-  const text =
-    o.state === 'nospace'
-      ? 'No agentvc space in this workspace. Run <code>agentvc init</code> in your repository.'
-      : o.state === 'connecting'
-        ? 'Connecting to agentvcd…'
-        : 'The branch graph and review need agentvcd running for this workspace.'
-  const buttons =
-    o.state === 'connecting'
-      ? ''
-      : `<button data-cmd="agentvc.startDaemon">Start agentvcd</button> <button data-cmd="agentvc.refresh" class="sec">Retry</button>`
+/** What the panel shows instead of the frame, by connection state. */
+export function offlineContent(o: { state: string; machine?: string; folder?: string }): { text: string; buttons: string } {
+  const on = o.machine ?? 'this computer'
+  const retry = `<button data-cmd="agentvc.refresh" class="sec">Retry</button>`
+  switch (o.state) {
+    case 'connecting':
+      return { text: 'Connecting to agentvcd…', buttons: '' }
+    case 'nocli':
+      return {
+        text: `agentvc is not installed on ${esc(on)}. Install puts <code>agentvc</code> and <code>agentvcd</code> in <code>~/.local/bin</code>, then sets up this folder.`,
+        buttons: `<button data-cmd="agentvc.install">Install agentvc on ${esc(on)}</button> ${retry}`,
+      }
+    case 'nospace':
+      if (!o.folder) return { text: 'Open a folder to use agentvc.', buttons: '' }
+      return {
+        text: `This folder is not set up for agentvc yet. Set up creates its space in <code>.agentvc</code> (ignored by git) and starts agentvcd on ${esc(on)}.`,
+        buttons: `<button data-cmd="agentvc.setup">Set up agentvc here</button> ${retry}`,
+      }
+    default:
+      return {
+        text: `The branch graph and review need agentvcd running for this workspace on ${esc(on)}.`,
+        buttons: `<button data-cmd="agentvc.startDaemon">Start agentvcd</button> ${retry}`,
+      }
+  }
+}
+
+/**
+ * Shown instead of the frame when no daemon is reachable: what is missing on
+ * which machine, and a button that fixes it (install, set up, start).
+ */
+export function offlineHtml(o: { state: string; machine?: string; folder?: string; cspSource: string; nonce: string }): string {
+  const { text, buttons } = offlineContent(o)
   return `<!doctype html>
 <html lang="en">
 <head>

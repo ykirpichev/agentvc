@@ -3,7 +3,7 @@
 // the side bar opens it in the review tab.
 
 import * as vscode from 'vscode'
-import type { Connection } from './connection'
+import { machine, type Connection } from './connection'
 import { WEBVIEW_COMMANDS, frameHtml, nonce, offlineHtml, type Surface } from './reviewHtml'
 
 export const BRANCHES_VIEW = 'agentvc.branches'
@@ -78,7 +78,13 @@ export class ReviewHost implements vscode.WebviewViewProvider, vscode.Disposable
     const d = this.conn.daemon
     const n = nonce()
     if (!d) {
-      webview.html = offlineHtml({ state: this.conn.state, cspSource: webview.cspSource, nonce: n })
+      webview.html = offlineHtml({
+        state: this.conn.state,
+        machine: machine(),
+        folder: this.conn.workspaceDir(),
+        cspSource: webview.cspSource,
+        nonce: n,
+      })
       return
     }
     // Remote windows (SSH, containers) reach the daemon through a forwarded port.

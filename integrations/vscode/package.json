@@ -28,6 +28,9 @@
     "onStartupFinished"
   ],
   "main": "./dist/extension.js",
+  "extensionKind": [
+    "workspace"
+  ],
   "contributes": {
     "viewsContainers": {
       "activitybar": [
@@ -55,6 +58,18 @@
         "title": "Refresh",
         "category": "agentvc",
         "icon": "$(refresh)"
+      },
+      {
+        "command": "agentvc.install",
+        "title": "Install agentvc on This Machine",
+        "category": "agentvc",
+        "icon": "$(cloud-download)"
+      },
+      {
+        "command": "agentvc.setup",
+        "title": "Set Up agentvc in This Folder",
+        "category": "agentvc",
+        "icon": "$(rocket)"
       },
       {
         "command": "agentvc.startDaemon",
@@ -330,12 +345,12 @@
         "agentvc.cliPath": {
           "type": "string",
           "default": "agentvc",
-          "description": "Path to the agentvc CLI, used for fork, pull requests, and as a read-only fallback when no daemon is reachable."
+          "description": "Path to the agentvc CLI, used for set up, fork, pull requests, and as a read-only fallback when no daemon is reachable. A bare name is looked up on PATH, then in ~/.local/bin (where the installer puts it), ~/.cargo/bin, /usr/local/bin and /opt/homebrew/bin. In a remote window this is a path on the remote host."
         },
         "agentvc.daemonPath": {
           "type": "string",
           "default": "agentvcd",
-          "description": "Path to the agentvcd binary used by Start agentvcd."
+          "description": "Path to the agentvcd binary used by Start agentvcd. A bare name is looked up like agentvc.cliPath, then next to the CLI."
         },
         "agentvc.attemptCommands": {
           "type": "boolean",
