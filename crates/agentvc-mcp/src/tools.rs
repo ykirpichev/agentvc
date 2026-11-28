@@ -7,6 +7,47 @@
 
 use serde_json::{json, Map, Value};
 
+/// The tool lists a server can offer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Group {
+    /// The workspace's stack of branches and PRs.
+    Stack,
+    /// Review comments on a branch or an agent.
+    Review,
+    /// Only for agents started from the control center.
+    Agent,
+    /// The attempt tree (tasks, forks, snapshots...), behind `--attempts`.
+    Attempt,
+}
+
+/// Which tools a server offers.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Profile {
+    /// Inside an agent started from the control center
+    /// (`AGENTVC_AGENT_DIR` is set): its own tools, review comments and a
+    /// read-only stack log; agentvc commits, lands and submits for it.
+    pub agent: bool,
+    /// Also the attempt tools (`agentvc mcp --attempts`).
+    pub attempts: bool,
+}
+
+impl Profile {
+    /// Whether `t` is offered.
+    pub fn offers(&self, t: &Tool) -> bool {
+        match t.group {
+            Group::Review => true,
+            Group::Agent => self.agent,
+            Group::Stack => !self.agent || t.read_only,
+            Group::Attempt => self.attempts,
+        }
+    }
+
+    /// The tools offered, in `tools/list` order.
+    pub fn tools(&self) -> impl Iterator<Item = &'static Tool> + '_ {
+        TOOLS.iter().filter(move |t| self.offers(t))
+    }
+}
+
 /// Arguments did not match the tool's schema.
 #[derive(Debug, PartialEq)]
 pub struct BadArgs(pub String);
@@ -23,6 +64,8 @@ pub struct Tool {
     pub destructive: bool,
     /// Tool reaches outside the machine (MCP `openWorldHint`).
     pub open_world: bool,
+    /// Which tool list it belongs to (see [`Profile`]).
+    pub group: Group,
     /// Properties of the input schema, as (name, schema, required).
     pub params: fn() -> Vec<(&'static str, Value, bool)>,
     /// Build the argv after `agentvc --json -C <dir>`.
@@ -245,12 +288,121 @@ fn fork_opts(argv: &mut Argv, a: &Args) -> Result<(), BadArgs> {
 /// Every tool, in the order `tools/list` returns them.
 pub static TOOLS: &[Tool] = &[
     Tool {
+        name: "stack_log",
+        title: "Stack",
+        description: "This workspace's stack: its branches bottom to top with their commits, parent, PR (number, state, checks) and what needs a restack, plus which one is checked out here. Returns {base_ref, branches: [{name, parent, commits, current, needs_restack, ...}]}.",
+        read_only: true,
+        destructive: false,
+        open_world: false,
+        group: Group::Stack,
+        params: || vec![("prs", b("Fetch each PR's checks and review from GitHub first."), false)],
+        argv: |a| Ok(Argv::new(&["stack", "log"]).flag("prs", a.bool("prs")?).done()),
+    },
+    Tool {
+        name: "stack_create",
+        title: "New branch on the stack",
+        description: "Commit your changes as a new branch on top of the current one: one branch is one PR of the stack. Stages every change first unless staged_only. Use it for each separate change instead of git checkout -b and git commit. Returns {branch: {name, parent}, commit}.",
+        read_only: false,
+        destructive: false,
+        open_world: false,
+        group: Group::Stack,
+        params: || {
+            vec![
+                ("message", s("The commit message: what this branch does."), true),
+                ("name", s("Branch name. Defaults to one made from the message."), false),
+                ("insert", b("Put it between the current branch and the branches on top of it (they restack onto it)."), false),
+                ("staged_only", b("Commit only what is staged."), false),
+            ]
+        },
+        argv: |a| {
+            let all = !a.bool("staged_only")?.unwrap_or(false);
+            Ok(Argv::new(&["stack", "create"])
+                .flag("all", Some(all))
+                .opt("message", Some(a.req("message")?))
+                .flag("insert", a.bool("insert")?)
+                .pos(a.str("name")?)
+                .done())
+        },
+    },
+    Tool {
+        name: "stack_modify",
+        title: "Change the current branch",
+        description: "Put your changes into the current branch (amend its last commit, or add a commit with new_commit) and restack the branches above it. Stages every change first unless staged_only. Use it for review fixes instead of git commit --amend. Returns {commit, restack: {updated, unchanged, conflict}}.",
+        read_only: false,
+        destructive: false,
+        open_world: false,
+        group: Group::Stack,
+        params: || {
+            vec![
+                ("message", s("New commit message (or the new commit's, with new_commit)."), false),
+                ("new_commit", b("Add a commit instead of amending the last one."), false),
+                ("staged_only", b("Use only what is staged."), false),
+            ]
+        },
+        argv: |a| {
+            let all = !a.bool("staged_only")?.unwrap_or(false);
+            Ok(Argv::new(&["stack", "modify"])
+                .flag("all", Some(all))
+                .flag("commit", a.bool("new_commit")?)
+                .opt("message", a.str("message")?)
+                .done())
+        },
+    },
+    Tool {
+        name: "stack_submit",
+        title: "Push the stack and open PRs",
+        description: "Push the stack and open or update one PR per branch, each based on the branch below it. Pushes with a lease, so other people's pushes are never overwritten. Defaults to the stack of the current branch. Returns each branch with its PR.",
+        read_only: false,
+        destructive: false,
+        open_world: true,
+        group: Group::Stack,
+        params: || {
+            vec![
+                ("branch", s("Only this branch and the ones below it."), false),
+                ("draft", b("Open new PRs as drafts."), false),
+            ]
+        },
+        argv: |a| {
+            Ok(Argv::new(&["stack", "submit"])
+                .opt("branch", a.str("branch")?)
+                .flag("draft", a.bool("draft")?)
+                .done())
+        },
+    },
+    Tool {
+        name: "stack_sync",
+        title: "Sync with the trunk",
+        description: "Fetch the trunk, drop branches whose PRs merged and restack the rest onto it. On a conflict nothing changes and the error lists the paths. Returns {merged, deleted, restack}.",
+        read_only: false,
+        destructive: false,
+        open_world: true,
+        group: Group::Stack,
+        params: Vec::new,
+        argv: |_| Ok(Argv::new(&["stack", "sync"]).done()),
+    },
+    Tool {
+        name: "stack_restack",
+        title: "Restack",
+        description: "Replay each branch onto its parent's current tip, after a branch below it changed. On a conflict nothing changes and the error lists the paths. Returns {updated, unchanged, conflict}.",
+        read_only: false,
+        destructive: false,
+        open_world: false,
+        group: Group::Stack,
+        params: || vec![("branch", s("Only this branch and the ones above it."), false)],
+        argv: |a| {
+            Ok(Argv::new(&["stack", "restack"])
+                .opt("branch", a.str("branch")?)
+                .done())
+        },
+    },
+    Tool {
         name: "ask_human",
         title: "Ask the person",
         description: "Only for agents started from the agentvc control center: ask the person one short question and wait for their answer (it may take a while). Use it instead of guessing when a decision is theirs. Returns {answer}.",
         read_only: true,
         destructive: false,
         open_world: true,
+        group: Group::Agent,
         params: || vec![("question", s("One short question, with the options if there are any."), true)],
         argv: |a| Ok(Argv::new(&["agent", "ask"]).pos(Some(a.req("question")?)).done()),
     },
@@ -261,6 +413,7 @@ pub static TOOLS: &[Tool] = &[
         read_only: false,
         destructive: false,
         open_world: false,
+        group: Group::Agent,
         params: || {
             vec![
                 ("branch", s("A short name for this review's branch, e.g. \"cli-missing-input\"."), true),
@@ -281,6 +434,7 @@ pub static TOOLS: &[Tool] = &[
         read_only: true,
         destructive: false,
         open_world: true,
+        group: Group::Agent,
         params: || {
             vec![
                 ("tool_name", s("The tool that wants to run."), true),
@@ -303,6 +457,7 @@ pub static TOOLS: &[Tool] = &[
         read_only: false,
         destructive: false,
         open_world: false,
+        group: Group::Attempt,
         params: || {
             vec![
                 ("goal", s("What the task should achieve."), true),
@@ -323,6 +478,7 @@ pub static TOOLS: &[Tool] = &[
         read_only: true,
         destructive: false,
         open_world: false,
+        group: Group::Attempt,
         params: Vec::new,
         argv: |_| Ok(Argv::new(&["task", "list"]).done()),
     },
@@ -333,6 +489,7 @@ pub static TOOLS: &[Tool] = &[
         read_only: false,
         destructive: false,
         open_world: false,
+        group: Group::Attempt,
         params: fork_params,
         argv: |a| {
             let mut argv = Argv::new(&["fork"]);
@@ -347,6 +504,7 @@ pub static TOOLS: &[Tool] = &[
         read_only: false,
         destructive: false,
         open_world: false,
+        group: Group::Attempt,
         params: || {
             vec![
                 ("attempt", s("Attempt id, for example \"a3\". Defaults to the attempt of the server's directory."), false),
@@ -392,6 +550,7 @@ pub static TOOLS: &[Tool] = &[
         read_only: false,
         destructive: false,
         open_world: false,
+        group: Group::Attempt,
         params: || {
             let n = |d: &str| json!({ "type": "number", "description": d });
             vec![
@@ -428,6 +587,7 @@ pub static TOOLS: &[Tool] = &[
         read_only: false,
         destructive: false,
         open_world: false,
+        group: Group::Attempt,
         params: || {
             vec![
                 ("command", s("Shell command, for example \"cargo test --workspace\"."), true),
@@ -468,6 +628,7 @@ pub static TOOLS: &[Tool] = &[
         read_only: false,
         destructive: false,
         open_world: false,
+        group: Group::Attempt,
         params: || {
             vec![
                 ("attempt", s(ATTEMPT), true),
@@ -498,6 +659,7 @@ pub static TOOLS: &[Tool] = &[
         read_only: false,
         destructive: true,
         open_world: false,
+        group: Group::Attempt,
         params: || {
             vec![
                 ("attempt", s(ATTEMPT), true),
@@ -518,6 +680,7 @@ pub static TOOLS: &[Tool] = &[
         read_only: false,
         destructive: true,
         open_world: false,
+        group: Group::Attempt,
         params: || vec![("attempt", s(ATTEMPT), true)],
         argv: |a| Ok(Argv::new(&["promote"]).pos(Some(a.req("attempt")?)).done()),
     },
@@ -528,6 +691,7 @@ pub static TOOLS: &[Tool] = &[
         read_only: true,
         destructive: false,
         open_world: false,
+        group: Group::Attempt,
         params: || vec![("limit", s("How many operations, newest first, as a number string. Defaults to 20."), false)],
         argv: |a| Ok(Argv::new(&["op", "log"]).opt("limit", a.str("limit")?).done()),
     },
@@ -538,6 +702,7 @@ pub static TOOLS: &[Tool] = &[
         read_only: false,
         destructive: true,
         open_world: false,
+        group: Group::Attempt,
         params: || {
             vec![
                 ("op", s("Operation id from op_log, for example \"12\". Defaults to the newest undoable one."), false),
@@ -561,6 +726,7 @@ pub static TOOLS: &[Tool] = &[
         read_only: true,
         destructive: false,
         open_world: false,
+        group: Group::Attempt,
         params: || vec![("attempt", s("Attempt id, for example \"a3\". Defaults to the server's view."), false)],
         argv: |a| Ok(Argv::new(&["status"]).pos(a.str("attempt")?).done()),
     },
@@ -571,6 +737,7 @@ pub static TOOLS: &[Tool] = &[
         read_only: true,
         destructive: false,
         open_world: false,
+        group: Group::Attempt,
         params: || vec![("task", s(TASK), false)],
         argv: |a| Ok(Argv::new(&["log"]).opt("task", a.str("task")?).done()),
     },
@@ -581,6 +748,7 @@ pub static TOOLS: &[Tool] = &[
         read_only: true,
         destructive: false,
         open_world: false,
+        group: Group::Attempt,
         params: || {
             let list = |d: &str| json!({ "type": "array", "items": { "type": "string" }, "description": d });
             vec![
@@ -618,6 +786,7 @@ pub static TOOLS: &[Tool] = &[
         read_only: true,
         destructive: false,
         open_world: false,
+        group: Group::Attempt,
         params: || {
             vec![
                 ("path", s("File path relative to the view root."), true),
@@ -640,6 +809,7 @@ pub static TOOLS: &[Tool] = &[
         read_only: true,
         destructive: false,
         open_world: false,
+        group: Group::Attempt,
         params: || vec![("attempt", s(ATTEMPT), true)],
         argv: |a| Ok(Argv::new(&["show"]).pos(Some(a.req("attempt")?)).done()),
     },
@@ -650,6 +820,7 @@ pub static TOOLS: &[Tool] = &[
         read_only: true,
         destructive: false,
         open_world: false,
+        group: Group::Attempt,
         params: || {
             vec![
                 ("a", s("First ref: aN or sN. Omit to diff the current view's working state."), false),
@@ -678,6 +849,7 @@ pub static TOOLS: &[Tool] = &[
         read_only: true,
         destructive: false,
         open_world: false,
+        group: Group::Attempt,
         params: || vec![("attempt", s(ATTEMPT), true)],
         argv: |a| Ok(Argv::new(&["path"]).pos(Some(a.req("attempt")?)).done()),
     },
@@ -688,6 +860,7 @@ pub static TOOLS: &[Tool] = &[
         read_only: false,
         destructive: false,
         open_world: true,
+        group: Group::Attempt,
         params: || {
             let mut p = fork_params();
             p.push((
@@ -727,6 +900,7 @@ pub static TOOLS: &[Tool] = &[
         read_only: true,
         destructive: false,
         open_world: false,
+        group: Group::Attempt,
         params: || vec![("all", b("Include finished runs."), false)],
         argv: |a| Ok(Argv::new(&["ps"]).flag("all", a.bool("all")?).done()),
     },
@@ -737,6 +911,7 @@ pub static TOOLS: &[Tool] = &[
         read_only: false,
         destructive: false,
         open_world: true,
+        group: Group::Attempt,
         params: || {
             vec![
                 ("attempt", s(ATTEMPT), true),
@@ -763,6 +938,7 @@ pub static TOOLS: &[Tool] = &[
         read_only: false,
         destructive: false,
         open_world: false,
+        group: Group::Attempt,
         params: || {
             vec![
                 ("source", s("Attempt to take from, as aN."), true),
@@ -796,6 +972,7 @@ pub static TOOLS: &[Tool] = &[
         read_only: false,
         destructive: false,
         open_world: true,
+        group: Group::Attempt,
         params: || {
             vec![
                 ("attempt", s(ATTEMPT), true),
@@ -837,6 +1014,7 @@ pub static TOOLS: &[Tool] = &[
         read_only: true,
         destructive: false,
         open_world: true,
+        group: Group::Attempt,
         params: || {
             vec![
                 ("attempt", s("Attempt id, for example \"a3\". Defaults to the server's view."), false),
@@ -859,6 +1037,7 @@ pub static TOOLS: &[Tool] = &[
         read_only: true,
         destructive: false,
         open_world: false,
+        group: Group::Review,
         params: || {
             vec![
                 ("target", s("Another target to list instead: branch:WS/NAME, agent:agN or attempt:aN."), false),
@@ -882,6 +1061,7 @@ pub static TOOLS: &[Tool] = &[
         read_only: false,
         destructive: false,
         open_world: false,
+        group: Group::Review,
         params: || {
             vec![
                 ("id", s("Thread id, for example \"c3\"."), true),
@@ -903,6 +1083,7 @@ pub static TOOLS: &[Tool] = &[
         read_only: false,
         destructive: false,
         open_world: false,
+        group: Group::Review,
         params: || vec![("id", s("Thread id, for example \"c3\"."), true)],
         argv: |a| {
             Ok(Argv::new(&["comment", "resolve"])
@@ -918,6 +1099,7 @@ pub static TOOLS: &[Tool] = &[
         read_only: false,
         destructive: false,
         open_world: false,
+        group: Group::Attempt,
         params: || {
             vec![
                 ("attempt", s(ATTEMPT), true),
@@ -945,6 +1127,7 @@ pub static TOOLS: &[Tool] = &[
         read_only: false,
         destructive: false,
         open_world: true,
+        group: Group::Attempt,
         params: || {
             vec![
                 ("remote", s("Git remote. Defaults to \"origin\"."), false),
@@ -971,6 +1154,79 @@ mod tests {
 
     fn argv(tool: &str, args: Value) -> Result<Vec<String>, BadArgs> {
         find(tool).unwrap().build(&args)
+    }
+
+    #[test]
+    fn stack_tools_by_default_attempt_tools_behind_a_flag() {
+        let names = |p: Profile| p.tools().map(|t| t.name).collect::<Vec<_>>();
+        let person = names(Profile::default());
+        assert_eq!(
+            person,
+            [
+                "stack_log",
+                "stack_create",
+                "stack_modify",
+                "stack_submit",
+                "stack_sync",
+                "stack_restack",
+                "review_comments",
+                "reply_comment",
+                "resolve_comment"
+            ]
+        );
+        // A control-center agent: its own tools, review, and only reads the stack.
+        let agent = names(Profile {
+            agent: true,
+            attempts: false,
+        });
+        assert_eq!(
+            agent,
+            [
+                "stack_log",
+                "ask_human",
+                "commit_review",
+                "approve",
+                "review_comments",
+                "reply_comment",
+                "resolve_comment"
+            ]
+        );
+        let all = names(Profile {
+            agent: false,
+            attempts: true,
+        });
+        assert!(all.contains(&"fork") && all.contains(&"stack_create"));
+        assert!(!all.contains(&"ask_human"));
+        assert_eq!(all.len(), TOOLS.len() - 3);
+    }
+
+    #[test]
+    fn stack_argv() {
+        assert_eq!(
+            argv("stack_create", json!({ "message": "Add x", "name": "-x" })).unwrap(),
+            ["stack", "create", "--all", "--message=Add x", "--", "-x"]
+        );
+        assert_eq!(
+            argv(
+                "stack_create",
+                json!({ "message": "m", "staged_only": true, "insert": true })
+            )
+            .unwrap(),
+            ["stack", "create", "--message=m", "--insert"]
+        );
+        assert_eq!(
+            argv("stack_modify", json!({ "new_commit": true })).unwrap(),
+            ["stack", "modify", "--all", "--commit"]
+        );
+        assert_eq!(
+            argv("stack_submit", json!({ "branch": "b", "draft": true })).unwrap(),
+            ["stack", "submit", "--branch=b", "--draft"]
+        );
+        assert_eq!(argv("stack_sync", json!({})).unwrap(), ["stack", "sync"]);
+        assert!(
+            argv("stack_create", json!({})).is_err(),
+            "message is required"
+        );
     }
 
     #[test]

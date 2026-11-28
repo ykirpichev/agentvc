@@ -1,5 +1,5 @@
 //! Cursor integration: `agentvc integrate cursor` writes the MCP server
-//! config, a project rule describing the attempt workflow, and Cursor hooks
+//! config, a project rule describing the stack workflow, and Cursor hooks
 //! that snapshot the attempt the agent edits. `--remove` reverts all three.
 //!
 //! Cursor's hooks send their own JSON on stdin; [`hook_input`] reshapes it
@@ -27,37 +27,30 @@ pub const EVENTS: &[(&str, &str)] = &[
 const RULE_MARKER: &str = "<!-- written by agentvc integrate cursor -->";
 
 const RULE: &str = r#"---
-description: agentvc attempt workflow. Applies whenever this repository has an .agentvc directory.
+description: agentvc stack workflow. Applies whenever this repository uses agentvc.
 alwaysApply: true
 ---
 <!-- written by agentvc integrate cursor -->
-# Working in an agentvc space
+# Working on an agentvc stack
 
-This repository uses agentvc. Every try at a task is an **attempt** with its
-own copy-on-write directory (its **view**). Your edits are snapshotted after
-each file edit and at the end of each turn, so history is kept for you. Ids:
-tasks `t1`, attempts `a3`, snapshots `s7`.
+This repository uses agentvc. Each checkout has its own **stack**: branches on
+top of each other, one pull request per branch, each based on the one below.
+Do version control through the `agentvc` MCP tools (or the `agentvc stack` CLI
+with `--json`), not raw git: branches made with `git checkout -b` and commits
+made with `git commit` don't join the stack.
 
-Use the `agentvc` MCP tools (or the `agentvc` CLI with `--json`):
+- `stack_log` shows the stack and which branch is checked out.
+- `stack_create` (with a commit message) commits your changes as a new branch
+  on top of the current one. One branch per change; asked for several PRs,
+  make one branch each, in merge order.
+- `stack_modify` puts fixes into the current branch and restacks the ones
+  above. `stack_restack` after a branch below moved; `stack_sync` after PRs
+  merged. On a conflict nothing changes and the error lists the paths.
+- `stack_submit` pushes and opens or updates the PRs. Only when asked.
+- `review_comments` lists open review threads with file and line: fix each,
+  `reply_comment` with what you did, then `resolve_comment`.
 
-- `log` shows the attempt tree; `show` one attempt and its `view_path`.
-- `fork` (with `task`, `from`, `prompt`) starts a new attempt in its own view.
-  Fork before a risky refactor, an alternative design, or a speculative fix.
-  To try two approaches, fork twice from the same parent.
-- `snapshot` with meta at milestones, e.g. `{"tests": "pass"}`.
-- `mark` an attempt `passed` or `failed` when you know how it went.
-- Leave `promote`, `abandon` and `pr` to the human unless asked.
-
-Rules:
-
-- Work only inside your attempt's view (`.agentvc/views/aN`), using absolute
-  paths in it. The main checkout is the root attempt `a1`.
-- Background or parallel agents: each one forks its own attempt first
-  (`fork` with `prompt` set to its goal) and works only in that view, so
-  parallel agents never edit the same files.
-- Never edit `.agentvc/` or another attempt's view.
-- Report progress with links to the review UI (`agentvcd`, default
-  http://localhost:7420): `/attempts/N`, `/tasks/N`, `/compare?a=3,5`.
+Review UI: `agentvcd`, default http://localhost:7420.
 "#;
 
 /// What happened to one file.

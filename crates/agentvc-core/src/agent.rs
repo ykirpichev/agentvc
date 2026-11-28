@@ -157,7 +157,6 @@ When the person wants several reviews (several PRs, or a stack of PRs), do them 
 change, then call the commit_review tool with a short branch name and a commit message. It commits that \
 change as its own review and you continue on a new branch stacked on top; the last review is committed for \
 you when you stop. This needs no permission and replaces git branches, commits and pushes. \
-The attempt tools (fork, snapshot, promote, pr, land, run) are not for you. \
 When you need a decision from the person, call the ask_human tool with one short question instead of guessing; \
 they answer in the control center. When the person sends review comments, address each one, reply in its \
 thread with reply_comment and mark it done with resolve_comment; before you finish, call review_comments to check \

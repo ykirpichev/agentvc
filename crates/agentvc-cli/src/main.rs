@@ -927,6 +927,11 @@ enum Cmd {
         /// Directory to run commands in. Defaults to -C or the current directory.
         #[arg(long, value_name = "DIR")]
         space: Option<PathBuf>,
+        /// Also offer the attempt-tree tools (task_new, fork, snapshot,
+        /// promote, pr, ...). By default the server offers the stack and
+        /// review tools.
+        #[arg(long)]
+        attempts: bool,
     },
     /// Hook handler called by Claude Code; reads the hook JSON on stdin.
     /// Always exits 0 so a hook can never break an agent session.
@@ -951,7 +956,7 @@ enum Cmd {
     /// Set up Cursor for this space: MCP server, hooks and a rule.
     ///
     /// For Cursor: the MCP server (.cursor/mcp.json), hooks that snapshot the
-    /// agent's edits (.cursor/hooks.json) and a rule describing the attempt
+    /// agent's edits (.cursor/hooks.json) and a rule describing the stack
     /// workflow (.cursor/rules/agentvc.mdc).
     #[command(display_order = 11)]
     Integrate {
@@ -1050,8 +1055,8 @@ fn main() -> ExitCode {
 
 fn real_main() -> ExitCode {
     let cli = Cli::parse();
-    if let Cmd::Mcp { space } = &cli.cmd {
-        return mcp(space.as_ref().or(cli.dir.as_ref()));
+    if let Cmd::Mcp { space, attempts } = &cli.cmd {
+        return mcp(space.as_ref().or(cli.dir.as_ref()), *attempts);
     }
     let as_json = cli.json;
     match run(cli) {
@@ -1127,14 +1132,18 @@ fn diff_out(from: String, to: String, changes: &[agentvc_core::snapshot::FileCha
 
 /// `agentvc mcp`: serve until stdin closes. A missing space is not an error
 /// here; tools report `no_space` when called.
-fn mcp(dir: Option<&PathBuf>) -> ExitCode {
+fn mcp(dir: Option<&PathBuf>, attempts: bool) -> ExitCode {
     let started = (|| -> std::io::Result<()> {
         let cwd = std::env::current_dir()?;
         let dir = match dir {
             Some(d) => cwd.join(d),
             None => cwd,
         };
-        agentvc_mcp::Server::new(std::env::current_exe()?, dir).serve_stdio()
+        // Inside an agent started from the control center, its own tools.
+        let agent = std::env::var_os(agentvc_core::agent::ENV_DIR).is_some();
+        agentvc_mcp::Server::new(std::env::current_exe()?, dir)
+            .with_profile(agentvc_mcp::tools::Profile { agent, attempts })
+            .serve_stdio()
     })();
     match started {
         Ok(()) => ExitCode::SUCCESS,
