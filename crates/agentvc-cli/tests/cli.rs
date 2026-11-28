@@ -3467,3 +3467,151 @@ fn pr_continues_thread_branch_after_squash_merge() {
     assert_eq!(git(&w, &["rev-parse", "claude/x"]), foreign);
     assert_eq!(git(&remote, &["rev-parse", "claude/x"]), commit);
 }
+
+/// The restack bot (or another checkout) may push to the thread branch
+/// after this checkout's last `pr`, and GitHub then squash-merges that
+/// head. The next `pr` fetches the branch, continues the remote head rather
+/// than the stale local one, and pushes a fast-forward without --force,
+/// even when a local export never reached the remote (#230).
+#[test]
+fn pr_continues_the_remote_head_after_a_bot_restack() {
+    let tmp = tempdir();
+    let w = tmp.path().join("work");
+    let remote = tmp.path().join("remotes/acme/widget.git");
+    fs::create_dir_all(&w).unwrap();
+    fs::create_dir_all(&remote).unwrap();
+    git(&remote, &["init", "-q", "--bare", "-b", "main"]);
+    git(&w, &["init", "-q", "-b", "main"]);
+    fs::write(w.join("lib.rs"), "1\n").unwrap();
+    fs::write(w.join("other.rs"), "a\n").unwrap();
+    git(&w, &["add", "-A"]);
+    git(&w, &["commit", "-q", "-m", "base"]);
+    git(&w, &["remote", "add", "origin", remote.to_str().unwrap()]);
+    git(&w, &["push", "-q", "origin", "main"]);
+    git(&w, &["checkout", "-q", "-b", "claude/x"]);
+    git(&w, &["push", "-q", "origin", "claude/x"]);
+
+    agentvc(&w, &["init"]);
+    agentvc(&w, &["config", "pr.branch", "claude/x"]);
+    let (api, prs, _log) = fake_github_prs();
+    let run = |args: &[&str]| -> Value {
+        let out = Command::cargo_bin("agentvc")
+            .unwrap()
+            .arg("--json")
+            .arg("-C")
+            .arg(&w)
+            .args(args)
+            .env("GITHUB_TOKEN", "test-token")
+            .env("AGENTVC_GITHUB_API", &api)
+            .env_remove("HTTP_PROXY")
+            .env_remove("HTTPS_PROXY")
+            .env_remove("ALL_PROXY")
+            .env_remove("http_proxy")
+            .env_remove("https_proxy")
+            .env_remove("all_proxy")
+            .output()
+            .unwrap();
+        serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
+            panic!(
+                "bad json: {e}\n{}\n{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            )
+        })
+    };
+    let attempt = |task: &str, file: &str, text: &str| -> String {
+        agentvc(&w, &["task", "new", task]);
+        let t = format!(
+            "t{}",
+            agentvc(&w, &["task", "list"])["tasks"]
+                .as_array()
+                .unwrap()
+                .len()
+        );
+        let v = agentvc(&w, &["fork", "--task", &t, "--from", "a1"]);
+        let id = format!("a{}", v["fork"]["attempt"]["id"]);
+        let view = v["fork"]["attempt"]["view_path"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let v = agentvc(&w, &["rebase", &id]);
+        assert_eq!(v["ok"], true, "{v}");
+        fs::write(Path::new(&view).join(file), text).unwrap();
+        let v = agentvc(&w, &["promote", &id]);
+        assert_eq!(v["ok"], true, "{v}");
+        id
+    };
+
+    let a = attempt("first change", "lib.rs", "2\n");
+    let v = run(&["pr", &a, "--no-sync"]);
+    assert_eq!(v["ok"], true, "{v}");
+    let old_head = git(&remote, &["rev-parse", "claude/x"]);
+
+    // Main moves; the bot restacks the open PR onto it and pushes; then
+    // GitHub squash-merges the restacked head. This checkout's branch still
+    // points at its own old export.
+    let gh = tmp.path().join("gh");
+    git(
+        tmp.path(),
+        &[
+            "clone",
+            "-q",
+            remote.to_str().unwrap(),
+            gh.to_str().unwrap(),
+        ],
+    );
+    git(&gh, &["config", "user.name", "bot"]);
+    git(&gh, &["config", "user.email", "bot@example.com"]);
+    fs::write(gh.join("other.rs"), "b\n").unwrap();
+    git(&gh, &["commit", "-q", "-am", "someone else's change"]);
+    git(&gh, &["push", "-q", "origin", "main"]);
+    git(
+        &gh,
+        &["checkout", "-q", "-B", "claude/x", "origin/claude/x"],
+    );
+    git(&gh, &["rebase", "-q", "main"]);
+    git(&gh, &["push", "-q", "--force", "origin", "claude/x"]);
+    let bot_head = git(&gh, &["rev-parse", "HEAD"]);
+    assert_ne!(bot_head, old_head);
+    git(&gh, &["checkout", "-q", "main"]);
+    git(&gh, &["merge", "-q", "--squash", "claude/x"]);
+    git(&gh, &["commit", "-q", "-m", "first change (#1)"]);
+    let squash = git(&gh, &["rev-parse", "HEAD"]);
+    git(&gh, &["push", "-q", "origin", "main"]);
+    {
+        let mut prs = prs.lock().unwrap();
+        prs[0]["state"] = "closed".into();
+        prs[0]["merged"] = true.into();
+        prs[0]["merged_at"] = "2026-11-28T00:00:00Z".into();
+        prs[0]["merge_commit_sha"] = squash.clone().into();
+        prs[0]["head"]["sha"] = bot_head.clone().into();
+    }
+    assert_eq!(git(&w, &["rev-parse", "claude/x"]), old_head);
+
+    // The next attempt is exported here first, as when a push failed: the
+    // local branch moves, the remote does not, and no PR is recorded.
+    let b = attempt("second change", "new.rs", "new\n");
+    let v = agentvc(&w, &["export", &b, "--branch", "claude/x"]);
+    assert_eq!(v["ok"], true, "{v}");
+    assert_eq!(git(&remote, &["rev-parse", "claude/x"]), bot_head);
+
+    let v = run(&["pr", &b, "--no-sync"]);
+    assert_eq!(v["ok"], true, "{v}");
+    let exp = &v["pr"]["export"];
+    assert_eq!(exp["continued_from"]["head"], bot_head.as_str(), "{v}");
+    assert_eq!(exp["continued_from"]["pr"], 1, "{v}");
+    assert_eq!(exp["continued_from"]["via"], "merged_pr", "{v}");
+    assert_eq!(v["pr"]["number"], 2, "{v}");
+    let commit = exp["commit"].as_str().unwrap().to_string();
+    // A fast-forward of what the remote had: nothing on it was dropped.
+    assert_eq!(git(&remote, &["rev-parse", "claude/x"]), commit);
+    git(
+        &remote,
+        &["merge-base", "--is-ancestor", &bot_head, &commit],
+    );
+    assert_eq!(
+        git(&w, &["rev-parse", &format!("{commit}^1")]),
+        git(&remote, &["rev-parse", "main"])
+    );
+    assert_eq!(git(&w, &["rev-parse", &format!("{commit}^2")]), bot_head);
+}

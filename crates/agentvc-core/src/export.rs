@@ -52,6 +52,11 @@ pub struct ExportOptions {
     /// A merged PR from this branch, as GitHub reports it (`agentvc pr`
     /// passes the one it last opened from the branch). See [`Continued`].
     pub merged_pr: Option<MergedPr>,
+    /// The branch's head on the remote, fetched just before (`agentvc pr`
+    /// passes it). When it differs from the local branch (a bot restacked
+    /// the PR, another checkout pushed), the export continues the remote
+    /// head instead of the local one, so the push fast-forwards (#230).
+    pub remote_head: Option<String>,
 }
 
 /// A pull request that GitHub reports as merged.
@@ -512,7 +517,14 @@ pub fn export(space: &Space, attempt_id: i64, opts: &ExportOptions) -> Result<Ex
         None => parent.clone(),
     };
     let mut not_landed = None;
-    let continued = match (&existing, &first) {
+    // The head the push has to build on: the remote's when it is known,
+    // else the local branch's.
+    let continue_from = opts
+        .remote_head
+        .clone()
+        .filter(|r| repo.rev(r).is_some())
+        .or_else(|| existing.clone());
+    let continued = match (&continue_from, &first) {
         (Some(old), Some(first)) if !repo.is_ancestor(old, first) => {
             match landed(&repo, old, first, opts.merged_pr.as_ref()) {
                 Ok(c) => Some(c),
@@ -605,7 +617,15 @@ pub fn export(space: &Space, attempt_id: i64, opts: &ExportOptions) -> Result<Ex
     // An existing branch moves without --force only when the new commit
     // builds on it, as `git push` would allow.
     if let Some(old) = &existing {
-        if !opts.force && !repo.is_ancestor(old, &commit) {
+        // The local branch may only lag behind the remote one: then it
+        // moves when its own changes have landed in the base too.
+        let lagging = || {
+            opts.remote_head.as_deref().is_some_and(|r| r != old)
+                && first
+                    .as_deref()
+                    .is_some_and(|f| landed(&repo, old, f, None).is_ok())
+        };
+        if !opts.force && !repo.is_ancestor(old, &commit) && !lagging() {
             return Err(match not_landed {
                 Some(reason) => Error::BranchNotLanded {
                     branch: opts.branch.clone(),

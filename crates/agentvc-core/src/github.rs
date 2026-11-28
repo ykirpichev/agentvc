@@ -937,6 +937,9 @@ pub fn open_pr(space: &Space, attempt_id: i64, opts: &PrOptions) -> Result<PrRes
         Some(b) => b,
         None => format!("agentvc/a{attempt_id}"),
     };
+    // Where the branch is on the remote now: a bot may have restacked the
+    // PR, or another checkout pushed, since this checkout last did (#230).
+    let remote_head = fetch_remote_head(&host, &remote, &branch);
     // Re-running `pr` for the same attempt, or for one continued from it
     // (`fork --from aN`, review fixes), refreshes its branch.
     let previous = space.last_export_to(&branch)?;
@@ -979,15 +982,29 @@ pub fn open_pr(space: &Space, attempt_id: i64, opts: &PrOptions) -> Result<PrRes
                 api.call("GET", &format!("/repos/{repo}/pulls/{n}"), None)
                     .ok()
             })
-            .filter(|v| v["merged"] == true || v["merged_at"].is_string())
-            .and_then(|v| {
-                Some(MergedPr {
-                    number: v["number"].as_u64()?,
-                    head: v["head"]["sha"].as_str()?.to_string(),
-                    merge_commit: v["merge_commit_sha"].as_str().map(str::to_string),
-                })
-            }),
+            .filter(is_merged)
+            .and_then(|v| merged_pr_of(&v)),
         _ => None,
+    };
+    // Not one agentvc recorded (the last export here never got a PR, say
+    // because its push failed): the merged PR whose head the remote branch
+    // still points at.
+    let merged_pr = match (&existing, merged_pr, &remote_head) {
+        (None, None, Some(Some(head))) => api
+            .call(
+                "GET",
+                &format!("/repos/{repo}/pulls?state=closed&head={owner}:{branch}"),
+                None,
+            )
+            .ok()
+            .and_then(|list| {
+                list.as_array()?
+                    .iter()
+                    .filter(|v| is_merged(v))
+                    .find(|v| v["head"]["sha"] == head.as_str())
+                    .and_then(merged_pr_of)
+            }),
+        (_, m, _) => m,
     };
     let (title, title_source) = pr_title(
         space,
@@ -1012,18 +1029,33 @@ pub fn open_pr(space: &Space, attempt_id: i64, opts: &PrOptions) -> Result<PrRes
             squash: opts.squash,
             stack: opts.stack,
             merged_pr,
+            remote_head: remote_head.clone().flatten(),
         },
     )?;
 
-    let refspec = format!("+refs/heads/{branch}:refs/heads/{branch}");
+    let refspec = format!("refs/heads/{branch}:refs/heads/{branch}");
     // A continued branch fast-forwards, so it is pushed without force: if
     // the remote branch moved meanwhile, the push is refused, not clobbered.
-    let push_spec = if exp.replaced.is_some() && exp.continued_from.is_none() {
-        refspec.as_str()
+    // A branch that moves otherwise is forced only over the remote head
+    // fetched above (a lease), so a push made since is never overwritten.
+    let lease;
+    let mut push = vec!["push", "--quiet"];
+    let forced = format!("+{refspec}");
+    if exp.replaced.is_some() && exp.continued_from.is_none() {
+        match &remote_head {
+            Some(head) => {
+                lease = format!(
+                    "--force-with-lease=refs/heads/{branch}:{}",
+                    head.as_deref().unwrap_or_default()
+                );
+                push.extend([lease.as_str(), remote.as_str(), refspec.as_str()]);
+            }
+            None => push.extend([remote.as_str(), forced.as_str()]),
+        }
     } else {
-        &refspec[1..]
-    };
-    host.git(&["push", "--quiet", &remote, push_spec], None)
+        push.extend([remote.as_str(), refspec.as_str()]);
+    }
+    host.git(&push, None)
         .map_err(|e| push_error(e, &remote, &branch))?;
     for b in exp.story.iter().filter_map(|c| c.branch.as_ref()) {
         host.git(
@@ -1185,6 +1217,47 @@ fn config_file(space: &Space, key: &str) -> Result<Option<String>> {
         }
         None => Ok(None),
     }
+}
+
+/// Whether a GitHub pull request object says it merged.
+fn is_merged(v: &Value) -> bool {
+    v["merged"] == true || v["merged_at"].is_string()
+}
+
+fn merged_pr_of(v: &Value) -> Option<MergedPr> {
+    Some(MergedPr {
+        number: v["number"].as_u64()?,
+        head: v["head"]["sha"].as_str()?.to_string(),
+        merge_commit: v["merge_commit_sha"].as_str().map(str::to_string),
+    })
+}
+
+/// The head of `branch` on `remote`, fetched into
+/// `refs/remotes/<remote>/<branch>` so its commits are here (#230).
+/// `Some(None)`: the remote has no such branch. `None`: the remote could
+/// not be asked, so nothing is known.
+fn fetch_remote_head(host: &HostRepo, remote: &str, branch: &str) -> Option<Option<String>> {
+    let name = format!("refs/heads/{branch}");
+    let out = host
+        .git(&["ls-remote", "--heads", remote, &name], None)
+        .ok()?;
+    let Some(head) = out.lines().find_map(|l| {
+        let (sha, r) = l.split_once('\t')?;
+        (r.trim() == name).then(|| sha.trim().to_string())
+    }) else {
+        return Some(None);
+    };
+    host.git(
+        &[
+            "fetch",
+            "--quiet",
+            remote,
+            &format!("+{name}:refs/remotes/{remote}/{branch}"),
+        ],
+        None,
+    )
+    .ok()?;
+    Some(Some(head))
 }
 
 /// A refused push says so: git proxies answer 403 for branches the
