@@ -43,9 +43,13 @@ join the stack.
 
 ## Review comments
 
-- `review_comments` lists the open threads on what you work on, with file and
-  line. Fix each one, `reply_comment` to say what you changed, and
-  `resolve_comment` it.
+- Before you end a turn or say you are done, call `review_comments`: it lists
+  the open threads on what you work on, with file and line. Fix each one,
+  `reply_comment` to say what you changed, and `resolve_comment` it (that marks
+  it addressed; only a person closes it).
+- If a comment is unclear, `reply_comment` with your question instead of
+  guessing. Threads marked outdated were written on lines that have since
+  changed: check they still apply before acting on them.
 
 ## Attempts
 

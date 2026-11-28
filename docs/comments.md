@@ -25,6 +25,16 @@ Threads show under their line with their replies, **Reply** and **Resolve**. The
 it, or press `n` / `p`. A comment on the whole change (not on a line) goes through
 **+ Comment** there. Sidebar rows show how many open comments a branch has.
 
+To read code around a comment, **View file** on a diff opens the file in your editor
+(VS Code or Cursor) at that line; **Browse code** on a branch or agent page opens the
+light Code tab ([ui/README.md](../ui/README.md#code-tab-171-172)) when you are not in
+an editor.
+
+To try it, `integrations/vscode/scripts/demo-workspaces.sh DIR BINDIR` then
+`demo-agents.sh DIR BINDIR`: branch `csv-docs` (workspace *export*) has an open, an
+addressed (answered by its agent), an outdated and a draft thread, and agent `ag1` a
+comment on its whole change.
+
 ## Where a thread sits
 
 A thread keeps the path, the side, the lines it was written on and three lines of

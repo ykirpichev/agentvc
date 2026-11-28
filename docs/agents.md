@@ -70,7 +70,8 @@ losing track of them.
 
 To try it without Claude Code, `integrations/vscode/scripts/demo-workspaces.sh
 DIR BINDIR` then `demo-agents.sh DIR BINDIR` start 11 script agents in every
-state across three workspaces.
+state across three workspaces, plus review comments in every state
+([comments.md](comments.md)).
 
 ## States
 
