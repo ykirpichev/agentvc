@@ -794,3 +794,87 @@
 .sp-trunk:hover .sp-start {
   text-decoration: underline;
 }
+
+/* ---- quiet workspaces folded into one line; tools' agent worktrees ---- */
+.sp-nested {
+  margin-left: 14px;
+  border-left: 1px solid var(--border);
+}
+.sp-idle {
+  padding: 2px 6px 2px 4px;
+}
+.sp-idle-head {
+  width: 100%;
+}
+.sp-idle-label {
+  color: var(--muted);
+  font-weight: 600;
+}
+.sp-idle-list {
+  list-style: none;
+  margin: 2px 0 4px;
+  padding: 0 0 0 16px;
+}
+.sp-idle-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+  padding: 2px 4px;
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  color: var(--text);
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.sp-idle-row:hover {
+  background: var(--hover);
+}
+.sp-idle-kid {
+  padding-left: 18px;
+}
+.sp-idle-name {
+  flex: none;
+  max-width: 60%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sp-idle-folder {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--muted);
+}
+.wo-idle {
+  margin-top: 12px;
+}
+.wo-idle-head {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 4px 6px;
+  font: inherit;
+  font-weight: 600;
+  color: var(--text);
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.wo-idle-head:hover {
+  background: var(--hover);
+}
+.wo-idle-list {
+  margin: 4px 0 0;
+  padding-left: 28px;
+  font-size: 13px;
+  line-height: 1.7;
+}

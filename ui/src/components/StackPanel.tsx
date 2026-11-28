@@ -11,6 +11,7 @@ import { useLive } from '../api/live'
 import type { Agent, TaskSummary, WorkspaceInfo, WorkspaceList, WsBranch } from '../api/types'
 import { useResource } from '../api/useResource'
 import { thisWorkspace } from '../core/embed'
+import { arrangeWorkspaces, toolWords, type Placed } from '../core/arrange'
 import { canMoveBranch } from '../core/graph'
 import { branchLink, selectionFromPath, taskLink, useGo } from '../core/links'
 import { agentLink, agentState, agentsOn } from '../core/agents'
@@ -42,6 +43,8 @@ export function StackPanel({ tasks, agents }: { tasks: TaskSummary[] | undefined
   const go = useGo()
   const path = useLocation().pathname
   const needs = agents.filter((a) => a.urgency !== null).length
+  // Workspace ids in it are folded (open by default); idle-line ids in it
+  // are open (folded by default).
   const [folded, setFolded] = useState<Set<string>>(savedFolds)
   const sel = selectionFromPath(useLocation().pathname)
   const toggle = (id: string) =>
@@ -59,9 +62,37 @@ export function StackPanel({ tasks, agents }: { tasks: TaskSummary[] | undefined
 
   const list = ws.data && !ws.error ? ws.data.workspaces : []
   const here = ws.data && !ws.error ? thisWorkspace(ws.data) : undefined
-  // This editor window first, then windows with a stack, then the empty ones.
-  const live = (w: WorkspaceInfo) => w.branches.some((b) => !merged(b)) || w.pending !== null || w.state === 'agent_running'
-  const ordered = [...list].sort((a, b) => Number(b === here) - Number(a === here) || Number(live(b)) - Number(live(a)))
+  // This editor window first, then workspaces with work going on; the idle
+  // ones fold into one line, tools' agent worktrees sit under their folder.
+  const laid = arrangeWorkspaces(list, here, agents, sel?.kind === 'branch' ? sel.workspace : undefined)
+  const stack = (w: WorkspaceInfo, nested = false) => (
+    <WindowStack
+      key={w.id}
+      w={w}
+      mine={w === here}
+      nested={nested}
+      tries={tries}
+      agents={agents}
+      open={!folded.has(w.id) || (sel?.kind === 'branch' && sel.workspace === w.id)}
+      onToggle={() => toggle(w.id)}
+    />
+  )
+  const placed = (p: Placed) => [
+    stack(p.w),
+    ...p.tools.map((t) => stack(t, true)),
+    p.idleTools.length > 0 && (
+      <IdleFold
+        key={`${p.w.id}-tools`}
+        id={`${p.w.id}-tools`}
+        label={toolWords(p.idleTools, 'idle')}
+        title="Worktrees a coding tool made for its own agents. `agentvc workspace prune` removes the ones that hold no work."
+        items={p.idleTools}
+        nested
+        open={folded.has(`${p.w.id}-tools`)}
+        onToggle={() => toggle(`${p.w.id}-tools`)}
+      />
+    ),
+  ]
   // Agent tries of the task a branch was made from (the "N tries" chip).
   const tries = new Map((tasks ?? []).map((t) => [t.id, t.attempts.total - t.attempts.abandoned]))
 
@@ -79,36 +110,37 @@ export function StackPanel({ tasks, agents }: { tasks: TaskSummary[] | undefined
         <span>Needs you</span>
         <span className="sp-needs-n">{needs}</span>
       </button>
-      <SpaceHead data={ws.data} />
-      {ordered.length === 0 && (
+      <SpaceHead data={ws.data} count={laid.count} tools={laid.toolCount} />
+      {list.length === 0 && (
         <p className="sp-empty muted">
           No workspaces yet. Each git worktree or checkout folder (each editor window) is a workspace with its own stack: run <code>agentvc stack create</code> in one.
         </p>
       )}
-      {ordered.map((w) => (
-        <WindowStack
-          key={w.id}
-          w={w}
-          mine={w === here}
-          tries={tries}
-          agents={agents}
-          open={!folded.has(w.id) || (sel?.kind === 'branch' && sel.workspace === w.id)}
-          onToggle={() => toggle(w.id)}
+      {laid.shown.flatMap(placed)}
+      {laid.idle.length > 0 && (
+        <IdleFold
+          id="idle"
+          label={plural(laid.idle.length, 'idle workspace')}
+          meta={`no unmerged branches${laid.idle.some((p) => p.idleTools.length) ? ` · ${toolWords(laid.idle.flatMap((p) => p.idleTools))}` : ''}`}
+          title="Workspaces with no unmerged branches and no agent at work"
+          items={laid.idle.flatMap((p) => [p.w, ...p.idleTools])}
+          open={folded.has('idle')}
+          onToggle={() => toggle('idle')}
         />
-      ))}
+      )}
     </div>
   )
 }
 
 /** The space on top of the sidebar: its name, and how many workspaces in how many places. */
-function SpaceHead({ data }: { data: WorkspaceList }) {
+function SpaceHead({ data, count, tools }: { data: WorkspaceList; count: number; tools: number }) {
   const sp = data.space_info
-  const n = data.workspaces.length
   const machines = machinesOf(data).length
   const folders = checkoutsOf(data).length
   const spread = [
-    plural(n, 'workspace'),
+    plural(count, 'workspace'),
     folders > 1 ? `${folders} folders` : '',
+    tools > 0 ? plural(tools, 'agent worktree') : '',
     machines > 1 ? `${machines} machines` : `on ${data.machine ?? data.workspaces[0]?.machine ?? 'this machine'}`,
   ]
     .filter(Boolean)
@@ -119,6 +151,60 @@ function SpaceHead({ data }: { data: WorkspaceList }) {
       <div className="sp-space-name">{sp?.name ?? 'no space'}</div>
       <div className="sp-space-meta">{spread}</div>
     </div>
+  )
+}
+
+/**
+ * Several quiet workspaces as one line ("18 idle workspaces"); open, one
+ * short line each that opens its trunk, the place to start work there.
+ */
+function IdleFold({
+  id,
+  label,
+  meta,
+  title,
+  items,
+  nested = false,
+  open,
+  onToggle,
+}: {
+  id: string
+  label: string
+  meta?: string
+  title: string
+  items: WorkspaceInfo[]
+  nested?: boolean
+  open: boolean
+  onToggle: () => void
+}) {
+  const go = useGo()
+  return (
+    <section className={`sp-idle ${nested ? 'sp-nested' : ''}`} aria-label={label} data-fold={id}>
+      <button type="button" className="sp-ws sp-idle-head" onClick={onToggle} aria-expanded={open} title={title}>
+        <span className={`sp-caret ${open ? 'open' : ''}`} aria-hidden>
+          ▸
+        </span>
+        <span className="sp-idle-label">{label}</span>
+        {meta && <span className="sp-ws-meta">{meta}</span>}
+      </button>
+      {open && (
+        <ul className="sp-idle-list">
+          {items.map((w) => (
+            <li key={w.id}>
+              <button
+                type="button"
+                className={`sp-idle-row ${w.nested_in && items.some((o) => o.id === w.nested_in) ? 'sp-idle-kid' : ''}`}
+                onClick={() => go(branchLink(w.id, w.trunk))}
+                title={`${whereTitle(w)}\nOpen ${trunkName(w)} here to start work`}
+              >
+                <span className="sp-idle-name">{w.name}</span>
+                <span className="sp-idle-folder">{shortFolder(folderOf(w))}</span>
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
   )
 }
 
@@ -146,6 +232,7 @@ function AgentRow({ a, selected, onOpen }: { a: Agent; selected: boolean; onOpen
 function WindowStack({
   w,
   mine,
+  nested = false,
   tries,
   agents,
   open,
@@ -153,6 +240,8 @@ function WindowStack({
 }: {
   w: WorkspaceInfo
   mine: boolean
+  /** A tool's agent worktree, shown under the workspace it came from. */
+  nested?: boolean
   agents: Agent[]
   /** Open tries per task, for the "N tries" chip on a branch made from one. */
   tries: Map<number, number>
@@ -219,7 +308,7 @@ function WindowStack({
   })
 
   return (
-    <section className={`sp-win ${busy ? 'busy' : ''}`} aria-label={`${w.name} stack`}>
+    <section className={`sp-win ${busy ? 'busy' : ''} ${nested ? 'sp-nested' : ''}`} aria-label={`${w.name} stack`}>
       <header className="sp-head">
         <button type="button" className="sp-ws" onClick={onToggle} aria-expanded={open} title={whereTitle(w)}>
           <span className={`sp-caret ${open ? 'open' : ''}`} aria-hidden>
@@ -227,6 +316,7 @@ function WindowStack({
           </span>
           <span className="sp-ws-name">{w.name}</span>
           {mine && <span className="sp-here">this window</span>}
+          {w.tool && <span className="sp-chip sp-chip-mute">{w.tool} worktree</span>}
           <span className="sp-ws-where" title={whereTitle(w)}>
             <span className="sp-ws-machine">{w.machine} · </span>
             <span className="sp-ws-folder">{shortFolder(folderOf(w))}</span>

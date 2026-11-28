@@ -76,6 +76,19 @@ pub enum WorkspaceCmd {
     Cancel { request: String },
     /// Apply the edits queued for this workspace now.
     Drain,
+    /// Remove leftover worktrees that coding tools made for their own agents
+    /// (`.claude/worktrees/...`, Cursor, Codex) in this space on this
+    /// machine. Only ones that lose nothing go: no uncommitted changes, no
+    /// unmerged branches, no agent at work, no commits only they have; their
+    /// branches stay. Without --yes it only lists what it would remove.
+    Prune {
+        /// Remove them (otherwise just list them).
+        #[arg(long)]
+        yes: bool,
+        /// Every linked worktree, not just tools' ones (never clone folders).
+        #[arg(long)]
+        all: bool,
+    },
     /// Push this workspace's record and stack as refs/agentvc/workspaces/<id>
     /// so other machines list it (`ls --remote`).
     Publish,
@@ -179,10 +192,11 @@ fn ws_text(w: &WorkspaceInfo) -> String {
         if w.here { "* " } else { "  " },
         w.name,
         w.id,
-        match w.kind {
-            Kind::Main => "main worktree",
-            Kind::Worktree => "worktree",
-            Kind::Remote => "published",
+        match (&w.tool, w.kind) {
+            (Some(t), _) => format!("{t} worktree"),
+            (None, Kind::Main) => "main worktree".into(),
+            (None, Kind::Worktree) => "worktree".into(),
+            (None, Kind::Remote) => "published".into(),
         },
         match w.state {
             Activity::AgentRunning => format!(
@@ -478,6 +492,32 @@ pub fn run(cwd: &Path, cmd: WorkspaceCmd) -> anyhow::Result<(Value, String)> {
             let done = workspace::drain(cwd)?;
             let text = format!("applied {} queued edits", done.len());
             (json!({ "applied": done }), text)
+        }
+        WorkspaceCmd::Prune { yes, all } => {
+            let r = workspace::prune(cwd, all, yes)?;
+            let mut text = String::new();
+            let verb = if r.applied { "removed" } else { "would remove" };
+            for i in &r.remove {
+                text += &format!("{verb} {} ({})\n", i.name, i.folder);
+            }
+            for i in &r.keep {
+                text += &format!(
+                    "kept {} ({}): {}\n",
+                    i.name,
+                    i.folder,
+                    i.reason.as_deref().unwrap_or_default()
+                );
+            }
+            text += &match (r.remove.len(), r.applied) {
+                (0, _) => "nothing to remove".to_string(),
+                (n, true) => format!("removed {n} worktree{}", if n == 1 { "" } else { "s" }),
+                (n, false) => format!(
+                    "{n} worktree{} can go; run `agentvc workspace prune --yes` to remove {}",
+                    if n == 1 { "" } else { "s" },
+                    if n == 1 { "it" } else { "them" }
+                ),
+            };
+            (json!(r), text)
         }
         WorkspaceCmd::Publish => {
             let p = workspace::publish(cwd)?;
