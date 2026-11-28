@@ -45,18 +45,22 @@ Git, GitHub and today's build tools assume one human telling one linear story. A
 
 ## Prior art
 
-Parallel agents on one host are now covered by GitButler, jj workspaces and Lit; nobody combines an attempt tree, copy-on-write views that share builds, and a review UI built for choosing between attempts. GitButler is the closest on agent workflow, jj the closest on data model.
+Parallel agents on one host are now covered by GitButler, jj workspaces, Lit, container-use and AgentFS; nobody combines an independent stack per workspace in a shared space, cheap isolated views that share builds, and a review loop (diff, comments to the agent, land) built for agent work. GitButler is the closest on agent workflow, jj the closest on data model.
+
+What agentvc ships today, as the baseline for the gaps below: one stack per workspace with branch ownership across checkouts of one repo ([spaces.md](spaces.md)); an operation log with undo; conflicts stored as data, deterministic auto-resolve, and a resolve agent by default; overlap warnings between open work; combining work across attempts (`take`); story mode with change IDs and absorb; agents started from the review UI in their own worktree; line comments on diffs that reach the agent and sync with GitHub PR reviews.
 
 | System | What to borrow | Gap for agents |
 | --- | --- | --- |
 | [GitButler](https://blog.gitbutler.com/gitbutler-0-16) | One branch per agent session in a shared working tree ([Claude Code hooks](https://docs.gitbutler.com/features/ai-integration/claude-code-hooks)), Agents tab, MCP server, `but` CLI, [oplog with undo](https://docs.gitbutler.com/commands/but-oplog) | One repo per project. Agents share one working tree with no isolated views, so their changes must not overlap. Agent metadata is limited to sessions and commit messages. No attempt tree. |
 | [jj (Jujutsu)](https://github.com/jj-vcs/jj) | Working copy as a commit, stable change IDs, operation log with undo, conflicts stored as data, git as a backend, [workspaces](https://man.archlinux.org/man/jj-workspace.1.en) | Single repo, no attempt or agent model. Workspaces give parallel working copies, but each is a full checkout with its own install and build. |
-| [Lit](https://docs.rs/litvc/latest/lit/) | Git-compatible reimplementation in Rust for agents: JSON output, typed errors, about 30 MCP tools, conflicts as objects, file leasing, agent identity ([announcement](https://nervosys.ai/blog/introducing-lit-dewey-louie)) | No attempt tree, no copy-on-write views, no review UI. Overlaps our leases idea. |
+| [Lit](https://docs.rs/litvc/latest/lit/) | Git-compatible reimplementation in Rust for agents: JSON output, typed errors, about 30 MCP tools, conflicts as objects, file leasing, agent identity ([announcement](https://nervosys.ai/blog/introducing-lit-dewey-louie)) | No stack per workspace, no copy-on-write views, no review UI. Its file leasing is the idea we tried and cut. |
 | Graphite | Stacked PR review on GitHub, fast review inbox | Bound to git's model and one line of work per PR; no way to compare competing attempts. Acquired by Cursor in Dec 2025 ([TechCrunch](https://techcrunch.com/2025/12/19/cursor-continues-acquisition-spree-with-graphite-deal)). |
+| [container-use](https://github.com/dagger/container-use) (Dagger, experimental, Apache-2.0) | MCP server that gives each agent its own container on its own git branch (git worktrees); environments are reproducible | Review is `git checkout <branch>`: no compare, comments or land flow. No shared build cache documented, so each environment rebuilds. No stack per workspace. |
+| [AgentFS](https://github.com/tursodatabase/agentfs) (Turso, beta, MIT) | Copy-on-write [overlay over a host directory](https://docs.turso.tech/agentfs/guides/overlay) stored in SQLite (FUSE on Linux, NFS on macOS); every file operation recorded and queryable (`agentfs timeline`); snapshot by copying the db | A filesystem, not version control: no git integration, no branches or stacks, no review. Closest neighbour to our views and per-tool-call snapshots. |
 | [Sapling](https://github.com/facebook/sapling) (Meta) | Stacked commits, smartlog view, undo; EdenFS as prior art for virtual views | Human workflow, no agent metadata. Monorepo scale only with Meta's server and virtual filesystem. |
 | Pijul | Patch theory where independent changes commute | Small ecosystem; git import only, no export. |
 
-Capabilities checked Nov 25, 2026; the GitButler, jj and Lit rows were corrected from v1.
+Capabilities checked Nov 25, 2026; the GitButler, jj and Lit rows were corrected from v1. container-use and AgentFS added and the baseline refreshed to what is shipped on Nov 28, 2026 (#114).
 
 ## Core data model
 
