@@ -28,6 +28,10 @@ futures-util = "0.3"
 getrandom = "0.3"
 tower = { version = "0.5", features = ["util"] }
 
+[target.'cfg(unix)'.dependencies]
+# `agentvcd stop` and `status`: signal and probe the daemon by pid.
+libc = "0.2.191"
+
 [dev-dependencies]
 rusqlite = "0.40.2"
 http-body-util = "0.1"

@@ -26,11 +26,31 @@ Then, in each repository:
 
 ```sh
 cd ~/src/my-repo
-agentvcd                    # review UI on http://localhost:7420 (leave it running)
+agentvcd start              # review UI on http://localhost:7420, in the background
 agentvc stack create my-fix -am "Fix it"   # or start work from the UI
 ```
 
 Check it with `agentvc --version`.
+
+### Running the daemon
+
+`agentvcd start` runs the daemon for the repository you are in in the
+background and returns once it listens (or says why it could not, e.g.
+`port_in_use`: pass `--port N`, or `--port 0` for any free port). It takes the
+same options as plain `agentvcd`, which runs in the foreground until Ctrl+C.
+
+```sh
+agentvcd status             # running? pid, URL and log file
+agentvcd stop               # SIGTERM, then SIGKILL after --timeout-secs (default 10)
+```
+
+Each takes `--json` and `-C DIR`; errors carry stable codes (`already_running`,
+`not_running`, `port_in_use`, `start_failed`, `stop_failed`). The pidfile and
+log live outside the repository, in `$AGENTVC_HOME/daemons/<folder>-<id>/`
+(`agentvcd.pid`, `agentvcd.log`), one per checkout, so each clone of a repo
+can run its own daemon on its own port. A pidfile left behind by a daemon that
+died is ignored and removed. On Windows `stop` ends the process with
+`taskkill /F`.
 
 ### Who can use the daemon
 

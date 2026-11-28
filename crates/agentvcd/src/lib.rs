@@ -28,6 +28,7 @@ pub mod cloud;
 mod code;
 mod comments;
 mod conflicts;
+pub mod daemon;
 mod events;
 mod graph;
 mod history;

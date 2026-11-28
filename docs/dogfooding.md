@@ -44,7 +44,7 @@ agentvc run --detach --task tN --actor agent:claude --model sonnet \
 agentvc ps                                                             # who is still running
 
 # 3. Review in the UI
-agentvcd                      # http://localhost:7420 -> task tN -> compare attempts
+agentvcd start                # http://localhost:7420 -> task tN -> compare attempts
 agentvc diff aX aY            # or from the terminal
 
 # 4. Pick the winner and ship it
