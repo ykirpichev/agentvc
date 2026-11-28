@@ -17,6 +17,7 @@ agentvc stack create cli -a -m "Expose it in the CLI"      # stacked on parser
 agentvc stack log                                # this window only
 agentvc stack bottom && edit && agentvc stack modify -a    # amend, restack above
 agentvc stack sync                               # fetch main, drop merged, restack
+agentvc stack create parser --reset              # parser merged: restart it on the new main
 ```
 
 ## Rules that keep windows independent
@@ -28,7 +29,8 @@ agentvc stack sync                               # fetch main, drop merged, rest
   only branches this window tracks. `adopt` refuses a branch another window
   tracks (`owned_by_other_window`).
 - **The base is the remote trunk** (`origin/main`), never your local `main`,
-  which may be checked out in another worktree. `sync` fetches only that ref.
+  which may be checked out in another worktree. `sync` fetches only that ref (and prunes tracking refs of
+  branches deleted on the remote).
 - **Building on another window's branch is allowed, read-only.**
   `agentvc stack adopt mine --parent theirs` (or `create` while on it): restack
   follows `theirs` when that window amends or restacks it, and never moves it.
@@ -94,11 +96,11 @@ Without `--resolve` or `--keep-conflicts` the command line still fails with
 | --- | --- |
 | `stack init [--trunk B] [--remote R]` | Set the trunk (detected from `origin/HEAD`) |
 | `stack log [--all] [--prs]` | This window's branches with commits, PRs, `needs restack`; `--all` adds other windows read-only; `--prs` fetches each PR's checks and review first |
-| `stack create [name] [-m msg] [-a] [-i]` | Branch on the current one (or the trunk), commit staged work; name from the message if omitted. `--insert` puts it between the current branch and its children |
+| `stack create [name] [-m msg] [-a] [-i] [--reset]` | Branch on the current one (or the trunk), commit staged work; name from the message if omitted. `--insert` puts it between the current branch and its children. `--reset` starts the branch afresh on the trunk's tip even if it exists (a thread branch whose PR merged), keeping local edits; refuses with `unmerged_commits` if it has commits the trunk lacks |
 | `stack modify [-a] [-m msg] [-c]` | Amend (or `-c` add a commit), restack the branches above |
 | `stack restack [--branch B] [--keep-conflicts \| --resolve]` | Replay branches onto their parents' tips. A commit already in the parent is dropped; one that would turn empty only because conflict resolution took the parent's side (say an indentation-only change) stops with `conflict` instead |
-| `stack sync [--no-fetch] [--keep-merged]` | Fetch trunk, drop merged branches, restack. A branch counts as merged only if its tip is in the trunk and it had commits of its own (an empty branch fast-forwarded to trunk is kept), its commits replay onto the trunk as no change without any conflict, or its PR is merged. Before deleting one, its tip is kept as `refs/agentvc/trash/<branch>`: `git branch <branch> refs/agentvc/trash/<branch>` brings it back |
-| `stack adopt B [--parent P] [--no-chain]` | Track existing branches: B and the untracked branches below it; parents from Graphite's `refs/branch-metadata` or git history |
+| `stack sync [--no-fetch] [--keep-merged]` | Fetch trunk, prune tracking refs of branches deleted on the remote (`pruned`), drop merged branches, restack. A branch counts as merged only if its tip is in the trunk and it had commits of its own (an empty branch fast-forwarded to trunk is kept), its commits replay onto the trunk as no change without any conflict, or its PR is merged. Before deleting one, its tip is kept as `refs/agentvc/trash/<branch>`: `git branch <branch> refs/agentvc/trash/<branch>` brings it back |
+| `stack adopt B [--parent P] [--no-chain] [--no-fetch]` | Track existing branches: B and the untracked branches below it; parents from Graphite's `refs/branch-metadata` or git history. Fetches the trunk first (best effort), so a branch with no commits of its own is tracked with 0 commits |
 | `stack submit [--branch B \| --all] [--draft] [--force] [--no-pr]` | Push with a lease; one PR per branch with its parent as base; the stack listed in every PR body; new PRs get the `agentvc:no-restack` label |
 | `stack merge [--branch B] [--method squash\|merge\|rebase] [--dry-run]` | Merge the PRs on GitHub from the bottom up to B (default: current); stops at the first that isn't ready |
 | `stack move B --onto P` | Re-parent B (and its upstack) onto P or the trunk; only B's own commits move |
@@ -122,7 +124,7 @@ Every command takes `--json`. Error codes: `needs_restack`, `push_rejected`,
 `rebase_in_progress`, `merge_commit`, `at_top`, `at_bottom`, `ambiguous`,
 `no_trunk`, `parent_missing`, `branch_missing`, `message_required`,
 `nothing_to_split`, `bad_names`, `nothing_staged`, `nothing_to_absorb`,
-`dirty_worktree`, `no_conflicts`, `unresolved_conflicts`, `no_undo`,
+`dirty_worktree`, `unmerged_commits`, `no_conflicts`, `unresolved_conflicts`, `no_undo`,
 `already_undone`, `undo_conflict`, `undo_not_newest`, `undo_owned_elsewhere`. Workspace codes are listed under
 [Workspaces](#workspaces-every-window-from-anywhere).
 
@@ -195,7 +197,10 @@ contains; otherwise another checkout owns the name and `submit` fails with
 `remote_branch_exists` (rename yours with `stack rename`, take theirs over
 with `stack get`, or overwrite with `--force`). `stack get` and `stack track`
 record the remote copy they take over; stacks from before this field that
-have a PR recorded lease against the tracking ref once. It opens a PR for each branch that has none (title and
+have a PR recorded lease against the tracking ref once. A branch deleted on
+the remote (its PR merged) is pushed again against an empty lease, and its
+stale `origin/<branch>` is dropped (`git ls-remote` says what the remote
+has). It opens a PR for each branch that has none (title and
 body from its commits; base = the parent branch, or the trunk), retargets
 existing ones whose parent changed, and keeps a list of the stack between
 `<!-- agentvc:stack:begin -->` markers in every body; the rest of the body is

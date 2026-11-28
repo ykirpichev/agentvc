@@ -300,6 +300,9 @@ pub struct AbsorbResult {
 #[derive(Clone, Debug, Serialize)]
 pub struct SyncResult {
     pub fetched: bool,
+    /// Remote-tracking refs deleted because the remote no longer has the
+    /// branch (like `git fetch --prune`).
+    pub pruned: Vec<String>,
     /// The base commit after the fetch.
     pub base: String,
     /// Branches found merged into the base and removed from the stack.
@@ -740,6 +743,86 @@ impl Window {
 
     pub fn current_branch(&self) -> Option<String> {
         self.repo.checked_out_branch()
+    }
+
+    /// The remote's branch heads (all of them, or only `names`), by name;
+    /// `None` when the remote cannot be asked (offline, no remote).
+    fn remote_heads(&self, names: &[String]) -> Option<HashMap<String, String>> {
+        if self.state.remote.is_empty() {
+            return None;
+        }
+        let mut args = vec!["ls-remote".to_string(), "--heads".into()];
+        args.push(self.state.remote.clone());
+        args.extend(names.iter().map(|n| format!("refs/heads/{n}")));
+        let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        let out = self.repo.git(&refs, None).ok()?;
+        let all = names.is_empty();
+        Some(
+            out.lines()
+                .filter_map(|l| l.split_once('\t'))
+                .filter_map(|(sha, r)| {
+                    r.strip_prefix("refs/heads/")
+                        .map(|n| (n.to_string(), sha.to_string()))
+                })
+                .filter(|(n, _)| all || names.contains(n))
+                .collect(),
+        )
+    }
+
+    /// Delete `refs/remotes/<remote>/<name>` if it still points at `old`.
+    fn drop_tracking_ref(&self, name: &str, old: &str) -> bool {
+        let r = format!("refs/remotes/{}/{name}", self.state.remote);
+        self.repo.git(&["update-ref", "-d", &r, old], None).is_ok()
+    }
+
+    /// Delete the remote-tracking refs of branches the remote no longer has
+    /// (`git fetch --prune` without fetching anything else). Returns the
+    /// pruned branch names; nothing when the remote cannot be reached.
+    pub fn prune_tracking_refs(&self) -> Vec<String> {
+        let Some(heads) = self.remote_heads(&[]) else {
+            return Vec::new();
+        };
+        let prefix = format!("refs/remotes/{}/", self.state.remote);
+        let local = self
+            .repo
+            .git(
+                &["for-each-ref", "--format=%(refname) %(objectname)", &prefix],
+                None,
+            )
+            .unwrap_or_default();
+        let mut pruned = Vec::new();
+        for line in local.lines() {
+            let Some((r, sha)) = line.split_once(' ') else {
+                continue;
+            };
+            let Some(name) = r.strip_prefix(&prefix) else {
+                continue;
+            };
+            if name == "HEAD" || heads.contains_key(name) {
+                continue;
+            }
+            if self.drop_tracking_ref(name, sha) {
+                pruned.push(name.to_string());
+            }
+        }
+        pruned
+    }
+
+    /// Fetch the remote trunk into `origin/<trunk>` (only that ref, so the
+    /// leases of other windows' branches stay as they are). Returns whether
+    /// there was a remote to fetch from.
+    pub fn fetch_trunk(&self) -> Result<bool> {
+        if self.state.remote.is_empty() {
+            return Ok(false);
+        }
+        let spec = format!(
+            "+refs/heads/{t}:refs/remotes/{r}/{t}",
+            t = self.state.trunk,
+            r = self.state.remote
+        );
+        self.repo
+            .git(&["fetch", "--quiet", &self.state.remote, &spec], None)?;
+        Ok(true)
     }
 
     fn find(&self, name: &str) -> Option<usize> {
@@ -1554,15 +1637,12 @@ impl Window {
     ) -> Result<SyncResult> {
         self.settle()?;
         let mut fetched = false;
-        if fetch && !self.state.remote.is_empty() {
-            let spec = format!(
-                "+refs/heads/{t}:refs/remotes/{r}/{t}",
-                t = self.state.trunk,
-                r = self.state.remote
-            );
-            self.repo
-                .git(&["fetch", "--quiet", &self.state.remote, &spec], None)?;
-            fetched = true;
+        let mut pruned = Vec::new();
+        if fetch {
+            fetched = self.fetch_trunk()?;
+            if fetched {
+                pruned = self.prune_tracking_refs();
+            }
         }
         let base = self.require_base()?;
         let mut merged: Vec<String> = Vec::new();
@@ -1665,6 +1745,7 @@ impl Window {
         };
         Ok(SyncResult {
             fetched,
+            pruned,
             base,
             merged,
             deleted,
@@ -1685,24 +1766,7 @@ impl Window {
         all: bool,
     ) -> Result<(Tracked, Option<String>)> {
         self.settle()?;
-        let name = match (name, message) {
-            (Some(n), _) => n.to_string(),
-            (None, Some(m)) if !slug(m).is_empty() => slug(m),
-            _ => {
-                return Err(stack_err(
-                    "bad_branch",
-                    "give a branch name, or a message (-m) to name it after",
-                ))
-            }
-        };
-        if self
-            .repo
-            .git(&["check-ref-format", "--branch", &name], None)
-            .is_err()
-            || name.starts_with('-')
-        {
-            return Err(Error::BadBranch(name));
-        }
+        let name = self.new_branch_name(name, message)?;
         if self.branch_tip(&name).is_some() {
             return Err(Error::BranchExists(name));
         }
@@ -1732,20 +1796,140 @@ impl Window {
         };
         self.state.branches.push(t.clone());
         self.save()?;
-        let mut commit = None;
-        if let Some(m) = message {
-            if all {
-                self.repo.git(&["add", "-A"], None)?;
+        let commit = self.commit_staged(message, all)?;
+        Ok((t, commit))
+    }
+
+    /// The branch name `create` uses: `name`, or one made from `message`.
+    fn new_branch_name(&self, name: Option<&str>, message: Option<&str>) -> Result<String> {
+        let name = match (name, message) {
+            (Some(n), _) => n.to_string(),
+            (None, Some(m)) if !slug(m).is_empty() => slug(m),
+            _ => {
+                return Err(stack_err(
+                    "bad_branch",
+                    "give a branch name, or a message (-m) to name it after",
+                ))
             }
-            if self
-                .repo
-                .git(&["diff", "--cached", "--quiet"], None)
-                .is_err()
-            {
-                self.repo.git(&["commit", "--quiet", "-m", m], None)?;
-                commit = self.repo.rev("HEAD");
+        };
+        if self
+            .repo
+            .git(&["check-ref-format", "--branch", &name], None)
+            .is_err()
+            || name.starts_with('-')
+            || name == self.state.trunk
+        {
+            return Err(Error::BadBranch(name));
+        }
+        Ok(name)
+    }
+
+    /// Commit the staged changes (all changes with `all`) when `message`
+    /// is given and something is staged.
+    fn commit_staged(&self, message: Option<&str>, all: bool) -> Result<Option<String>> {
+        let Some(m) = message else { return Ok(None) };
+        if all {
+            self.repo.git(&["add", "-A"], None)?;
+        }
+        if self
+            .repo
+            .git(&["diff", "--cached", "--quiet"], None)
+            .is_err()
+        {
+            self.repo.git(&["commit", "--quiet", "-m", m], None)?;
+            return Ok(self.repo.rev("HEAD"));
+        }
+        Ok(None)
+    }
+
+    /// `create --reset`: start `name` afresh on the trunk's tip, even if the
+    /// branch exists (say, a thread branch whose PR was merged), check it
+    /// out and track it on the trunk; then commit like `create`. Local edits
+    /// stay. Refuses a branch with commits the trunk does not have
+    /// (`unmerged_commits`), and branches of other windows.
+    pub fn create_reset(
+        &mut self,
+        name: Option<&str>,
+        message: Option<&str>,
+        all: bool,
+    ) -> Result<(Tracked, Option<String>)> {
+        self.settle()?;
+        let name = self.new_branch_name(name, message)?;
+        let base = self.require_base()?;
+        if let Some(p) = self.owner_elsewhere(&name) {
+            return Err(stack_err_with(
+                "owned_by_other_window",
+                format!("branch {name} belongs to the window at {}", p.display()),
+                json!({ "branch": name, "window": p }),
+            ));
+        }
+        if let Some(p) = self.checkouts_elsewhere().get(&name) {
+            return Err(stack_err_with(
+                "checked_out_elsewhere",
+                format!("branch {name} is checked out in {}", p.display()),
+                json!({ "branch": name, "worktree": p }),
+            ));
+        }
+        let old_tip = self.branch_tip(&name);
+        if let Some(tip) = old_tip.clone() {
+            if !self.repo.is_ancestor(&tip, &base) {
+                let probe = Tracked {
+                    name: name.clone(),
+                    parent: self.state.trunk.clone(),
+                    parent_rev: self.merge_base(&tip, &base).unwrap_or(base.clone()),
+                    pr: None,
+                    pr_state: None,
+                    pr_status: None,
+                    pushed: None,
+                };
+                if !self.is_merged(&probe, &base)? {
+                    return Err(stack_err_with(
+                        "unmerged_commits",
+                        format!(
+                            "{name} has commits that {} does not have; nothing changed. Rename it (`agentvc stack rename`) or delete it (`agentvc stack delete`) first",
+                            self.base_ref()
+                        ),
+                        json!({ "branch": name }),
+                    ));
+                }
             }
         }
+        if self.current_branch().as_deref() == Some(name.as_str()) {
+            self.repo
+                .git(&["reset", "--quiet", "--keep", &base], None)?;
+        } else {
+            self.repo
+                .git(&["switch", "--quiet", "-C", &name, &base], None)?;
+        }
+        // Keep what this window last pushed: the remote branch is usually
+        // still the merged PR's head, and the next submit replaces it under
+        // that lease instead of refusing it as another checkout's branch.
+        // A branch this window never tracked (a fresh clone of a thread
+        // branch) whose remote copy is the merged tip it had: that is ours
+        // to replace too.
+        let pushed = self
+            .find(&name)
+            .and_then(|i| self.state.branches[i].pushed.clone())
+            .or_else(|| {
+                let tip = old_tip?;
+                let heads = self.remote_heads(std::slice::from_ref(&name))?;
+                (heads.get(&name) == Some(&tip)).then_some(tip)
+            });
+        let t = Tracked {
+            name: name.clone(),
+            parent: self.state.trunk.clone(),
+            parent_rev: base,
+            pr: None,
+            pr_state: None,
+            pr_status: None,
+            pushed,
+        };
+        match self.find(&name) {
+            Some(i) => self.state.branches[i] = t.clone(),
+            None => self.state.branches.push(t.clone()),
+        }
+        self.save()?;
+        let commit = self.commit_staged(message, all)?;
         Ok((t, commit))
     }
 
@@ -3262,17 +3446,42 @@ impl Window {
         // last pushed, so nobody else's push is overwritten: not the shared
         // tracking ref, which any fetch moves to another checkout's push of
         // the same branch name (#201).
-        let leases = if opts.force {
+        //
+        // A branch deleted on the remote (its PR merged, #184) would fail
+        // that lease with "stale info": ask the remote what it has, and
+        // lease such a branch against "absent" (dropping its stale tracking
+        // ref). A branch that still exists keeps its lease, so a push by
+        // someone else is still refused.
+        let mut leases = if opts.force {
             HashMap::new()
         } else {
             self.submit_leases(&remote, &names)?
+        };
+        let heads = if opts.force {
+            None
+        } else {
+            self.remote_heads(&names)
         };
         let mut pushed = Vec::new();
         let mut args: Vec<String> = vec!["push".into(), "--quiet".into(), "--atomic".into()];
         let mut specs = Vec::new();
         for n in &names {
             let tip = self.branch_tip(n).expect("checked");
-            let tracking = self.repo.rev(&format!("refs/remotes/{remote}/{n}"));
+            let mut tracking = self.repo.rev(&format!("refs/remotes/{remote}/{n}"));
+            if let Some(h) = &heads {
+                match h.get(n) {
+                    None => {
+                        if let Some(t) = tracking.take() {
+                            self.drop_tracking_ref(n, &t);
+                        }
+                        leases.insert(n.clone(), None);
+                    }
+                    Some(r) if *r == tip => {
+                        leases.insert(n.clone(), Some(r.clone()));
+                    }
+                    Some(_) => {}
+                }
+            }
             let lease = leases.get(n).cloned().flatten();
             let on_remote = if opts.force { tracking } else { lease.clone() };
             if on_remote.as_deref() == Some(tip.as_str()) {
@@ -4717,6 +4926,183 @@ mod tests {
         assert_eq!(r.merged.len(), 1, "{:?}", r.stopped);
         assert!(r.stopped.is_none());
         assert!(!w.tracks("x"));
+    }
+
+    fn push_only() -> SubmitOptions {
+        SubmitOptions {
+            no_pr: true,
+            ..Default::default()
+        }
+    }
+
+    /// #184: the remote branch was deleted (merged PR) but the clone's
+    /// `origin/<branch>` remains: submit leases against the remote's actual
+    /// state and pushes, while a push by someone else is still refused.
+    #[test]
+    fn submit_after_the_remote_branch_was_deleted() {
+        let f = setup();
+        let mut w = Window::open(&f.w1).unwrap();
+        fs::write(f.w1.join("d.txt"), "1\n").unwrap();
+        w.create(Some("gone"), Some("gone"), true).unwrap();
+        assert_eq!(
+            w.submit_with(&push_only(), None).unwrap().pushed,
+            vec!["gone"]
+        );
+        git(&f.origin, &["branch", "-D", "gone"]);
+        assert!(
+            w.repo.rev("refs/remotes/origin/gone").is_some(),
+            "stale tracking ref"
+        );
+
+        // Unchanged since the last push: pushed again, not skipped.
+        assert_eq!(
+            w.submit_with(&push_only(), None).unwrap().pushed,
+            vec!["gone"]
+        );
+        assert_eq!(rev(&f.origin, "gone"), rev(&f.w1, "gone"));
+
+        // Amended after the remote deletion: no `stale info`.
+        git(&f.origin, &["branch", "-D", "gone"]);
+        fs::write(f.w1.join("d.txt"), "2\n").unwrap();
+        w.modify(None, true, false, false).unwrap();
+        assert_eq!(
+            w.submit_with(&push_only(), None).unwrap().pushed,
+            vec!["gone"]
+        );
+        assert_eq!(rev(&f.origin, "gone"), rev(&f.w1, "gone"));
+        assert_eq!(rev(&f.w1, "origin/gone"), rev(&f.w1, "gone"));
+
+        // Someone else recreated it on the remote: still refused.
+        git(&f.origin, &["branch", "-f", "gone", "main"]);
+        fs::write(f.w1.join("d.txt"), "3\n").unwrap();
+        w.modify(None, true, false, false).unwrap();
+        let e = w.submit_with(&push_only(), None).unwrap_err();
+        assert_eq!(e.code(), "push_rejected");
+        assert_eq!(rev(&f.origin, "gone"), rev(&f.origin, "main"));
+    }
+
+    #[test]
+    fn sync_prunes_tracking_refs_of_deleted_remote_branches() {
+        let f = setup();
+        let mut w = Window::open(&f.w1).unwrap();
+        fs::write(f.w1.join("p.txt"), "1\n").unwrap();
+        w.create(Some("keep"), Some("keep"), true).unwrap();
+        w.submit_with(&push_only(), None).unwrap();
+        git(&f.origin, &["branch", "old", "main"]);
+        git(&f.w1, &["fetch", "-q", "origin"]);
+        git(&f.origin, &["branch", "-D", "old"]);
+        let s = w.sync(true, true, false).unwrap();
+        assert_eq!(s.pruned, vec!["old"]);
+        assert!(w.repo.rev("refs/remotes/origin/old").is_none());
+        assert!(w.repo.rev("refs/remotes/origin/keep").is_some());
+        assert!(w.repo.rev("refs/remotes/origin/main").is_some());
+        assert!(w.sync(false, true, false).unwrap().pruned.is_empty());
+    }
+
+    /// #187: a branch with no commits of its own, adopted while
+    /// `origin/main` was stale, got the stale trunk as its base; sync then
+    /// deleted it as merged.
+    #[test]
+    fn adopting_an_empty_branch_keeps_it_through_sync() {
+        let f = setup();
+        advance_origin(&f, "up.txt", "u\n");
+        // The thread branch is the remote's latest main; origin/main is not.
+        let url = f.origin.to_str().unwrap();
+        git(&f.w1, &["fetch", "-q", url, "main:refs/heads/claude/x"]);
+        git(&f.w1, &["switch", "-q", "claude/x"]);
+        let mut w = Window::open(&f.w1).unwrap();
+        assert_ne!(w.base().unwrap(), rev(&f.w1, "claude/x"), "stale trunk");
+        assert!(w.fetch_trunk().unwrap());
+        w.adopt("claude/x", None, true).unwrap();
+        let l = w.log(false).unwrap();
+        assert_eq!(l.base, Some(rev(&f.w1, "claude/x")));
+        assert_eq!(
+            (l.branches[0].parent.as_str(), l.branches[0].commits),
+            ("main", 0)
+        );
+        let s = w.sync(true, true, false).unwrap();
+        assert!(s.merged.is_empty(), "{:?}", s.merged);
+        assert!(w.tracks("claude/x"));
+        assert_eq!(w.current_branch().as_deref(), Some("claude/x"));
+    }
+
+    #[test]
+    fn a_restarted_thread_branch_replaces_its_merged_remote_copy() {
+        // A thread can push only its own branch: after its PR is
+        // squash-merged (the remote branch stays), the branch restarts on
+        // the trunk and the next submit replaces the merged head.
+        let f = setup();
+        let opts = SubmitOptions {
+            no_pr: true,
+            ..Default::default()
+        };
+        let mut w = Window::open(&f.w1).unwrap();
+        fs::write(f.w1.join("t.txt"), "1\n").unwrap();
+        w.create(Some("thread"), Some("work"), true).unwrap();
+        assert_eq!(w.submit_with(&opts, None).unwrap().pushed, vec!["thread"]);
+        advance_origin(&f, "t.txt", "1\n");
+        w.fetch_trunk().unwrap();
+        fs::write(f.w1.join("n.txt"), "next\n").unwrap();
+        w.create_reset(Some("thread"), Some("next"), true).unwrap();
+        assert_eq!(w.submit_with(&opts, None).unwrap().pushed, vec!["thread"]);
+        let remote = git(
+            &f.w1,
+            &["ls-remote", f.origin.to_str().unwrap(), "refs/heads/thread"],
+        );
+        assert!(remote.starts_with(&rev(&f.w1, "thread")), "{remote}");
+
+        // Forgotten by the window (a fresh clone): the remote copy is the
+        // merged tip it had, so it is still ours to replace.
+        advance_origin(&f, "n.txt", "next\n");
+        w.fetch_trunk().unwrap();
+        w.untrack("thread").unwrap();
+        fs::write(f.w1.join("m.txt"), "more\n").unwrap();
+        w.create_reset(Some("thread"), Some("more"), true).unwrap();
+        assert_eq!(w.submit_with(&opts, None).unwrap().pushed, vec!["thread"]);
+    }
+
+    #[test]
+    fn create_reset_restarts_a_merged_branch_on_the_trunk() {
+        let f = setup();
+        let mut w = Window::open(&f.w1).unwrap();
+        fs::write(f.w1.join("t.txt"), "1\n").unwrap();
+        w.create(Some("thread"), Some("work"), true).unwrap();
+        assert_eq!(
+            w.create(Some("thread"), None, false).unwrap_err().code(),
+            "branch_exists"
+        );
+        // Unmerged work is never thrown away.
+        let e = w.create_reset(Some("thread"), None, false).unwrap_err();
+        assert_eq!(e.code(), "unmerged_commits");
+        assert!(w.tracks("thread"));
+
+        // Squash-merged upstream, then restarted from the latest trunk with
+        // a local edit kept and committed.
+        advance_origin(&f, "t.txt", "1\n");
+        w.fetch_trunk().unwrap();
+        fs::write(f.w1.join("n.txt"), "next\n").unwrap();
+        let (t, c) = w.create_reset(Some("thread"), Some("next"), true).unwrap();
+        assert_eq!(t.parent, "main");
+        assert_eq!(t.parent_rev, w.base().unwrap());
+        assert!(c.is_some());
+        assert_eq!(rev(&f.w1, "thread~1"), w.base().unwrap());
+        assert_eq!(w.current_branch().as_deref(), Some("thread"));
+        assert_eq!(w.log(false).unwrap().branches[0].commits, 1);
+        assert_eq!(w.state.branches.len(), 1);
+
+        // From the trunk (detached), an untracked merged branch: reset there.
+        w.checkout("main").unwrap();
+        git(&f.w1, &["branch", "-f", "other", "origin/main~1"]);
+        let (t, c) = w.create_reset(Some("other"), None, false).unwrap();
+        assert!(c.is_none());
+        assert_eq!(rev(&f.w1, "other"), w.base().unwrap());
+        assert!(w.tracks(&t.name));
+        assert_eq!(
+            w.create_reset(Some("main"), None, false)
+                .unwrap_err()
+                .code(),
+            "bad_branch"
+        );
     }
 
     /// main has n.py pushed; `ws` re-indents `bar()`; main then edits the

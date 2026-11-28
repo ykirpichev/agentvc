@@ -49,6 +49,13 @@ pub enum StackCmd {
         insert: bool,
         #[arg(long, requires = "insert")]
         keep_conflicts: bool,
+        /// Start the branch afresh on the trunk's tip even if it exists (a
+        /// thread branch whose PR was merged): it is reset there, checked
+        /// out and tracked on the trunk; local edits stay. Refuses a branch
+        /// with commits the trunk does not have. Run `stack sync` first to
+        /// fetch the latest trunk.
+        #[arg(long, conflicts_with = "insert")]
+        reset: bool,
     },
     /// Amend the current branch's last commit with the staged changes and
     /// restack the branches above it.
@@ -129,6 +136,10 @@ pub enum StackCmd {
         /// Only this branch, not the ones below it.
         #[arg(long)]
         no_chain: bool,
+        /// Use the trunk as already fetched (by default adopt fetches it,
+        /// so a stale `origin/<trunk>` does not become the branch's base).
+        #[arg(long)]
+        no_fetch: bool,
     },
     /// Push this window's stack and open or update one PR per branch, with
     /// the parent branch as base and the whole stack listed in each body.
@@ -700,6 +711,7 @@ fn dispatch(cwd: &Path, cmd: StackCmd) -> anyhow::Result<(Value, String)> {
             all,
             insert: true,
             keep_conflicts,
+            ..
         } => {
             let (t, commit, r) =
                 w.insert(name.as_deref(), message.as_deref(), all, keep_conflicts)?;
@@ -716,9 +728,17 @@ fn dispatch(cwd: &Path, cmd: StackCmd) -> anyhow::Result<(Value, String)> {
             (json!({ "branch": t, "commit": commit, "restack": r }), text)
         }
         StackCmd::Create {
-            name, message, all, ..
+            name,
+            message,
+            all,
+            reset,
+            ..
         } => {
-            let (t, commit) = w.create(name.as_deref(), message.as_deref(), all)?;
+            let (t, commit) = if reset {
+                w.create_reset(name.as_deref(), message.as_deref(), all)?
+            } else {
+                w.create(name.as_deref(), message.as_deref(), all)?
+            };
             let text = format!(
                 "created {} on {}{}",
                 t.name,
@@ -778,6 +798,13 @@ fn dispatch(cwd: &Path, cmd: StackCmd) -> anyhow::Result<(Value, String)> {
             if s.fetched {
                 text += &format!("fetched {} {}\n", w.base_ref(), short(&s.base));
             }
+            if !s.pruned.is_empty() {
+                text += &format!(
+                    "pruned {} (deleted on {})\n",
+                    s.pruned.join(", "),
+                    w.state.remote
+                );
+            }
             for m in &s.merged {
                 match s.trashed.iter().find(|t| &t.branch == m) {
                     Some(t) => {
@@ -800,7 +827,12 @@ fn dispatch(cwd: &Path, cmd: StackCmd) -> anyhow::Result<(Value, String)> {
             branch,
             parent,
             no_chain,
+            no_fetch,
         } => {
+            // Best effort: offline, adopt on the trunk as last fetched.
+            if !no_fetch {
+                let _ = w.fetch_trunk();
+            }
             let added = w.adopt(&branch, parent.as_deref(), !no_chain)?;
             let mut text = String::new();
             for t in &added {

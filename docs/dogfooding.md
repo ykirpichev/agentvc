@@ -271,6 +271,15 @@ thread goes idle. Use your thread's own push branch wherever `<branch>` appears.
    or in cloud sessions in a PR comment, #56/#64), and with auto-sync every later
    `run`, `promote` and `abandon` updates it.
 
+Threads that ship with `agentvc stack` instead need no raw git either:
+`agentvc stack adopt <branch>` (fetches the trunk first, so an empty thread branch
+starts with 0 commits, #187), `agentvc stack submit` (asks the remote what it has, so a
+branch deleted on GitHub is pushed again, #184), and after the PR merged
+`agentvc stack sync` (fetches the trunk, prunes tracking refs of deleted remote branches)
+then `agentvc stack create <branch> --reset` to restart the thread branch on the latest
+trunk. `agentvc stack checkout main` checks out the trunk (detached at `origin/main`).
+No `git fetch --prune`, `git checkout main` or `git checkout origin/main`.
+
 ## Git inside a view (#68)
 
 Every open view has a `.git` file pointing at its own small git directory,
