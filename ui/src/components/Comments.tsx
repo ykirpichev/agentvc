@@ -8,9 +8,10 @@ import { api } from '../api/client'
 import { useLive } from '../api/live'
 import type { Agent, CommentTarget, CommentThread } from '../api/types'
 import { canFollowUp } from '../core/agents'
-import { authorOf, who } from '../core/comments'
+import { authorOf, threadCounts, who } from '../core/comments'
 import { plural, timeAgo } from '../lib/format'
 import { Icon } from './Icon'
+import { Markdown } from './Markdown'
 import { useToast } from './Toaster'
 import './comments.css'
 
@@ -151,7 +152,7 @@ export function ThreadView({ t, readOnly, showWhere = false }: { t: CommentThrea
               <li key={c.id} className={`ccomment ${c.author.startsWith('agent:') ? 'ccomment-agent' : ''}`}>
                 <span className="ccomment-who">{who(c.author)}</span>
                 <span className="muted"> · {timeAgo(c.at)}</span>
-                <div className="ccomment-body">{c.body}</div>
+                {c.author.startsWith('agent:') ? <Markdown className="ccomment-body" text={c.body} /> : <div className="ccomment-body">{c.body}</div>}
               </li>
             ))}
           </ol>
@@ -285,8 +286,13 @@ export function ReviewBar({
         </>
       ) : (
         <span>
-          {plural(open.filter((t) => t.state === 'open').length, 'open comment')}
-          {open.some((t) => t.state === 'addressed') ? ` · ${open.filter((t) => t.state === 'addressed').length} addressed by the agent, waiting for you to resolve` : ''}
+          {(() => {
+            // Leave out a zero: "0 open comments · 2 addressed" read as a contradiction.
+            const n = threadCounts(open)
+            const waiting = 'addressed by the agent, waiting for you to resolve'
+            if (!n.open) return `${plural(n.addressed, 'comment')} ${waiting}`
+            return `${plural(n.open, 'open comment')}${n.addressed ? ` · ${n.addressed} ${waiting}` : ''}`
+          })()}
         </span>
       )}
     </div>
@@ -332,7 +338,7 @@ export function ThreadList({
   return (
     <section className="clist" aria-label="Comments">
       <h2 className="rv-h2">
-        Comments <span className="muted">· {threads.length - done.length} open</span>
+        Comments <span className="muted">· {threadCounts(threads).words}</span>
         {threads.length > 0 && <span className="muted clist-keys"> · n / p to step through</span>}
         {!readOnly && !writing && (
           <button type="button" className="btn btn-ghost btn-sm clist-add" onClick={() => setWriting(true)} title="A comment on the whole change, not on a line. To comment on lines, click a line number in a diff.">

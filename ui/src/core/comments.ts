@@ -81,3 +81,21 @@ export function scrollToThread(id: string) {
   }
   go()
 }
+
+/** How many threads are open (waiting on the agent), addressed (waiting on
+ * you to resolve) and drafts (not sent), and those words, so every count of
+ * one target's threads says the same: "1 open · 2 addressed · 1 draft". */
+export function threadCounts(threads: CommentThread[]) {
+  const n = { open: 0, addressed: 0, drafts: 0 }
+  for (const t of threads) {
+    if (t.state === 'open') n.open++
+    else if (t.state === 'addressed') n.addressed++
+    else if (t.state === 'pending') n.drafts++
+  }
+  const parts = [
+    n.open ? `${n.open} open` : '',
+    n.addressed ? `${n.addressed} addressed` : '',
+    n.drafts ? `${n.drafts} ${n.drafts === 1 ? 'draft' : 'drafts'}` : '',
+  ].filter(Boolean)
+  return { ...n, words: parts.length ? parts.join(' · ') : 'none open' }
+}

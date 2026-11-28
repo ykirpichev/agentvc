@@ -9,13 +9,13 @@ shows all of them in **one space**, and lets you hand any branch to an
 ## 1. Install (once per machine, 2 minutes)
 
 ```sh
-git clone https://github.com/ykirpichev/agentvc ~/src/agentvc
-cd ~/src/agentvc && scripts/install.sh --vscode
+curl -fsSL https://raw.githubusercontent.com/ykirpichev/agentvc/main/scripts/get.sh | sh -s -- --vscode
 export GITHUB_TOKEN=...    # repo scope; or have `gh auth token` work
 ```
 
-`install.sh` puts `agentvc` and `agentvcd` in `~/.cargo/bin` and installs the
-VS Code / Cursor extension. Run it again to upgrade.
+`get.sh` puts `agentvc` and `agentvcd` (review UI built in) in `~/.local/bin`
+and installs the VS Code / Cursor extension. Run it again to upgrade. Other
+editors, Claude Code and by-hand installs: [install.md](install.md).
 
 ## 2. Move each folder's stack over (once per folder)
 
@@ -82,7 +82,7 @@ once): the workspace's agent settings, or `agentvc workspace agents`.
 
 ## Checklist for the trial week
 
-- [ ] `scripts/install.sh --vscode` on each machine, `GITHUB_TOKEN` set
+- [ ] `get.sh --vscode` (step 1) on each machine, `GITHUB_TOKEN` set
 - [ ] Each folder with a stack: `stack adopt`, `stack log --prs`, `stack submit`
 - [ ] `gt` alias removed in those folders
 - [ ] `agentvcd` running; every folder shows up in the browser and in Cursor

@@ -1132,7 +1132,7 @@ impl Window {
             return Err(stack_err_with(
                 "rebase_in_progress",
                 format!(
-                    "{} is being rebased; resolve the conflicts, `git add` the files and `git rebase --continue` (or `--abort`), then run `agentvc stack restack`",
+                    "{} is being rebased; resolve the conflicts, `git add` the files, then run `agentvc stack continue` (or `agentvc stack abort`)",
                     p.branch
                 ),
                 json!({ "branch": p.branch }),
@@ -1876,6 +1876,31 @@ impl Window {
             .repo
             .rev("HEAD")
             .ok_or_else(|| stack_err("no_commits", "this repository has no commits yet"))?;
+        // `-m` without `-a` commits only what is staged. With changes in the
+        // worktree but nothing staged that would make an empty branch the
+        // user then cannot recreate with `-am` (`branch_exists`): refuse.
+        if message.is_some()
+            && !all
+            && self
+                .repo
+                .git(&["diff", "--cached", "--quiet"], None)
+                .is_ok()
+        {
+            let dirty = self
+                .repo
+                .git(&["status", "--porcelain", "--untracked-files=normal"], None)
+                .map(|s| !s.trim().is_empty())
+                .unwrap_or(false);
+            if dirty {
+                return Err(stack_err_with(
+                    "nothing_staged",
+                    format!(
+                        "nothing is staged, so -m would make {name} without a commit; add -a to commit every change (`agentvc stack create {name} -am <message>`), or stage files first"
+                    ),
+                    json!({ "branch": name, "hint": "add -a" }),
+                ));
+            }
+        }
         let parent = match self.current_branch() {
             Some(c) if c != self.state.trunk => c,
             _ => self.state.trunk.clone(),
@@ -3482,7 +3507,34 @@ impl Window {
         Ok(leases)
     }
 
+    /// PRs go through the GitHub API: refuse a remote on another host
+    /// before pushing anything (or asking for a token), rather than push and
+    /// then fail on the API. `--repo` names the GitHub repository outright.
+    fn require_github_remote(&self, opts: &SubmitOptions) -> Result<()> {
+        if opts.no_pr || opts.repo.is_some() || self.state.remote.is_empty() {
+            return Ok(());
+        }
+        let remote = &self.state.remote;
+        let url = self
+            .repo
+            .git(&["remote", "get-url", remote], None)
+            .unwrap_or_default();
+        let url = url.trim();
+        if url.is_empty() || crate::github::remote_is_github(url) {
+            return Ok(());
+        }
+        let host = crate::github::remote_host(url).unwrap_or_default();
+        Err(stack_err_with(
+            "not_github",
+            format!(
+                "{remote} is on {host}, not GitHub; stack submit opens GitHub PRs, so nothing was pushed. `agentvc stack submit --no-pr` only pushes the branches"
+            ),
+            json!({ "remote": remote, "url": url, "host": host }),
+        ))
+    }
+
     pub fn submit(&mut self, opts: &SubmitOptions) -> Result<SubmitResult> {
+        self.require_github_remote(opts)?;
         let api = if opts.no_pr {
             None
         } else {
@@ -3504,6 +3556,9 @@ impl Window {
             ));
         }
         let remote = self.state.remote.clone();
+        if api.is_some() {
+            self.require_github_remote(opts)?;
+        }
         let names = self.submit_set(opts)?;
         let stale: Vec<String> = names
             .iter()
@@ -4243,6 +4298,24 @@ mod tests {
     }
 
     #[test]
+    fn create_with_message_refuses_when_only_unstaged_changes() {
+        let f = setup();
+        let mut w = Window::open(&f.w1).unwrap();
+        fs::write(f.w1.join("a.txt"), "changed\n").unwrap();
+        let e = w.create(Some("feat"), Some("msg"), false).unwrap_err();
+        assert_eq!(e.code(), "nothing_staged");
+        assert!(e.to_string().contains("add -a"), "{e}");
+        // Nothing was created, so the `-am` retry works.
+        let mut w = Window::open(&f.w1).unwrap();
+        assert!(w.state.branches.is_empty());
+        let (_, commit) = w.create(Some("feat"), Some("msg"), true).unwrap();
+        assert!(commit.is_some());
+        // A clean tree still makes an empty branch to commit on later.
+        let (_, commit) = w.create(Some("next"), Some("msg2"), false).unwrap();
+        assert!(commit.is_none());
+    }
+
+    #[test]
     fn long_chain_restacks_after_amend_and_sync() {
         let f = setup();
         let mut w = Window::open(&f.w1).unwrap();
@@ -4547,6 +4620,32 @@ mod tests {
         let mut api = Api::new("t".into());
         api.set_base(&base);
         (api, prs)
+    }
+
+    #[test]
+    fn submit_refuses_a_non_github_remote_before_pushing() {
+        if std::env::var(crate::github::API_ENV).is_ok() {
+            return;
+        }
+        let f = setup();
+        let mut w = Window::open(&f.w1).unwrap();
+        fs::write(f.w1.join("s.txt"), "x\n").unwrap();
+        w.create(Some("s"), Some("S"), true).unwrap();
+        git(
+            &f.w1,
+            &["remote", "set-url", "origin", "https://gitlab.com/o/r.git"],
+        );
+        let api = Api::new("t".into());
+        let e = w
+            .submit_with(&SubmitOptions::default(), Some(&api))
+            .unwrap_err();
+        assert_eq!(e.code(), "not_github", "{e}");
+        assert!(e.to_string().contains("--no-pr"), "{e}");
+        git(
+            &f.w1,
+            &["remote", "set-url", "origin", f.origin.to_str().unwrap()],
+        );
+        assert!(git(&f.w1, &["ls-remote", "--heads", "origin", "s"]).is_empty());
     }
 
     #[test]

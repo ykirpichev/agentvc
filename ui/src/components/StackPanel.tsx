@@ -26,6 +26,31 @@ import { useToast } from './Toaster'
 import './stack.css'
 
 const FOLD_KEY = 'agentvc.folded'
+const DISMISSED_KEY = 'agentvc.dismissedEdits'
+
+/** Failed edits the viewer dismissed (request ids), kept in this browser. */
+function savedDismissed(): Set<string> {
+  try {
+    return new Set(JSON.parse(localStorage.getItem(DISMISSED_KEY) ?? '[]') as string[])
+  } catch {
+    return new Set()
+  }
+}
+
+function useDismissed(): [Set<string>, (id: string) => void] {
+  const [ids, setIds] = useState(savedDismissed)
+  const dismiss = (id: string) =>
+    setIds((prev) => {
+      const next = new Set(prev).add(id)
+      try {
+        localStorage.setItem(DISMISSED_KEY, JSON.stringify([...next].slice(-50)))
+      } catch {
+        // Private window or blocked storage: dismissed for this page only.
+      }
+      return next
+    })
+  return [ids, dismiss]
+}
 
 function savedFolds(): Set<string> {
   try {
@@ -252,6 +277,7 @@ function WindowStack({
   const toast = useToast()
   const { refresh } = useLive()
   const { run, busy, submit } = useStackEdit()
+  const [dismissed, dismiss] = useDismissed()
   const [drag, setDrag] = useState<string | null>(null)
   const [over, setOver] = useState<string | null>(null)
   const sel = selectionFromPath(useLocation().pathname)
@@ -277,7 +303,19 @@ function WindowStack({
   )
   const queued = w.requests.filter((r) => r.status === 'queued')
   const lastOk = Math.max(0, ...w.requests.filter((r) => r.status === 'applied').map((r) => r.created_at))
-  const failed = w.requests.filter((r) => r.status === 'failed' && r.op !== 'submit' && r.created_at > lastOk).slice(0, 1)
+  // The latest failed edit, until it is dismissed, a later edit applies or
+  // the same edit is tried again, or the branch it named is gone.
+  const failed = w.requests
+    .filter(
+      (r) =>
+        r.status === 'failed' &&
+        r.op !== 'submit' &&
+        r.created_at > lastOk &&
+        !dismissed.has(r.id) &&
+        (!r.branch || w.branches.some((b) => b.name === r.branch)) &&
+        !w.requests.some((o) => o.created_at > r.created_at && o.op === r.op && o.branch === r.branch),
+    )
+    .slice(0, 1)
   const stoppedAt = w.pending?.branch ?? w.branches.find((b) => b.conflicts > 0)?.name
 
   const doSync = () => void run(w, { op: 'sync' }, `Synced ${w.name} with ${trunk}.`, true)
@@ -426,7 +464,10 @@ function WindowStack({
       {!stoppedAt &&
         failed.map((r) => (
           <div key={r.id} className="sp-note sp-note-bad" title={r.reason ?? r.code}>
-            {r.op} {r.branch ?? ''} failed: {r.code === 'conflict' ? 'a file changed on both sides' : (r.reason ?? r.code)}
+            {r.op} {r.branch ?? ''} failed: {r.code === 'conflict' ? 'a file changed on both sides' : (r.reason ?? r.code)}{' '}
+            <button type="button" className="linkish" onClick={() => dismiss(r.id)} title="Hide this message">
+              Dismiss
+            </button>
           </div>
         ))}
         </>

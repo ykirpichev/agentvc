@@ -47,12 +47,15 @@ pub enum CommentCmd {
         here: bool,
         #[arg(long)]
         workspace: Option<String>,
-        /// Only open and addressed threads.
+        /// Only open and addressed threads (no drafts).
         #[arg(long)]
         open: bool,
-        /// Drafts too.
-        #[arg(long)]
+        /// Drafts are listed (marked `draft`) by default; kept for scripts.
+        #[arg(long, hide = true, conflicts_with = "no_drafts")]
         drafts: bool,
+        /// Leave out your unsent drafts.
+        #[arg(long)]
+        no_drafts: bool,
     },
     /// One thread with all its comments.
     Show { id: String },
@@ -209,7 +212,12 @@ fn line(t: &Thread) -> String {
     format!(
         "{:<5} {:<9} {:<28} {}  {}{}",
         t.id,
-        t.state.as_str(),
+        // A draft is not sent yet: say so plainly rather than "pending".
+        if t.state == comments::State::Pending {
+            "draft"
+        } else {
+            t.state.as_str()
+        },
         where_(t),
         t.author(),
         first,
@@ -287,7 +295,8 @@ pub fn run(cwd: &Path, cmd: CommentCmd) -> anyhow::Result<(Value, String)> {
             here,
             workspace,
             open,
-            drafts,
+            drafts: _,
+            no_drafts,
         } => {
             let target = target
                 .map(|t| parse_target(cwd, &t, workspace.as_deref()))
@@ -300,7 +309,7 @@ pub fn run(cwd: &Path, cmd: CommentCmd) -> anyhow::Result<(Value, String)> {
                     &Filter {
                         target,
                         active: open,
-                        pending: drafts,
+                        pending: !no_drafts,
                     },
                 )?
             };
