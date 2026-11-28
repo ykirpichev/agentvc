@@ -2534,6 +2534,84 @@ fn tool_worktrees_nest_under_their_folder_and_prune_keeps_work() {
     assert_eq!(l["workspaces"].as_array().unwrap().len(), 4, "{l}");
 }
 
+/// Cloud-thread flow with no raw git (#184, #187): adopt a thread branch
+/// while `origin/main` is stale, submit after its remote branch was deleted,
+/// sync prunes, and `create --reset` restarts the branch on the new trunk.
+#[test]
+fn stack_thread_flow_needs_no_raw_git() {
+    let tmp = tempdir();
+    let home = tmp.path().join("home");
+    git(
+        tmp.path(),
+        &["init", "--quiet", "--bare", "-b", "main", "origin.git"],
+    );
+    let origin = tmp.path().join("origin.git");
+    let seed = tmp.path().join("seed");
+    git(tmp.path(), &["clone", "--quiet", "origin.git", "seed"]);
+    for i in 1..=3 {
+        fs::write(seed.join("README"), format!("{i}\n")).unwrap();
+        git(&seed, &["add", "-A"]);
+        git(&seed, &["commit", "--quiet", "-m", &format!("c{i}")]);
+        if i == 1 {
+            git(&seed, &["push", "--quiet", "origin", "HEAD:main"]);
+        }
+    }
+    let w = tmp.path().join("w");
+    git(tmp.path(), &["clone", "--quiet", "origin.git", "w"]);
+    // main moves on; the thread branch is the new main, origin/main is stale.
+    git(&seed, &["push", "--quiet", "origin", "HEAD:main"]);
+    git(
+        &w,
+        &[
+            "fetch",
+            "--quiet",
+            origin.to_str().unwrap(),
+            "main:claude/x",
+        ],
+    );
+    git(&w, &["switch", "--quiet", "claude/x"]);
+
+    let r = agentvc_home(&home, &w, &["stack", "adopt", "claude/x"]);
+    assert_eq!(r["ok"], true, "{r}");
+    let r = agentvc_home(&home, &w, &["stack", "log"]);
+    assert_eq!(r["branches"][0]["commits"], 0, "{r}");
+    let r = agentvc_home(&home, &w, &["stack", "sync"]);
+    assert_eq!(r["merged"], serde_json::json!([]), "{r}");
+
+    // Push, the remote branch is deleted (PR merged), push again.
+    fs::write(w.join("x.txt"), "x\n").unwrap();
+    let r = agentvc_home(&home, &w, &["stack", "modify", "-a", "-c", "-m", "x"]);
+    assert_eq!(r["ok"], true, "{r}");
+    let r = agentvc_home(&home, &w, &["stack", "submit", "--no-pr"]);
+    assert_eq!(r["pushed"], serde_json::json!(["claude/x"]), "{r}");
+    git(&origin, &["branch", "--quiet", "-D", "claude/x"]);
+    fs::write(w.join("x.txt"), "y\n").unwrap();
+    let r = agentvc_home(&home, &w, &["stack", "modify", "-a"]);
+    assert_eq!(r["ok"], true, "{r}");
+    let r = agentvc_home(&home, &w, &["stack", "submit", "--no-pr"]);
+    assert_eq!(r["ok"], true, "{r}");
+    assert_eq!(r["pushed"], serde_json::json!(["claude/x"]), "{r}");
+
+    // The PR is squash-merged and its branch deleted: sync prunes, then the
+    // thread branch restarts on the latest trunk.
+    git(&seed, &["fetch", "--quiet", "origin"]);
+    git(&seed, &["merge", "--quiet", "--squash", "origin/claude/x"]);
+    git(&seed, &["commit", "--quiet", "-m", "x (#1)"]);
+    git(&seed, &["push", "--quiet", "origin", "HEAD:main"]);
+    git(&origin, &["branch", "--quiet", "-D", "claude/x"]);
+    let r = agentvc_home(&home, &w, &["stack", "sync", "--keep-merged"]);
+    assert_eq!(r["pruned"], serde_json::json!(["claude/x"]), "{r}");
+    let r = agentvc_home(&home, &w, &["stack", "create", "claude/x", "--reset"]);
+    assert_eq!(r["ok"], true, "{r}");
+    assert_eq!(
+        git(&w, &["rev-parse", "claude/x"]),
+        git(&w, &["rev-parse", "origin/main"])
+    );
+    let r = agentvc_home(&home, &w, &["stack", "log"]);
+    assert_eq!(r["current"], "claude/x", "{r}");
+    assert_eq!(r["branches"][0]["commits"], 0, "{r}");
+}
+
 /// A repo with `main` pushed to origin and a clone `a` (#202).
 fn undo_repo(tmp: &Path) -> std::path::PathBuf {
     git(
