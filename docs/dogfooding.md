@@ -115,7 +115,10 @@ PR the attempt was not rebased past), `pr` refuses with `branch_exists` and says
 `rebase`, `take` and `merge` resolve the usual conflicts between parallel attempts
 before reporting any, deterministically and without an agent: both sides adding at the
 same point (an enum variant, a `mod` line, a subcommand, a test, a README section) keeps
-both; the same change twice, or a whitespace-only change, keeps the real change; edits to
+both, unless the two additions define the same name or share a top-level statement
+(ignoring comments, whitespace and lone punctuation): that is the same fix written twice
+in different words, and keeping both would not build (#211), so it stays a conflict;
+the same change twice, or a whitespace-only change, keeps the real change; edits to
 different words of one line merge token by token; `Cargo.lock` merges by package and
 `*.json` by key. What was resolved is listed as `R  path  (strategy, N hunks)` (in
 `--json`: `resolved`) and in the snapshot's `auto_resolved` metadata. Hunks that are left
