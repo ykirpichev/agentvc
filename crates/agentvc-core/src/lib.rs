@@ -46,6 +46,7 @@ pub mod story;
 pub mod sync;
 pub mod syncmerge;
 pub mod tags;
+pub mod tool_model;
 pub mod undo;
 pub mod view;
 pub mod viewgit;

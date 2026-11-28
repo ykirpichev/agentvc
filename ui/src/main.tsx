@@ -9,6 +9,7 @@ import { ThemeProvider } from './theme/theme'
 import './styles.css'
 import './review.css'
 import './graph.css'
+import './native.css'
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>

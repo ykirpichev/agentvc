@@ -7,6 +7,47 @@ export type Surface = 'sidebar' | 'panel'
 /** Commands a webview may run; nothing else it sends is acted on. */
 export const WEBVIEW_COMMANDS = ['agentvc.startDaemon', 'agentvc.refresh', 'agentvc.install', 'agentvc.setup'] as const
 
+/**
+ * The editor theme variables (without `--vscode-`) the frame gets, so its
+ * text, inputs, dropdowns and buttons look like the editor's own controls.
+ */
+export const THEME_VARS = [
+  'font-family',
+  'font-size',
+  'font-weight',
+  'foreground',
+  'descriptionForeground',
+  'errorForeground',
+  'focusBorder',
+  'input-background',
+  'input-foreground',
+  'input-border',
+  'input-placeholderForeground',
+  'dropdown-background',
+  'dropdown-foreground',
+  'dropdown-border',
+  'button-background',
+  'button-foreground',
+  'button-hoverBackground',
+  'button-border',
+  'button-secondaryBackground',
+  'button-secondaryForeground',
+  'button-secondaryHoverBackground',
+  'checkbox-background',
+  'checkbox-border',
+  'textLink-foreground',
+  'textLink-activeForeground',
+  'textCodeBlock-background',
+  'widget-border',
+  'panel-border',
+  'sideBar-background',
+  'sideBar-border',
+  'editor-background',
+  'editorWidget-background',
+  'list-hoverBackground',
+  'list-inactiveSelectionBackground',
+] as const
+
 export function nonce(): string {
   const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'
   let s = ''
@@ -31,7 +72,7 @@ export function originOf(url: string): string {
  */
 export function frameHtml(o: { base: string; path: string; surface: Surface; folder?: string; cspSource: string; nonce: string }): string {
   const origin = originOf(o.base)
-  const cfg = JSON.stringify({ base: o.base.replace(/\/+$/, ''), path: o.path, surface: o.surface, folder: o.folder ?? '', origin })
+  const cfg = JSON.stringify({ base: o.base.replace(/\/+$/, ''), path: o.path, surface: o.surface, folder: o.folder ?? '', origin, vars: THEME_VARS })
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -62,15 +103,29 @@ export function frameHtml(o: { base: string; path: string; surface: Surface; fol
   const sep = cfg.path.includes('?') ? '&' : '?';
   frame.src = cfg.base + cfg.path + sep + q.toString();
   const toFrame = (m) => frame.contentWindow && frame.contentWindow.postMessage(m, cfg.origin);
+  const vars = () => {
+    const cs = getComputedStyle(document.documentElement);
+    const out = {};
+    for (const k of cfg.vars) {
+      const v = cs.getPropertyValue('--vscode-' + k).trim();
+      if (v) out[k] = v;
+    }
+    return out;
+  };
+  const sendTheme = () => toFrame({ type: 'agentvc.theme', theme: theme(), bg: bg(), vars: vars() });
+  frame.addEventListener('load', sendTheme);
   // VS Code swaps the body class and the html style's color variables on a theme change.
-  const follow = new MutationObserver(() => toFrame({ type: 'agentvc.theme', theme: theme(), bg: bg() }));
+  const follow = new MutationObserver(sendTheme);
   follow.observe(document.body, { attributes: true, attributeFilter: ['class'] });
   follow.observe(document.documentElement, { attributes: true, attributeFilter: ['style'] });
   window.addEventListener('message', (e) => {
     const d = e.data;
     if (!d || typeof d.type !== 'string' || !d.type.startsWith('agentvc.')) return;
     if (e.source === frame.contentWindow) {
-      if (e.origin === cfg.origin) vscode.postMessage(d);
+      if (e.origin !== cfg.origin) return;
+      // The page listens once it has rendered: send the theme then too.
+      if (d.type === 'agentvc.ready') sendTheme();
+      vscode.postMessage(d);
       return;
     }
     if (d.type === 'agentvc.navigate') toFrame(d);

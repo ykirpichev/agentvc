@@ -480,3 +480,89 @@
 .rv-empty-lead {
   margin: 4px 0 0;
 }
+
+/* Workspace agent settings, laid out like the editor's Settings: a name, one
+   line on what it does, then the control at a readable width. */
+.set-list {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  margin: 4px 0 2px;
+}
+.set-row {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.set-name {
+  font-weight: 600;
+  color: var(--text);
+}
+.set-help {
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.4;
+}
+.set-help code {
+  font-size: 0.95em;
+}
+.set-control {
+  display: flex;
+  max-width: 420px;
+  margin-top: 3px;
+}
+.set-control > input,
+.set-control > .native-select,
+.set-control > .model-pick {
+  flex: 1;
+  min-width: 0;
+}
+.set-control .set-num {
+  flex: 0 0 120px;
+}
+.set-control input,
+.set-control select,
+.model-pick input,
+.model-pick select {
+  padding: 5px 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+}
+.set-control input:disabled,
+.set-control select:disabled {
+  opacity: 0.7;
+}
+.native-select {
+  display: inline-flex;
+  min-width: 0;
+}
+.native-select > select {
+  flex: 1;
+  min-width: 0;
+}
+.model-pick {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+.ag-settings .ag-start-row {
+  margin-top: 6px;
+}
+:root[data-native] .set-help {
+  font-size: inherit;
+}
+:root[data-native] .set-name {
+  color: var(--vscode-foreground, var(--text));
+}
+.set-help a {
+  color: var(--accent-text);
+}
+:root[data-native] .set-help a {
+  color: var(--vscode-textLink-foreground, var(--accent-text));
+}

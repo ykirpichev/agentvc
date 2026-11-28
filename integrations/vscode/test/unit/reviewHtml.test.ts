@@ -1,5 +1,5 @@
 import * as assert from 'node:assert/strict'
-import { WEBVIEW_COMMANDS, frameHtml, offlineHtml, originOf } from '../../src/reviewHtml'
+import { THEME_VARS, WEBVIEW_COMMANDS, frameHtml, offlineHtml, originOf } from '../../src/reviewHtml'
 
 describe('reviewHtml', () => {
   it('frames the daemon UI with a CSP limited to its origin', () => {
@@ -20,7 +20,12 @@ describe('reviewHtml', () => {
       surface: 'sidebar',
       folder: '/repo/wt',
       origin: 'http://127.0.0.1:7420',
+      vars: [...THEME_VARS],
     })
+    // The editor's theme (controls and fonts) follows the frame, on load and on change.
+    assert.match(html, /addEventListener\('load', sendTheme\)/)
+    assert.match(html, /d\.type === 'agentvc\.ready'\) sendTheme\(\)/)
+    assert.ok(THEME_VARS.includes('button-background') && THEME_VARS.includes('dropdown-background'))
   })
 
   it('cannot be broken out of by a folder name', () => {

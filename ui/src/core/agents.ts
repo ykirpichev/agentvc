@@ -78,6 +78,26 @@ const PERMISSION_SHORT: Record<AgentPermissions, string> = {
   bypass: 'never asks',
 }
 
+/**
+ * Claude Code's model aliases (`claude --model`, `/model`). Aliases, not
+ * versions, so they keep meaning the latest model of each kind.
+ */
+export const CLAUDE_MODELS: { id: string; label: string }[] = [
+  { id: 'opus', label: 'Opus · complex work' },
+  { id: 'sonnet', label: 'Sonnet · everyday coding' },
+  { id: 'haiku', label: 'Haiku · fast, simple tasks' },
+  { id: 'opusplan', label: 'Opus plan, Sonnet builds' },
+  { id: 'opus[1m]', label: 'Opus · 1M context' },
+  { id: 'sonnet[1m]', label: 'Sonnet · 1M context' },
+  { id: 'fable', label: 'Fable · hardest, longest tasks' },
+]
+
+/** Where a runner's own model choice is made, for "Default (…)". */
+export const TOOL_MODEL_HOME: Partial<Record<AgentRunner, string>> = {
+  claude: 'Claude Code',
+  codex: 'Codex',
+}
+
 /** The default when neither the workspace nor the repo sets one. */
 export const DEFAULT_PERMISSIONS: AgentPermissions = 'auto'
 

@@ -2,18 +2,18 @@
 // branch, and one page per agent. Every card answers in place, so a person
 // can keep 10 to 20 agents moving without opening each one.
 
-import { useState, type FormEvent } from 'react'
+import { useState, type FormEvent, type ReactNode } from 'react'
 import { Link, useParams } from 'react-router'
 import { api, ref } from '../api/client'
 import { useLive } from '../api/live'
-import type { Agent, AgentList, AgentPermissions, AgentRunner, AgentSettings } from '../api/types'
+import type { Agent, AgentList, AgentPermissions, AgentRunner, AgentSettings, ToolModel } from '../api/types'
 import { useResource } from '../api/useResource'
 import { ErrorNote, Skeleton } from '../components/bits'
 import { DiffView } from '../components/DiffView'
 import { ReviewBar, ThreadList } from '../components/Comments'
 import { scrollToThread, useThreads } from '../core/comments'
 import { useToast } from '../components/Toaster'
-import { agentLink, agentState, agentsOn, DEFAULT_PERMISSIONS, needsYou, PERMISSION_WORDS, PERMISSIONS_LINK, resultWords, RUNNER_WORDS, settingsLine, working } from '../core/agents'
+import { agentLink, agentState, agentsOn, CLAUDE_MODELS, DEFAULT_PERMISSIONS, needsYou, PERMISSION_WORDS, PERMISSIONS_LINK, resultWords, RUNNER_WORDS, settingsLine, TOOL_MODEL_HOME, working } from '../core/agents'
 import { branchLink, codeLink } from '../core/links'
 import { duration, money, plural, timeAgo } from '../lib/format'
 import { useReview } from './reviewContext'
@@ -338,17 +338,20 @@ export function StartAgent({
         <div className="ag-opts">
           <label>
             Runner
-            <select value={runner} onChange={(e) => setRunner(e.target.value as AgentRunner | '')}>
-              <option value="">Workspace's ({RUNNER_WORDS[settings?.runner ?? 'claude']})</option>
-              {(['claude', 'codex', 'cursor'] as const).map((r) => (
-                <option key={r} value={r}>
-                  {RUNNER_WORDS[r]}
-                </option>
-              ))}
-            </select>
+            <span className="native-select">
+              <select value={runner} onChange={(e) => setRunner(e.target.value as AgentRunner | '')}>
+                <option value="">Workspace's ({RUNNER_WORDS[settings?.runner ?? 'claude']})</option>
+                {(['claude', 'codex', 'cursor'] as const).map((r) => (
+                  <option key={r} value={r}>
+                    {RUNNER_WORDS[r]}
+                  </option>
+                ))}
+              </select>
+            </span>
           </label>
           <label>
-            Model <input id="agent-model" value={model} onChange={(e) => setModel(e.target.value)} placeholder={settings?.model ?? 'default'} />
+            Model{' '}
+            <StartModel workspace={workspace} runner={runner || settings?.runner || 'claude'} inherited={settings?.model} value={model} onChange={setModel} />
           </label>
           <label>
             Check command <input id="agent-check" value={check} onChange={(e) => setCheck(e.target.value)} placeholder={settings?.check ?? 'none'} />
@@ -373,6 +376,157 @@ export function StartAgent({
   )
 }
 
+/** "Default (…)" for the model: the repo's default, else the tool's own choice. */
+function defaultModel(runner: AgentRunner, repo: string | undefined, tool: ToolModel | undefined, prefix = 'Default'): { label: string; title?: string } {
+  if (repo) return { label: `${prefix} (${repo}, repo setting)` }
+  const home = TOOL_MODEL_HOME[runner]
+  if (tool && home)
+    return {
+      label: `${prefix} (${tool.model}, as in ${home})`,
+      title: `From ${tool.source}`,
+    }
+  if (home) return { label: `${prefix} (${home}'s own choice)` }
+  return { label: `${prefix} (the tool's own choice)` }
+}
+
+const OTHER = '\u0000other'
+
+/**
+ * The model: for Claude Code a dropdown of its aliases with the tool's own
+ * choice as the default, plus "Other model name…"; for other runners a name.
+ */
+function ModelPicker({
+  id,
+  runner,
+  value,
+  onChange,
+  fallback,
+  disabled,
+}: {
+  id: string
+  runner: AgentRunner
+  value: string
+  onChange: (v: string) => void
+  fallback: { label: string; title?: string }
+  disabled?: boolean
+}) {
+  const known = CLAUDE_MODELS.some((m) => m.id === value)
+  const [other, setOther] = useState(value !== '' && !known)
+  if (runner !== 'claude')
+    return <input id={id} value={value} disabled={disabled} onChange={(e) => onChange(e.target.value)} placeholder={fallback.label} title={fallback.title} />
+  return (
+    <span className="model-pick">
+      <span className="native-select">
+        <select
+          id={id}
+          value={other ? OTHER : value}
+          disabled={disabled}
+          title={value ? undefined : fallback.title}
+          onChange={(e) => {
+            const v = e.target.value
+            setOther(v === OTHER)
+            onChange(v === OTHER ? (known ? '' : value) : v)
+          }}
+        >
+          <option value="">{fallback.label}</option>
+          {CLAUDE_MODELS.map((m) => (
+            <option key={m.id} value={m.id}>
+              {m.label}
+            </option>
+          ))}
+          <option value={OTHER}>Other model name…</option>
+        </select>
+      </span>
+      {other && (
+        <input
+          aria-label="Model name"
+          value={value}
+          disabled={disabled}
+          autoFocus
+          onChange={(e) => onChange(e.target.value)}
+          placeholder="full model name, as claude --model takes it"
+        />
+      )}
+    </span>
+  )
+}
+
+/** One setting, laid out like the editor's Settings: name, one line, control. */
+function Setting({ id, name, help, children }: { id: string; name: string; help: ReactNode; children: ReactNode }) {
+  return (
+    <div className="set-row">
+      <label className="set-name" htmlFor={id}>
+        {name}
+      </label>
+      <div className="set-help">{help}</div>
+      <div className="set-control">{children}</div>
+    </div>
+  )
+}
+
+function Select({
+  id,
+  value,
+  disabled,
+  onChange,
+  children,
+}: {
+  id: string
+  value: string
+  disabled?: boolean
+  onChange: (v: string) => void
+  children: ReactNode
+}) {
+  return (
+    <span className="native-select">
+      <select id={id} value={value} disabled={disabled} onChange={(e) => onChange(e.target.value)}>
+        {children}
+      </select>
+    </span>
+  )
+}
+
+/** What the model setting means for a runner. */
+function modelHelp(runner: AgentRunner, tool: ToolModel | undefined): ReactNode {
+  if (runner === 'claude')
+    return (
+      <>
+        Default runs the model you picked in Claude Code (<code>/model</code>, or the model menu of the Claude Code extension in VS Code and Cursor)
+        {tool ? `, now ${tool.model} from ${tool.source}` : ''}.
+      </>
+    )
+  if (runner === 'codex')
+    return (
+      <>
+        Default runs the model in your Codex <code>config.toml</code>
+        {tool ? `, now ${tool.model}` : ''}.
+      </>
+    )
+  if (runner === 'cursor')
+    return "Default is the Cursor agent CLI's own choice. Cursor's chat model menu can't be read by other tools, so name a model here to pin one."
+  return 'Passed to your command as $AGENTVC_AGENT_MODEL.'
+}
+
+/** The start form's model: the workspace's, else the tool's own choice. */
+function StartModel({
+  workspace,
+  runner,
+  inherited,
+  value,
+  onChange,
+}: {
+  workspace: string
+  runner: AgentRunner
+  inherited?: string
+  value: string
+  onChange: (v: string) => void
+}) {
+  const data = useResource(`agent-settings:${workspace}`, () => api.agentSettings(workspace))
+  const tool = data.data?.tool_models?.[runner]
+  const fallback = inherited ? { label: `Workspace's (${inherited})` } : defaultModel(runner, data.data?.defaults.model, tool, "Workspace's")
+  return <ModelPicker key={runner} id="agent-model" runner={runner} value={value} onChange={onChange} fallback={fallback} />
+}
+
 /** A workspace's agent settings: what agents started there inherit. */
 export function AgentSettingsForm({ workspace }: { workspace: string }) {
   const steer = useCanSteer()
@@ -383,17 +537,20 @@ export function AgentSettingsForm({ workspace }: { workspace: string }) {
   const [busy, setBusy] = useState(false)
   if (data.error) return <ErrorNote error={data.error} />
   if (!data.data) return <Skeleton rows={2} />
-  const { settings, defaults, machine_limit } = data.data
+  const { settings, defaults, machine_limit, tool_models } = data.data
   const s = draft ?? settings
   const set = (patch: Partial<AgentSettings>) => setDraft({ ...s, ...patch })
   const runner = s.runner ?? defaults.runner ?? 'claude'
+  const tool = tool_models?.[runner]
   const dirty = draft !== null && JSON.stringify(draft) !== JSON.stringify(settings)
   const save = async (e: FormEvent) => {
     e.preventDefault()
     setBusy(true)
     try {
       await api.setAgentSettings(workspace, s)
-      toast.ok('Saved. New agents in this workspace use these settings.', { undo: false })
+      toast.ok('Saved. New agents in this workspace use these settings.', {
+        undo: false,
+      })
       setDraft(null)
     } catch (err) {
       toast.error(err)
@@ -402,91 +559,126 @@ export function AgentSettingsForm({ workspace }: { workspace: string }) {
       refresh()
     }
   }
-  const txt = (k: 'model' | 'check' | 'command') => ({
+  const txt = (k: 'check' | 'command') => ({
     value: s[k] ?? '',
     onChange: (e: { target: { value: string } }) => set({ [k]: e.target.value || undefined }),
     disabled: !steer,
   })
+  const id = (k: string) => `agent-${k}-${workspace}`
   return (
     <form className="ag-start ag-settings" id="agent-settings" onSubmit={(e) => void save(e)}>
       <h2 className="rv-h2">Agent settings</h2>
       <p className="muted ag-hint">
-        Every agent started in this workspace uses these, unless you change them when you start it. Agents reuse your own Claude Code settings and MCP
-        servers · <Link to={PERMISSIONS_LINK}>What agents may do</Link>
+        Every agent started in this workspace uses these, unless you change them when you start it. Agents reuse your own Claude Code settings and MCP servers.
       </p>
-      <div className="ag-opts">
-        <label>
-          Runner
-          <select value={s.runner ?? ''} disabled={!steer} onChange={(e) => set({ runner: (e.target.value || undefined) as AgentRunner | undefined })}>
+      <div className="set-list">
+        <Setting id={id('runner')} name="Runner" help="The coding agent that does the work.">
+          <Select id={id('runner')} value={s.runner ?? ''} disabled={!steer} onChange={(v) => set({ runner: (v || undefined) as AgentRunner | undefined })}>
             <option value="">Default ({RUNNER_WORDS[defaults.runner ?? 'claude']})</option>
             {(Object.keys(RUNNER_WORDS) as AgentRunner[]).map((r) => (
               <option key={r} value={r}>
                 {RUNNER_WORDS[r]}
               </option>
             ))}
-          </select>
-        </label>
+          </Select>
+        </Setting>
         {runner === 'command' && (
-          <label>
-            Command <input {...txt('command')} placeholder={defaults.command ?? 'prompt is in $AGENTVC_AGENT_PROMPT'} />
-          </label>
+          <Setting
+            id={id('command')}
+            name="Command"
+            help={
+              <>
+                Runs in the agent's copy with the prompt in <code>$AGENTVC_AGENT_PROMPT</code>.
+              </>
+            }
+          >
+            <input id={id('command')} {...txt('command')} placeholder={defaults.command ?? 'e.g. my-agent --yes'} />
+          </Setting>
         )}
-        <label>
-          Model <input {...txt('model')} placeholder={defaults.model ?? 'default'} />
-        </label>
-        <label>
-          Check command <input {...txt('check')} placeholder={defaults.check ?? 'none, e.g. cargo test'} />
-        </label>
+        <Setting id={id('model')} name="Model" help={modelHelp(runner, tool)}>
+          <ModelPicker
+            key={`${runner}:${settings.model ?? ''}`}
+            id={id('model')}
+            runner={runner}
+            value={s.model ?? ''}
+            disabled={!steer}
+            onChange={(v) => set({ model: v || undefined })}
+            fallback={defaultModel(runner, defaults.model, tool)}
+          />
+        </Setting>
+        <Setting id={id('check')} name="Check command" help="Runs when an agent stops; a failure shows on the agent's page.">
+          <input id={id('check')} {...txt('check')} placeholder={defaults.check ?? 'none, e.g. cargo test'} />
+        </Setting>
         {runner === 'claude' && (
-          <label>
-            Permissions
-            <select value={s.permissions ?? ''} disabled={!steer} onChange={(e) => set({ permissions: (e.target.value || undefined) as AgentPermissions | undefined })}>
+          <Setting
+            id={id('permissions')}
+            name="Permissions"
+            help={
+              <>
+                What agents may do without asking you. <Link to={PERMISSIONS_LINK}>See what each level allows</Link>
+              </>
+            }
+          >
+            <Select
+              id={id('permissions')}
+              value={s.permissions ?? ''}
+              disabled={!steer}
+              onChange={(v) =>
+                set({
+                  permissions: (v || undefined) as AgentPermissions | undefined,
+                })
+              }
+            >
               <option value="">Default ({PERMISSION_WORDS[defaults.permissions ?? DEFAULT_PERMISSIONS]})</option>
               {(Object.keys(PERMISSION_WORDS) as AgentPermissions[]).map((p) => (
                 <option key={p} value={p}>
                   {PERMISSION_WORDS[p]}
                 </option>
               ))}
-            </select>
-          </label>
+            </Select>
+          </Setting>
         )}
         {runner === 'claude' && (
-          <label>
-            Sandbox commands
-            <select
+          <Setting id={id('sandbox')} name="Sandbox commands" help="Commands the agent runs can write only inside its own copy.">
+            <Select
+              id={id('sandbox')}
               value={s.sandbox === undefined ? '' : s.sandbox ? 'on' : 'off'}
               disabled={!steer}
-              onChange={(e) => set({ sandbox: e.target.value === '' ? undefined : e.target.value === 'on' })}
+              onChange={(v) => set({ sandbox: v === '' ? undefined : v === 'on' })}
             >
               <option value="">Default ({defaults.sandbox ? 'on' : 'off'})</option>
-              <option value="on">On: commands write only in the agent's copy</option>
+              <option value="on">On</option>
               <option value="off">Off</option>
-            </select>
-          </label>
+            </Select>
+          </Setting>
         )}
-        <label>
-          At once
+        <Setting id={id('max')} name="At once" help={`Agents working at the same time in this workspace. This machine runs at most ${machine_limit}.`}>
           <input
+            id={id('max')}
+            className="set-num"
             type="number"
             min={1}
             value={s.max ?? ''}
             disabled={!steer}
-            onChange={(e) => set({ max: e.target.value ? Math.max(1, Number(e.target.value)) : undefined })}
-            placeholder={`no limit (machine cap ${machine_limit})`}
+            onChange={(e) =>
+              set({
+                max: e.target.value ? Math.max(1, Number(e.target.value)) : undefined,
+              })
+            }
+            placeholder="no limit"
           />
-        </label>
+        </Setting>
       </div>
       {steer && (
         <div className="ag-start-row">
-          <span className="ag-spacer" />
+          <button type="submit" className="btn btn-primary" disabled={busy || !dirty}>
+            Save
+          </button>
           {dirty && (
             <button type="button" className="btn btn-ghost" disabled={busy} onClick={() => setDraft(null)}>
               Cancel
             </button>
           )}
-          <button type="submit" className="btn btn-primary" disabled={busy || !dirty}>
-            Save
-          </button>
         </div>
       )}
     </form>
