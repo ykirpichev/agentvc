@@ -255,6 +255,26 @@ pub static TOOLS: &[Tool] = &[
         argv: |a| Ok(Argv::new(&["agent", "ask"]).pos(Some(a.req("question")?)).done()),
     },
     Tool {
+        name: "commit_review",
+        title: "Commit a review",
+        description: "Only for agents started from the agentvc control center: commit what you changed since your last review as one review (one PR) on a new branch stacked on the previous one, then keep working on top of it. Use it instead of git branches and commits when the person wants several reviews or a stack of PRs. The last review is committed for you when you stop. Returns {branch, commit, stack}.",
+        read_only: false,
+        destructive: false,
+        open_world: false,
+        params: || {
+            vec![
+                ("branch", s("A short name for this review's branch, e.g. \"cli-missing-input\"."), true),
+                ("message", s("The commit message: what this review does."), true),
+            ]
+        },
+        argv: |a| {
+            Ok(Argv::new(&["agent", "commit"])
+                .opt("message", Some(a.req("message")?))
+                .pos(Some(a.req("branch")?))
+                .done())
+        },
+    },
+    Tool {
         name: "approve",
         title: "Approve tool call",
         description: "Claude Code's permission prompt tool for agents started from the agentvc control center: asks the person to approve a tool call and waits. Returns {decision}.",

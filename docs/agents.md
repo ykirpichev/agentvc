@@ -28,6 +28,12 @@ losing track of them.
    - with `--revise` on `start`, landing makes the agent's commit the start
      branch's new version and restacks the branches above it.
 
+   - an agent asked for several reviews (a stack of PRs) commits each one
+     on its own branch with `commit_review` (below), stacked on the one
+     before; landing adopts the whole chain onto the stack in order, and
+     you submit the PRs from there. Branches it made with plain git in its
+     worktree count the same way.
+
    Landing goes through the workspace's edit queue. If an agent is working
    in that workspace's own checkout, the edit waits until it stops.
 
@@ -73,8 +79,14 @@ A revision of a branch that moved is refused with `branch_moved`.
 
 - **Claude Code** (default): `claude -p --output-format stream-json`, run in
   the worktree with agentvc's MCP server attached. Its steps, cost and turns
-  are recorded as they stream. Two MCP tools reach you:
+  are recorded as they stream; while it works, its time and its changes so
+  far (uncommitted files included) are live, and its cost arrives when the
+  turn ends. Two MCP tools reach you:
   - `ask_human`: the agent asks one question and waits for your reply;
+  - `commit_review`: commits what changed since its last review as one
+    review on a new branch stacked on the last, and the agent goes on on
+    top of it (`agentvc agent commit <branch> -m <message>` from a
+    command runner);
   - `approve`: the permission prompt tool. A command the agent may not run
     on its own becomes an Approve / Deny request instead of a failure.
 
@@ -134,6 +146,9 @@ Guard rails on every Claude Code agent, whatever the level:
 - a `PreToolUse` hook (`agentvc agent guard`) refuses file edits outside the
   agent's worktree or inside `.git`;
 - `git push` is denied; agentvc commits and lands the work after review;
+- the same hook refuses `git commit`, `git checkout -b`, `git switch -c` and
+  `gh pr create/merge/edit/ready`, pointing the agent at `commit_review`
+  instead, so its reviews reach your stack;
 - `permissions.additionalDirectories` and `permissions.defaultMode` from your
   local settings are not passed on.
 
@@ -189,4 +204,5 @@ says how to allow it.
 `agent_busy`, `needs_approval`, `no_question`, `reply_required`,
 `allow_required`, `not_running`, `not_ready`, `nothing_to_land`,
 `branch_moved`, `agent_closed`, `not_an_agent`, `remote_agents_off`,
-`bad_setting`, `command_required`, `remote_shell_off`.
+`bad_setting`, `command_required`, `remote_shell_off`, `message_required`,
+`bad_branch`, `branch_exists`, `nothing_to_commit`.

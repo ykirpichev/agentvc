@@ -12,6 +12,12 @@
 //! - [`Mode::Revise`]: the start branch moves to the agent's commit and the
 //!   branches above it restack (like `stack modify`).
 //!
+//! An agent asked for several reviews commits each one on its own branch
+//! with [`commit_review`] (`agentvc agent commit`, the MCP tool
+//! `commit_review`), each stacked on the one before. Branches it made with
+//! plain git in its worktree count the same way ([`Agent::stack`]); landing
+//! puts the whole chain on the workspace's stack, in order.
+//!
 //! Everything lives in files under `<git-common-dir>/agentvc/agents/agN/`,
 //! so the CLI, the daemon, the MCP server inside the agent and the worker
 //! process that supervises it all read and write the same state:
@@ -130,7 +136,15 @@ const POLL: Duration = Duration::from_millis(300);
 const TAIL_LINES: usize = 20;
 
 const SYSTEM_PROMPT: &str = "You are one of several agents a person runs from the agentvc control center. \
-You work in your own git worktree; do not push, switch branches or commit (agentvc commits your work when you stop). \
+You work in your own git worktree, on a branch agentvc made for you. agentvc does the version control here, \
+not you: do not run git commit, git checkout -b, git switch -c, git push or gh, and do not open pull requests. \
+agentvc commits what you leave in the worktree when you stop; the person reviews it, lands it on their stack \
+and opens the PRs from there. \
+When the person wants several reviews (several PRs, or a stack of PRs), do them one at a time: finish one \
+change, then call the commit_review tool with a short branch name and a commit message. It commits that \
+change as its own review and you continue on a new branch stacked on top; the last review is committed for \
+you when you stop. This needs no permission and replaces git branches, commits and pushes. \
+The attempt tools (fork, snapshot, promote, pr, land, run) are not for you. \
 When you need a decision from the person, call the ask_human tool with one short question instead of guessing; \
 they answer in the control center. When the person sends review comments, address each one, reply in its \
 thread with reply_comment and mark it done with resolve_comment; before you finish, call review_comments to check \
@@ -333,6 +347,11 @@ pub struct Agent {
     pub mode: Mode,
     /// The agent's own branch, checked out in `worktree`.
     pub branch: String,
+    /// The branches holding its work, bottom first, when it made its own
+    /// (one review each, with [`commit_review`] or plain git). Empty while
+    /// all its work is on `branch`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stack: Vec<String>,
     pub worktree: PathBuf,
     /// `claude`, `codex`, `cursor` or `command`.
     pub runner: String,
@@ -370,7 +389,11 @@ pub struct Agent {
     pub started_at: Option<i64>,
     #[serde(default)]
     pub finished_at: Option<i64>,
-    /// Seconds spent running, summed over turns.
+    /// When the turn it is working on began.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_started_at: Option<i64>,
+    /// Seconds spent running, summed over turns (and, on read, the turn
+    /// under way).
     #[serde(default)]
     pub seconds: i64,
     #[serde(default)]
@@ -1156,6 +1179,7 @@ fn start_inner(
         },
         mode: req.mode,
         branch,
+        stack: Vec::new(),
         worktree: canon(&wt),
         command: if runner == "command" {
             eff.command.clone()
@@ -1182,6 +1206,7 @@ fn start_inner(
         updated_at: created,
         started_at: None,
         finished_at: None,
+        turn_started_at: None,
         seconds: 0,
         cost_usd: 0.0,
         turns: 0,
@@ -1416,6 +1441,11 @@ fn refresh(
             }
         }
     }
+    if a.state.is_working() {
+        if let Some(t) = a.turn_started_at {
+            a.seconds += (now() - t).max(0);
+        }
+    }
     if a.state.is_done() {
         if let Some(t) = tips(&a) {
             // A resolution is stale once its branch moved off the tip whose
@@ -1519,7 +1549,7 @@ pub struct AgentDetail {
 
 pub fn show(cwd: &Path, id: &str) -> Result<AgentDetail> {
     let dir = agent_dir(cwd, id)?;
-    let agent = list(cwd, true)?
+    let mut agent = list(cwd, true)?
         .agents
         .into_iter()
         .find(|a| a.id == id.trim())
@@ -1527,6 +1557,11 @@ pub fn show(cwd: &Path, id: &str) -> Result<AgentDetail> {
             kind: "agent",
             id: id.to_string(),
         })?;
+    // While it works, what it changed so far, uncommitted files included.
+    if agent.state.is_active() && agent.worktree.is_dir() {
+        agent.result = Some(changes_of(&agent, true));
+        agent.stack = stack_of(&agent);
+    }
     Ok(AgentDetail {
         agent,
         steps: steps(&dir, 200),
@@ -1801,76 +1836,97 @@ pub fn land(cwd: &Path, id: &str) -> Result<(Agent, EditOutcome)> {
         ));
     }
     let w = agent_window(cwd, &a)?;
-    let tip = w.branch_tip(&a.branch).ok_or_else(|| {
-        agent_err(
-            "no_branch",
-            format!("the agent's branch {} is gone", a.branch),
-        )
-    })?;
-    if tip == a.start.commit {
+    // A conflict's resolution is one tree; other agents may have made one
+    // review per branch.
+    let parts = if a.mode == Mode::Resolve {
+        vec![a.branch.clone()]
+    } else {
+        parts_of(&a)
+    };
+    let mut tips = Vec::new();
+    for p in &parts {
+        tips.push(
+            w.branch_tip(p)
+                .ok_or_else(|| agent_err("no_branch", format!("the agent's branch {p} is gone")))?,
+        );
+    }
+    if tips.last() == Some(&a.start.commit) {
         return Err(agent_err(
             "nothing_to_land",
             format!("{id} changed nothing"),
         ));
     }
     let from = format!("agent:{id}");
-    let (op, landed_on) = match a.mode {
-        Mode::New => (
-            Op::Adopt {
-                branch: a.branch.clone(),
-                parent: a.start.branch.clone(),
-            },
-            a.branch.clone(),
-        ),
-        Mode::Revise => (
-            Op::Revise {
-                branch: a.start.branch.clone(),
-                commit: tip.clone(),
-                base: a.start.commit.clone(),
-            },
-            a.start.branch.clone(),
-        ),
-        Mode::Resolve => {
-            let conflict = a
-                .conflict
-                .clone()
-                .ok_or_else(|| agent_err("bad_mode", format!("{id} has no conflict to resolve")))?;
-            let left = markers_in(&a);
-            if !left.is_empty() {
-                return Err(agent_err_with(
-                    "unresolved_conflicts",
-                    format!("conflict markers are left in {}", left.join(", ")),
-                    json!({ "paths": left }),
-                ));
-            }
-            let tree = w
-                .repo
-                .git(&["rev-parse", &format!("{tip}^{{tree}}")], None)?;
-            (
-                Op::Resolve {
-                    branch: a.start.branch.clone(),
-                    tree,
-                    conflict,
-                },
-                a.start.branch.clone(),
-            )
+    // Each review joins the stack on the one before; a revise moves the
+    // start branch to the first.
+    let mut ops = Vec::new();
+    let mut parent = a.start.branch.clone();
+    if a.mode == Mode::Resolve {
+        let conflict = a
+            .conflict
+            .clone()
+            .ok_or_else(|| agent_err("bad_mode", format!("{id} has no conflict to resolve")))?;
+        let left = markers_in(&a);
+        if !left.is_empty() {
+            return Err(agent_err_with(
+                "unresolved_conflicts",
+                format!("conflict markers are left in {}", left.join(", ")),
+                json!({ "paths": left }),
+            ));
         }
-    };
-    // The branch must not stay checked out in the agent's worktree, or the
-    // workspace could not check it out.
+        let tree = w
+            .repo
+            .git(&["rev-parse", &format!("{}^{{tree}}", tips[0])], None)?;
+        ops.push(Op::Resolve {
+            branch: a.start.branch.clone(),
+            tree,
+            conflict,
+        });
+    } else {
+        for (i, p) in parts.iter().enumerate() {
+            if i == 0 && a.mode == Mode::Revise {
+                ops.push(Op::Revise {
+                    branch: a.start.branch.clone(),
+                    commit: tips[0].clone(),
+                    base: a.start.commit.clone(),
+                });
+                continue;
+            }
+            ops.push(Op::Adopt {
+                branch: p.clone(),
+                parent: parent.clone(),
+            });
+            parent = p.clone();
+        }
+    }
+    let landed_on = parent;
+    // The branches must not stay checked out in the agent's worktree, or
+    // the workspace could not check them out.
     remove_worktree(&w, &a);
     // Branches above that conflict go to agents of their own (or stop for
     // the person), as the workspace's `conflicts` setting says.
-    let out = workspace::edit_full(
-        cwd,
-        &a.workspace,
-        op,
-        Some(&from),
-        false,
-        workspace::OnConflict::Resolve,
-    )?;
-    if a.mode != Mode::New && out.outcome == RequestStatus::Applied {
+    let mut out = None;
+    for op in ops {
+        out = Some(workspace::edit_full(
+            cwd,
+            &a.workspace,
+            op,
+            Some(&from),
+            false,
+            workspace::OnConflict::Resolve,
+        )?);
+    }
+    let out = out.expect("at least one branch to land");
+    // Its own branch, when the work went elsewhere (reviews on branches of
+    // their own).
+    let own_unused = !parts.contains(&a.branch)
+        && w.branch_tip(&a.branch).as_deref() == Some(a.start.commit.as_str());
+    if own_unused {
         let _ = w.repo.git(&["branch", "-D", &a.branch], None);
+    }
+    // A revise or a resolve moved the start branch to the first commit.
+    if a.mode != Mode::New && out.outcome == RequestStatus::Applied {
+        let _ = w.repo.git(&["branch", "-D", &parts[0]], None);
     }
     let landing = Landing {
         outcome: out.outcome,
@@ -1905,8 +1961,12 @@ pub fn discard(cwd: &Path, id: &str) -> Result<Agent> {
         let _ = stop(cwd, id);
     }
     let w = agent_window(cwd, &a)?;
+    let parts = parts_of(&a);
     remove_worktree(&w, &a);
     let _ = w.repo.git(&["branch", "-D", &a.branch], None);
+    for p in parts.iter().filter(|p| **p != a.branch) {
+        let _ = w.repo.git(&["branch", "-D", p], None);
+    }
     update(&dir, |a| {
         a.state = AgentState::Discarded;
         a.stop_requested = true;
@@ -2114,7 +2174,10 @@ fn turn_command(a: &Agent, dir: &Path, exe: &Path, prompt: &str) -> Command {
                 .arg("--mcp-config")
                 .arg(mcp.to_string())
                 .args(["--permission-prompt-tool", "mcp__agentvc__approve"])
-                .args(["--allowedTools", "mcp__agentvc__ask_human"])
+                .args([
+                    "--allowedTools",
+                    "mcp__agentvc__ask_human,mcp__agentvc__commit_review",
+                ])
                 .arg("--append-system-prompt")
                 .arg(SYSTEM_PROMPT);
             if let Some(s) = &a.session_id {
@@ -2172,13 +2235,24 @@ fn commit_work(a: &Agent) -> Result<Option<String>> {
 }
 
 fn result_of(a: &Agent) -> AgentResult {
+    changes_of(a, false)
+}
+
+/// What the agent changed since it started: up to its committed `HEAD`, or
+/// with `live`, in its worktree as it is now (new files included).
+fn changes_of(a: &Agent, live: bool) -> AgentResult {
     let g = git_in(&a.worktree);
     let head = g.rev("HEAD");
     let mut r = AgentResult {
         commit: head.clone().filter(|h| *h != a.start.commit),
         ..Default::default()
     };
-    if let Ok(out) = g.git(&["diff", "--numstat", &a.start.commit, "HEAD"], None) {
+    let to: &[&str] = if live { &[] } else { &["HEAD"] };
+    let numstat: Vec<&str> = ["diff", "--numstat", &a.start.commit]
+        .into_iter()
+        .chain(to.iter().copied())
+        .collect();
+    if let Ok(out) = g.git(&numstat, None) {
         for l in out.lines() {
             let mut it = l.splitn(3, '\t');
             let ins = it.next().and_then(|n| n.parse::<usize>().ok()).unwrap_or(0);
@@ -2191,16 +2265,11 @@ fn result_of(a: &Agent) -> AgentResult {
             }
         }
     }
-    if let Ok(out) = g.git(
-        &[
-            "diff",
-            "--name-status",
-            "--no-renames",
-            &a.start.commit,
-            "HEAD",
-        ],
-        None,
-    ) {
+    let names: Vec<&str> = ["diff", "--name-status", "--no-renames", &a.start.commit]
+        .into_iter()
+        .chain(to.iter().copied())
+        .collect();
+    if let Ok(out) = g.git(&names, None) {
         for l in out.lines() {
             if let Some((st, p)) = l.split_once('\t') {
                 let kind = match st {
@@ -2215,7 +2284,186 @@ fn result_of(a: &Agent) -> AgentResult {
             }
         }
     }
+    if live {
+        if let Ok(out) = g.git(&["ls-files", "--others", "--exclude-standard"], None) {
+            for p in out.lines().filter(|l| !l.is_empty()) {
+                let lines = fs::read(a.worktree.join(p))
+                    .map(|b| b.iter().filter(|c| **c == b'\n').count())
+                    .unwrap_or(0);
+                r.files += 1;
+                r.insertions += lines;
+                r.paths.push(p.to_string());
+                r.changes.push(FileKind {
+                    path: p.to_string(),
+                    kind: "added".into(),
+                });
+            }
+        }
+    }
     r
+}
+
+/// The branches in the agent's worktree that hold its commits, bottom
+/// first: each one's tip is past the start commit and under `HEAD`. Empty
+/// when that is only the agent's own branch (or nothing yet).
+fn stack_of(a: &Agent) -> Vec<String> {
+    let g = git_in(&a.worktree);
+    let Some(head) = g.rev("HEAD") else {
+        return Vec::new();
+    };
+    let on = g
+        .git(&["symbolic-ref", "--short", "-q", "HEAD"], None)
+        .ok()
+        .filter(|b| !b.is_empty());
+    let Ok(out) = g.git(
+        &[
+            "for-each-ref",
+            "--format=%(refname:short) %(objectname)",
+            "--contains",
+            &a.start.commit,
+            "--merged",
+            &head,
+            "refs/heads",
+        ],
+        None,
+    ) else {
+        return Vec::new();
+    };
+    // (commits past the start, preferred, name) per tip.
+    let mut by_tip: std::collections::BTreeMap<String, (usize, u8, String)> = Default::default();
+    for l in out.lines() {
+        let Some((name, tip)) = l.split_once(' ') else {
+            continue;
+        };
+        if tip == a.start.commit || name == a.start.branch {
+            continue;
+        }
+        let depth = g
+            .git(
+                &["rev-list", "--count", &format!("{}..{tip}", a.start.commit)],
+                None,
+            )
+            .ok()
+            .and_then(|n| n.trim().parse::<usize>().ok())
+            .unwrap_or(0);
+        // Two names on one commit: the checked-out one, then the agent's own.
+        let rank = if on.as_deref() == Some(name) {
+            0
+        } else if name == a.branch {
+            1
+        } else {
+            2
+        };
+        let e = by_tip
+            .entry(tip.to_string())
+            .or_insert((depth, rank, name.to_string()));
+        if rank < e.1 {
+            *e = (depth, rank, name.to_string());
+        }
+    }
+    let mut parts: Vec<(usize, String)> = by_tip.into_values().map(|(d, _, n)| (d, n)).collect();
+    parts.sort();
+    let names: Vec<String> = parts.into_iter().map(|(_, n)| n).collect();
+    if names.len() == 1 && names[0] == a.branch {
+        return Vec::new();
+    }
+    names
+}
+
+/// The branches to land, bottom first: [`Agent::stack`], or its own branch.
+fn parts_of(a: &Agent) -> Vec<String> {
+    let s = if a.worktree.is_dir() {
+        stack_of(a)
+    } else {
+        a.stack.clone()
+    };
+    if s.is_empty() {
+        vec![a.branch.clone()]
+    } else {
+        s
+    }
+}
+
+/// What [`commit_review`] made.
+#[derive(Clone, Debug, Serialize)]
+pub struct Review {
+    /// The branch now holding the review.
+    pub branch: String,
+    pub commit: String,
+    /// Every review so far, bottom first.
+    pub stack: Vec<String>,
+}
+
+/// Inside an agent: commit what it changed since its last review as one
+/// review on a new branch `name`, stacked on the last one, and keep working
+/// on top of it. `agentvc agent commit`, the MCP tool `commit_review`.
+pub fn commit_review(name: &str, message: &str) -> Result<Review> {
+    commit_review_in(&own_dir()?, name, message)
+}
+
+fn commit_review_in(dir: &Path, name: &str, message: &str) -> Result<Review> {
+    let a = read_agent(dir)?;
+    let message = message.trim();
+    if message.is_empty() {
+        return Err(agent_err("message_required", "say what this review does"));
+    }
+    let branch = slug(name);
+    if branch.is_empty() {
+        return Err(agent_err(
+            "bad_branch",
+            format!("{name:?} is not a branch name"),
+        ));
+    }
+    let g = git_in(&a.worktree);
+    if g.rev(&format!("refs/heads/{branch}")).is_some() {
+        return Err(agent_err_with(
+            "branch_exists",
+            format!("there is already a branch {branch}; pick another name"),
+            json!({ "branch": branch }),
+        ));
+    }
+    g.git(&["add", "-A"], None)?;
+    if g.git(&["diff", "--cached", "--quiet"], None).is_ok() {
+        return Err(agent_err(
+            "nothing_to_commit",
+            "nothing changed since the last review; change the code first",
+        ));
+    }
+    g.git(&["checkout", "--quiet", "-b", &branch], None)?;
+    let msg = format!("{message}\n\nAgent: {}", a.id);
+    let have_identity = g
+        .git(&["config", "user.email"], None)
+        .is_ok_and(|e| !e.is_empty());
+    if have_identity {
+        g.git(&["commit", "--quiet", "--no-verify", "-F", "-"], Some(&msg))?;
+    } else {
+        g.git_env(
+            &["commit", "--quiet", "--no-verify", "-F", "-"],
+            Some(&msg),
+            &[
+                ("GIT_AUTHOR_NAME", "agentvc agent"),
+                ("GIT_AUTHOR_EMAIL", "agent@agentvc.invalid"),
+                ("GIT_COMMITTER_NAME", "agentvc agent"),
+                ("GIT_COMMITTER_EMAIL", "agent@agentvc.invalid"),
+            ],
+        )?;
+    }
+    let commit = g.rev("HEAD").unwrap_or_default();
+    let stack = stack_of(&a);
+    let a = update(dir, |r| {
+        r.stack = stack.clone();
+        Ok(())
+    })?;
+    add_step(
+        dir,
+        "result",
+        &format!("Committed review {} on {branch}", a.stack.len().max(1)),
+    );
+    Ok(Review {
+        branch,
+        commit,
+        stack,
+    })
 }
 
 fn run_check(a: &Agent, command: &str) -> CheckResult {
@@ -2296,6 +2544,7 @@ pub fn work(dir: &Path, exe: &Path) -> Result<Agent> {
             let a = update(dir, |a| {
                 a.state = AgentState::Running;
                 a.started_at.get_or_insert(began);
+                a.turn_started_at = Some(began);
                 a.finished_at = None;
                 a.error = None;
                 Ok(())
@@ -2329,6 +2578,7 @@ pub fn work(dir: &Path, exe: &Path) -> Result<Agent> {
             return update(dir, |a| {
                 a.state = AgentState::Failed;
                 a.error = Some(why);
+                a.turn_started_at = None;
                 a.pending_reply = None;
                 a.worker_pid = None;
                 a.finished_at = Some(now());
@@ -2363,6 +2613,7 @@ pub fn work(dir: &Path, exe: &Path) -> Result<Agent> {
     let cur = read_agent(dir)?;
     let committed = commit_work(&cur);
     let result = result_of(&cur);
+    let stack = stack_of(&cur);
     let stopped = cur.stop_requested;
     let markers = markers_in(&cur);
     let failed = !status.success() && !stopped;
@@ -2389,6 +2640,8 @@ pub fn work(dir: &Path, exe: &Path) -> Result<Agent> {
     let output_tail = tail(&fs::read_to_string(&out_path).unwrap_or_default(), 5);
     let done = update(dir, |a| {
         a.seconds += now() - began;
+        a.turn_started_at = None;
+        a.stack = stack;
         a.finished_at = Some(now());
         a.worker_pid = None;
         a.child_pid = None;
@@ -2814,6 +3067,128 @@ mod tests {
         assert_eq!(v["behavior"], "deny");
         assert_eq!(v["message"], "not now");
         std::env::remove_var(ENV_DIR);
+    }
+
+    /// Git commands as an agent runs them (raw git, no identity needed).
+    const GIT: &str = "git -c user.name=a -c user.email=a@a";
+
+    #[test]
+    fn branches_made_with_plain_git_land_as_a_stack() {
+        let (_t, work) = repo();
+        // What an agent asked for "a stack of PRs" did before it knew better.
+        let script = format!(
+            "{GIT} checkout -q -b one && echo 1 > one.txt && {GIT} add . && {GIT} commit -qm one && \
+             {GIT} checkout -q -b two && echo 2 > two.txt && {GIT} add . && {GIT} commit -qm two && \
+             {GIT} checkout -q -b three && echo 3 > three.txt"
+        );
+        let a = start_inline(&work, req("Three reviews", &script));
+        assert_eq!(a.state, AgentState::Ready, "{a:?}");
+        // The leftover change is committed on the branch it was made on.
+        assert_eq!(a.stack, vec!["one", "two", "three"]);
+        assert_eq!(a.result.as_ref().unwrap().files, 3);
+
+        let (landed, _) = land(&work, &a.id).unwrap();
+        assert_eq!(landed.landed.as_ref().unwrap().branch, "three");
+        let w = Window::open(&work).unwrap();
+        let parent = |b: &str| {
+            w.state
+                .branches
+                .iter()
+                .find(|t| t.name == b)
+                .map(|t| t.parent.clone())
+        };
+        assert_eq!(parent("one").as_deref(), Some("feat"));
+        assert_eq!(parent("two").as_deref(), Some("one"));
+        assert_eq!(parent("three").as_deref(), Some("two"));
+        // Its own branch never got a commit: gone, not left behind.
+        assert!(w.branch_tip(&a.branch).is_none());
+    }
+
+    #[test]
+    fn commit_review_stacks_reviews_and_discard_removes_them() {
+        let (_t, work) = repo();
+        let a = start(
+            &work,
+            &StartRequest {
+                exe: PathBuf::from("true"),
+                ..req("Two reviews", "true")
+            },
+        )
+        .unwrap();
+        let dir = agent_dir(&work, &a.id).unwrap();
+        let wt = a.worktree.clone();
+        let err = |r: Result<Review>| r.unwrap_err().code();
+        assert_eq!(
+            err(commit_review_in(&dir, "first", "First")),
+            "nothing_to_commit"
+        );
+        fs::write(wt.join("x.txt"), "x\n").unwrap();
+        assert_eq!(
+            err(commit_review_in(&dir, "first", " ")),
+            "message_required"
+        );
+        assert_eq!(
+            err(commit_review_in(&dir, "feat", "Clash")),
+            "branch_exists"
+        );
+        let r = commit_review_in(&dir, "First review", "Add x").unwrap();
+        assert_eq!(r.branch, "first-review");
+        assert_eq!(r.stack, vec!["first-review"]);
+        fs::write(wt.join("y.txt"), "y\n").unwrap();
+        let r = commit_review_in(&dir, "second", "Add y").unwrap();
+        assert_eq!(r.stack, vec!["first-review", "second"]);
+        assert_eq!(read_agent(&dir).unwrap().stack, r.stack);
+        let msg = git(&wt, &["log", "-1", "--format=%B"]);
+        assert!(msg.starts_with("Add y") && msg.contains(&a.id), "{msg}");
+
+        let d = discard(&work, &a.id).unwrap();
+        assert_eq!(d.state, AgentState::Discarded);
+        let w = Window::open(&work).unwrap();
+        for b in ["first-review", "second", a.branch.as_str()] {
+            assert!(w.branch_tip(b).is_none(), "{b} left behind");
+        }
+    }
+
+    #[test]
+    fn a_working_agent_shows_its_time_and_changes_so_far() {
+        let (_t, work) = repo();
+        let a = start(
+            &work,
+            &StartRequest {
+                exe: PathBuf::from("true"),
+                ..req("Live", "true")
+            },
+        )
+        .unwrap();
+        let dir = agent_dir(&work, &a.id).unwrap();
+        update(&dir, |a| {
+            a.state = AgentState::Running;
+            a.seconds = 10;
+            a.turn_started_at = Some(now() - 5);
+            Ok(())
+        })
+        .unwrap();
+        fs::write(a.worktree.join("b.txt"), "feat\nmore\n").unwrap();
+        fs::write(a.worktree.join("new.txt"), "1\n2\n3\n").unwrap();
+        let d = show(&work, &a.id).unwrap().agent;
+        assert!(d.seconds >= 15, "{}", d.seconds);
+        let r = d.result.unwrap();
+        assert_eq!(r.files, 2, "{r:?}");
+        assert_eq!(r.insertions, 4);
+        let kinds: Vec<_> = r
+            .changes
+            .iter()
+            .map(|c| (c.path.as_str(), c.kind.as_str()))
+            .collect();
+        assert!(kinds.contains(&("new.txt", "added")) && kinds.contains(&("b.txt", "modified")));
+        // Only the turn under way counts on read; the record is unchanged.
+        assert_eq!(read_agent(&dir).unwrap().seconds, 10);
+    }
+
+    #[test]
+    fn the_prompt_sends_stacks_through_agentvc() {
+        assert!(SYSTEM_PROMPT.contains("commit_review"));
+        assert!(SYSTEM_PROMPT.contains("do not run git commit"));
     }
 
     #[test]

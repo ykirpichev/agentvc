@@ -721,6 +721,8 @@ export interface Agent {
   /** `resolve`: it resolves a restack of `start.branch` that conflicted (`conflict`). */
   mode: 'new' | 'revise' | 'resolve'
   branch: string
+  /** The branches holding its work, bottom first, when it made one per review (empty: all on `branch`). */
+  stack?: string[]
   worktree: string
   runner: string
   permissions?: AgentPermissions
@@ -735,6 +737,9 @@ export interface Agent {
   updated_at: number
   started_at: number | null
   finished_at: number | null
+  /** When the turn under way began. */
+  turn_started_at?: number | null
+  /** Seconds spent working, the turn under way included. */
   seconds: number
   cost_usd: number
   turns: number

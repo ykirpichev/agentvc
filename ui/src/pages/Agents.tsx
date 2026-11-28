@@ -2,7 +2,7 @@
 // branch, and one page per agent. Every card answers in place, so a person
 // can keep 10 to 20 agents moving without opening each one.
 
-import { useState, type FormEvent, type ReactNode } from 'react'
+import { useEffect, useState, type FormEvent, type ReactNode } from 'react'
 import { Link, useNavigate, useParams } from 'react-router'
 import { api, ref } from '../api/client'
 import { useLive } from '../api/live'
@@ -779,6 +779,19 @@ export function AgentsFrom({ agents, workspace, branch }: { agents: Agent[]; wor
   )
 }
 
+const WORKING_STATES: Agent['state'][] = ['queued', 'running', 'asking', 'needs_approval']
+
+/** Seconds since `since` changed, ticking every second while `on`. */
+function useTicker(on: boolean, since: unknown): number {
+  const [t, setT] = useState<{ since: unknown; n: number }>({ since, n: 0 })
+  useEffect(() => {
+    if (!on) return
+    const id = window.setInterval(() => setT((x) => (x.since === since ? { since, n: x.n + 1 } : { since, n: 1 })), 1000)
+    return () => window.clearInterval(id)
+  }, [on, since])
+  return on && t.since === since ? t.n : 0
+}
+
 /** `/review/a/:id`: one agent. */
 export function AgentPage() {
   const { id = '' } = useParams()
@@ -787,6 +800,8 @@ export function AgentPage() {
   const [open, setOpen] = useState<string | null>(null)
   const target = `agent:${id}`
   const { threads } = useThreads(id ? target : null)
+  const active = !!data.data && WORKING_STATES.includes(data.data.agent.state)
+  const ticked = useTicker(active && !!data.data?.agent.turn_started_at, data.data)
   if (data.error) return <div className="page rv"><ErrorNote error={data.error} /></div>
   if (!data.data) return <div className="page rv"><Skeleton rows={5} /></div>
   const { agent: a, steps } = data.data
@@ -821,9 +836,21 @@ export function AgentPage() {
       </div>
 
       <div className="ag-kv">
-        <div><span>Time</span>{a.seconds > 0 ? duration(a.seconds) : '—'}</div>
-        <div><span>Cost</span>{a.cost_usd > 0 ? money(a.cost_usd) : '—'}</div>
-        <div><span>Changes</span>{a.result ? `${plural(a.result.files, 'file')}, +${a.result.insertions} −${a.result.deletions}` : '—'}</div>
+        <div><span>Time</span>{a.seconds + ticked > 0 ? duration(a.seconds + ticked) : '—'}</div>
+        <div title={active ? 'Claude Code reports the cost when this turn ends' : undefined}>
+          <span>Cost</span>
+          {a.cost_usd > 0 ? money(a.cost_usd) : active ? <span className="muted">after this turn</span> : '—'}
+        </div>
+        <div>
+          <span>Changes</span>
+          {a.result ? `${plural(a.result.files, 'file')}, +${a.result.insertions} −${a.result.deletions}${active ? ' so far' : ''}` : '—'}
+        </div>
+        {a.stack && a.stack.length > 0 && (
+          <div title="One branch per review, each stacked on the one before. Landing puts them all on the stack.">
+            <span>Reviews</span>
+            <span className="mono">{a.stack.join(' → ')}</span>
+          </div>
+        )}
         <div><span>Checks</span>{a.tests ? (a.tests.passed ? 'pass' : 'fail') : 'none'}</div>
         {a.runner === 'claude' && (
           <div>
@@ -896,7 +923,7 @@ export function AgentPage() {
         readOnly={!steer}
       />
 
-      {files.length > 0 && a.result?.commit && (
+      {files.length > 0 && a.result?.commit && !active && (
         <section>
           <h2 className="rv-h2">
             Changes <span className="muted">· {plural(files.length, 'file')}</span>
