@@ -2,7 +2,7 @@
   "name": "agentvc",
   "displayName": "agentvc",
   "description": "Review agent work in the editor with the same branch graph as the web UI: drag to rebase, resolve conflicts inline, see every window's stack.",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "publisher": "avc",
   "license": "MIT OR Apache-2.0",
   "preview": true,

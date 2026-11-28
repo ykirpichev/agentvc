@@ -10,7 +10,7 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
 name = "agentvc-cli"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "agentvc-core",
  "agentvc-mcp",
@@ -23,7 +23,7 @@ dependencies = [
 
 [[package]]
 name = "agentvc-cloud"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "agentvc-core",
  "agentvcd",
@@ -47,7 +47,7 @@ dependencies = [
 
 [[package]]
 name = "agentvc-core"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "flate2",
  "globset",
@@ -68,7 +68,7 @@ dependencies = [
 
 [[package]]
 name = "agentvc-mcp"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "agentvc-core",
  "serde_json",
@@ -76,7 +76,7 @@ dependencies = [
 
 [[package]]
 name = "agentvcd"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "agentvc-core",
  "anyhow",
