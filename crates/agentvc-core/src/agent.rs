@@ -624,8 +624,52 @@ fn add_step(dir: &Path, kind: &str, text: &str) {
 }
 
 /// The last `n` steps of an agent (all with `n == 0`).
+/// The last `bytes` of a file (from a line start), without reading the rest.
+fn read_tail(path: &Path, bytes: u64) -> String {
+    use std::io::{Read, Seek, SeekFrom};
+    let Ok(mut f) = fs::File::open(path) else {
+        return String::new();
+    };
+    let len = f.metadata().map(|m| m.len()).unwrap_or(0);
+    let from = len.saturating_sub(bytes);
+    if f.seek(SeekFrom::Start(from)).is_err() {
+        return String::new();
+    }
+    let mut buf = Vec::new();
+    let _ = f.read_to_end(&mut buf);
+    let text = String::from_utf8_lossy(&buf).into_owned();
+    if from == 0 {
+        return text;
+    }
+    // Drop the partial first line.
+    match text.find('\n') {
+        Some(i) => text[i + 1..].to_string(),
+        None => String::new(),
+    }
+}
+
+/// The last `n` steps (all of them for 0). Reads only the end of the file
+/// when that holds enough of them.
 pub fn steps(dir: &Path, n: usize) -> Vec<Step> {
-    let text = fs::read_to_string(dir.join(STEPS)).unwrap_or_default();
+    let path = dir.join(STEPS);
+    if n > 0 {
+        // Steps are short; read more of the end until n of them fit.
+        let mut bytes = 64 * 1024;
+        loop {
+            let text = read_tail(&path, bytes);
+            let got: Vec<Step> = text
+                .lines()
+                .filter_map(|l| serde_json::from_str(l).ok())
+                .collect();
+            let len = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+            if got.len() >= n || bytes >= len {
+                let from = got.len().saturating_sub(n);
+                return got[from..].to_vec();
+            }
+            bytes *= 4;
+        }
+    }
+    let text = fs::read_to_string(&path).unwrap_or_default();
     let all: Vec<Step> = text
         .lines()
         .filter_map(|l| serde_json::from_str(l).ok())
@@ -1441,6 +1485,11 @@ fn refresh(
             None => now() - a.updated_at > 30,
         };
         if dead {
+            // Its runner (or check) may outlive it: don't leave it working
+            // in the worktree behind the person's back.
+            if let Some(pid) = a.child_pid.filter(|p| pid_alive(*p)) {
+                kill_now(pid);
+            }
             if let Ok(b) = update(dir, |b| {
                 if b.state.is_active() && b.worker_pid == a.worker_pid {
                     b.state = AgentState::Failed;
@@ -1573,6 +1622,11 @@ fn limit(w: &Window) -> usize {
         .unwrap_or(DEFAULT_LIMIT)
 }
 
+/// One agent's record as stored, without the checks [`list`] makes.
+pub fn record(cwd: &Path, id: &str) -> Result<Agent> {
+    read_agent(&agent_dir(cwd, id)?)
+}
+
 /// One agent with its recent steps.
 #[derive(Clone, Debug, Serialize)]
 pub struct AgentDetail {
@@ -1635,9 +1689,15 @@ pub fn reply(cwd: &Path, id: &str, text: &str, exe: &Path) -> Result<Agent> {
         }
         _ => {}
     }
+    // Never two runners in one worktree: one left over from a worker that
+    // died goes first.
+    if let Some(pid) = a.child_pid.filter(|p| pid_alive(*p)) {
+        terminate(pid);
+    }
     let a = update(&dir, |a| {
         a.state = AgentState::Queued;
         a.pending_reply = Some(text.to_string());
+        a.child_pid = None;
         a.error = None;
         a.stop_requested = false;
         a.worker_pid = None;
@@ -1761,8 +1821,19 @@ fn wait_for_answer(q: Question) -> Result<Answer> {
                 return Ok(ans);
             }
         }
-        if read_agent(&dir).is_ok_and(|a| a.stop_requested) {
-            return Err(agent_err("agent_stopped", "the person stopped this agent"));
+        match read_agent(&dir) {
+            Ok(a) if a.stop_requested || a.state.is_closed() => {
+                return Err(agent_err("agent_stopped", "the person stopped this agent"));
+            }
+            // Its worker died and the agent was marked failed: nobody will
+            // answer here.
+            Ok(a) if !a.state.is_active() => {
+                return Err(agent_err(
+                    "agent_stopped",
+                    format!("the agent is {}; nobody will answer", state_word(a.state)),
+                ));
+            }
+            _ => {}
         }
         std::thread::sleep(POLL);
     }
@@ -1810,18 +1881,51 @@ pub fn approve(tool: &str, input: &Value) -> Result<Value> {
 // ---- stopping, landing, discarding -------------------------------------------
 
 #[cfg(unix)]
-fn terminate(pid: i64) {
+fn signal_group(pid: i64, sig: libc::c_int) {
     if let Ok(p) = libc::pid_t::try_from(pid) {
-        // The child leads its own process group: stop its children too.
+        // The runner and the check lead their own process group: signal
+        // their children too.
         unsafe {
-            libc::kill(-p, libc::SIGTERM);
-            libc::kill(p, libc::SIGTERM);
+            libc::kill(-p, sig);
+            libc::kill(p, sig);
         }
     }
 }
 
+/// How long a runner gets to exit after SIGTERM before SIGKILL.
+#[cfg(unix)]
+fn grace() -> Duration {
+    std::env::var("AGENTVC_AGENT_GRACE_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .map(Duration::from_millis)
+        .unwrap_or(Duration::from_secs(5))
+}
+
+/// Stop the process group `pid` leads: SIGTERM, then SIGKILL if it is
+/// still there after [`grace`].
+#[cfg(unix)]
+fn terminate(pid: i64) {
+    signal_group(pid, libc::SIGTERM);
+    let deadline = Instant::now() + grace();
+    while pid_alive(pid) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    signal_group(pid, libc::SIGKILL);
+}
+
+/// Kill the process group `pid` leads now (its worker is gone, nothing
+/// waits for it to finish cleanly).
+#[cfg(unix)]
+fn kill_now(pid: i64) {
+    signal_group(pid, libc::SIGKILL);
+}
+
 #[cfg(not(unix))]
 fn terminate(_pid: i64) {}
+
+#[cfg(not(unix))]
+fn kill_now(_pid: i64) {}
 
 /// Stop a queued or working agent. It ends up `stopped`, with whatever it
 /// did so far committed.
@@ -2714,14 +2818,30 @@ fn commit_review_in(dir: &Path, name: &str, message: &str) -> Result<Review> {
     })
 }
 
-fn run_check(a: &Agent, command: &str) -> CheckResult {
+/// Run the check in its own process group, recorded as the agent's
+/// `child_pid` so that stopping the agent stops the check too.
+fn run_check(dir: &Path, a: &Agent, command: &str) -> CheckResult {
     let t = Instant::now();
-    let out = Command::new("sh")
-        .arg("-c")
+    let mut cmd = Command::new("sh");
+    cmd.arg("-c")
         .arg(command)
         .current_dir(&a.worktree)
         .stdin(Stdio::null())
-        .output();
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    let out = cmd.spawn().and_then(|child| {
+        let pid = child.id() as i64;
+        let _ = update(dir, |a| {
+            a.child_pid = Some(pid);
+            Ok(())
+        });
+        child.wait_with_output()
+    });
     let (code, text) = match out {
         Ok(o) => (
             o.status.code(),
@@ -2859,6 +2979,17 @@ pub fn work(dir: &Path, exe: &Path) -> Result<Agent> {
     }
     let status = child.wait().at("runner")?;
     let cur = read_agent(dir)?;
+    // Discarded (or landed) while it ran: that is final, and its worktree
+    // may be gone. Only let go of it.
+    if cur.state.is_closed() {
+        return update(dir, |a| {
+            a.worker_pid = None;
+            a.child_pid = None;
+            a.turn_started_at = None;
+            a.question = None;
+            Ok(())
+        });
+    }
     let committed = commit_work(&cur);
     let result = result_of(&cur);
     let stack = stack_of(&cur);
@@ -2866,12 +2997,13 @@ pub fn work(dir: &Path, exe: &Path) -> Result<Agent> {
     let markers = markers_in(&cur);
     let failed = !status.success() && !stopped;
     let check = match (&cur.check, failed || stopped) {
+        (Some(_), false) if read_agent(dir).is_ok_and(|a| a.stop_requested) => None,
         (Some(c), false) => {
             update(dir, |a| {
                 a.last_step = Some(format!("Checking: {c}"));
                 Ok(())
             })?;
-            let r = run_check(&cur, c);
+            let r = run_check(dir, &cur, c);
             add_step(
                 dir,
                 "check",
@@ -2885,8 +3017,18 @@ pub fn work(dir: &Path, exe: &Path) -> Result<Agent> {
         }
         _ => None,
     };
-    let output_tail = tail(&fs::read_to_string(&out_path).unwrap_or_default(), 5);
+    let output_tail = tail(&read_tail(&out_path, 64 * 1024), 5);
+    // A stop that came while the check ran stops the agent too.
+    let stopped = stopped || read_agent(dir).is_ok_and(|a| a.stop_requested);
+    // A check cut short by the stop says nothing about the work.
+    let check = if stopped { None } else { check };
     let done = update(dir, |a| {
+        if a.state.is_closed() {
+            a.worker_pid = None;
+            a.child_pid = None;
+            a.turn_started_at = None;
+            return Ok(());
+        }
         a.seconds += now() - began;
         a.turn_started_at = None;
         a.stack = stack;
@@ -3619,6 +3761,156 @@ mod tests {
     fn the_prompt_sends_stacks_through_agentvc() {
         assert!(SYSTEM_PROMPT.contains("commit_review"));
         assert!(SYSTEM_PROMPT.contains("do not run git commit"));
+    }
+
+    /// Start an agent and run its worker on another thread; returns once
+    /// its runner (or check) is up, as `child_pid` says.
+    fn start_in_background(
+        work: &Path,
+        req: StartRequest,
+        until: impl Fn(&Agent) -> bool,
+    ) -> (PathBuf, String, std::thread::JoinHandle<Agent>) {
+        let a = start(
+            work,
+            &StartRequest {
+                exe: PathBuf::from("true"),
+                ..req
+            },
+        )
+        .unwrap();
+        let dir = agent_dir(work, &a.id).unwrap();
+        let d = dir.clone();
+        let h = std::thread::spawn(move || work_inline(&d));
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            let cur = read_agent(&dir).unwrap();
+            if cur.child_pid.is_some_and(pid_alive) && until(&cur) {
+                break;
+            }
+            assert!(Instant::now() < deadline, "never started: {cur:?}");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        (dir, a.id, h)
+    }
+
+    #[test]
+    fn stop_kills_a_runner_that_ignores_sigterm() {
+        let (_t, work) = repo();
+        std::env::set_var("AGENTVC_AGENT_GRACE_MS", "200");
+        let (_dir, id, h) = start_in_background(
+            &work,
+            req("Stubborn", "trap '' TERM; echo up; sleep 60"),
+            |_| true,
+        );
+        let t = Instant::now();
+        stop(&work, &id).unwrap();
+        let b = h.join().unwrap();
+        assert_eq!(b.state, AgentState::Stopped, "{b:?}");
+        assert!(t.elapsed() < Duration::from_secs(10), "{:?}", t.elapsed());
+    }
+
+    #[test]
+    fn a_running_check_can_be_stopped() {
+        let (_t, work) = repo();
+        let (_dir, id, h) = start_in_background(
+            &work,
+            StartRequest {
+                check: Some("sleep 60".into()),
+                ..req("Slow check", "printf 'x\\n' > x.txt")
+            },
+            |a| {
+                a.last_step
+                    .as_deref()
+                    .is_some_and(|s| s.starts_with("Checking"))
+            },
+        );
+        let t = Instant::now();
+        stop(&work, &id).unwrap();
+        let b = h.join().unwrap();
+        assert_eq!(b.state, AgentState::Stopped, "{b:?}");
+        assert!(b.tests.is_none(), "a stopped check is no result");
+        assert!(t.elapsed() < Duration::from_secs(20));
+    }
+
+    #[test]
+    fn a_discarded_agent_stays_discarded() {
+        let (_t, work) = repo();
+        let (dir, id, h) = start_in_background(&work, req("Doomed", "sleep 60"), |_| true);
+        let d = discard(&work, &id).unwrap();
+        assert_eq!(d.state, AgentState::Discarded);
+        h.join().unwrap();
+        let r = read_agent(&dir).unwrap();
+        assert_eq!(r.state, AgentState::Discarded);
+        assert!(r.error.is_none(), "{:?}", r.error);
+        assert!(r.worker_pid.is_none() && r.child_pid.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_dead_workers_runner_is_killed_and_a_reply_starts_clean() {
+        use std::os::unix::process::CommandExt;
+        let (_t, work) = repo();
+        let a = start(
+            &work,
+            &StartRequest {
+                exe: PathBuf::from("true"),
+                ..req("Orphan", "true")
+            },
+        )
+        .unwrap();
+        let dir = agent_dir(&work, &a.id).unwrap();
+        // A runner whose worker was killed with -9: still running.
+        let mut runner = Command::new("sleep")
+            .arg("60")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let mut gone = Command::new("true").spawn().unwrap();
+        let dead = gone.id() as i64;
+        gone.wait().unwrap();
+        update(&dir, |r| {
+            r.state = AgentState::Running;
+            r.worker_pid = Some(dead);
+            r.child_pid = Some(runner.id() as i64);
+            Ok(())
+        })
+        .unwrap();
+        let l = list(&work, false).unwrap();
+        assert_eq!(l.agents[0].state, AgentState::Failed);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while runner.try_wait().unwrap().is_none() {
+            assert!(
+                Instant::now() < deadline,
+                "the orphaned runner is still running"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    #[test]
+    fn steps_reads_only_the_end_it_needs() {
+        let (_t, work) = repo();
+        let a = start(
+            &work,
+            &StartRequest {
+                exe: PathBuf::from("true"),
+                ..req("Chatty", "true")
+            },
+        )
+        .unwrap();
+        let dir = agent_dir(&work, &a.id).unwrap();
+        for i in 0..3000 {
+            add_step(&dir, "line", &format!("step {i} {}", "x".repeat(40)));
+        }
+        let all = steps(&dir, 0);
+        let last = steps(&dir, 5);
+        assert_eq!(last.len(), 5);
+        assert_eq!(last.last().unwrap().text, all.last().unwrap().text);
+        assert_eq!(last[0].text, all[all.len() - 5].text);
+        // More than one 64 KiB window holds.
+        let many = steps(&dir, 2500);
+        assert_eq!(many.len(), 2500);
+        assert_eq!(many[0].text, all[all.len() - 2500].text);
     }
 
     #[test]
