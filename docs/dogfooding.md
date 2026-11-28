@@ -110,6 +110,14 @@ If the old head has not landed (work on the branch that is not in the base, or a
 PR the attempt was not rebased past), `pr` refuses with `branch_exists` and says why.
 `--force` still moves the branch regardless.
 
+The old head is the one **on the remote** (#230): `pr` fetches the branch first, so a
+restack the bot pushed to the PR, or a push from another checkout, is what the export
+continues, not this checkout's stale branch. When agentvc recorded no PR for the last
+export here (its push failed, say), the merged PR is the closed one whose head the remote
+branch still points at. A branch that moves without continuing (re-running `pr` for the
+same attempt) is pushed with `--force-with-lease` on the fetched head, so a push made in
+between is refused instead of overwritten.
+
 ### Conflicts that resolve themselves (#91)
 
 `rebase`, `take` and `merge` resolve the usual conflicts between parallel attempts

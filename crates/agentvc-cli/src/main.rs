@@ -2871,6 +2871,7 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
                 squash,
                 stack,
                 merged_pr: None,
+                remote_head: None,
             };
             let r = agentvc_core::export::export(&space, attempt_id(&attempt)?, &opts)?;
             Out {
