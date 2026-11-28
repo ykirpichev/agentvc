@@ -334,9 +334,11 @@ async fn discard(
     Ok(Json(AgentResponse { agent: a }))
 }
 
-/// Each agent's state and last update, to spot changes.
+/// Each open agent's state and last update, to spot changes. Landed and
+/// discarded agents are left out: nothing happens to them any more, and
+/// reading every one ever made each second would grow without bound.
 fn fingerprints(dir: &std::path::Path) -> BTreeMap<String, (AgentState, i64)> {
-    agent::list(dir, true)
+    agent::list(dir, false)
         .map(|l| {
             l.agents
                 .into_iter()
@@ -369,6 +371,18 @@ pub(crate) fn spawn_poller(state: AppState, dir: PathBuf, every: Duration) {
                     state.send(Event::AgentChanged {
                         agent: id.clone(),
                         state: *s,
+                    });
+                }
+            }
+            // Gone from the open ones: landed or discarded. Say which.
+            for id in last.keys().filter(|id| !now.contains_key(*id)) {
+                let d = dir.clone();
+                let i = id.clone();
+                if let Ok(Ok(a)) = tokio::task::spawn_blocking(move || agent::record(&d, &i)).await
+                {
+                    state.send(Event::AgentChanged {
+                        agent: id.clone(),
+                        state: a.state,
                     });
                 }
             }

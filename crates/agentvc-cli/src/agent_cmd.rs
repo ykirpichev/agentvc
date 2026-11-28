@@ -51,8 +51,9 @@ pub enum AgentCmd {
         /// Wait for `agentvc agent land` instead.
         #[arg(long)]
         no_auto_land: bool,
-        /// What the agent should do.
-        #[arg(required = true, num_args = 1.., trailing_var_arg = true)]
+        /// What the agent should do. Options may follow it (`--json`); put
+        /// `--` before a prompt that starts with `-`.
+        #[arg(required = true, num_args = 1..)]
         prompt: Vec<String>,
     },
     /// List agents, newest first: what each works on, its state, and what
