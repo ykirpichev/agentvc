@@ -34,6 +34,7 @@ pub const ENV_WORKTREE: &str = "AGENTVC_WORKTREE";
 pub const GUARD_RAILS: &[&str] = &[
     "File edits only inside the agent's own worktree (outside paths and .git are refused)",
     "No git push: agentvc commits and lands the work after you review it",
+    "No git commit, new branches or gh pr: the agent commits each review with agentvc (commit_review)",
     "Extra directories from your settings (additionalDirectories) are not passed on",
 ];
 
@@ -167,7 +168,7 @@ impl ClaudeSetup {
         perms.insert("deny".into(), json!(deny));
         s.insert("permissions".into(), Value::Object(perms));
         let guard = json!({
-            "matcher": "Edit|MultiEdit|Write|NotebookEdit",
+            "matcher": "Edit|MultiEdit|Write|NotebookEdit|Bash",
             "hooks": [{
                 "type": "command",
                 "command": format!("{} agent guard", shell_quote(&exe.to_string_lossy())),
@@ -407,6 +408,9 @@ fn resolve(base: &Path, p: &Path) -> PathBuf {
 /// call must be refused, if it must.
 pub fn guard(input: &Value, worktree: &Path) -> Option<String> {
     let ti = input.get("tool_input")?;
+    if let Some(cmd) = ti.get("command").and_then(Value::as_str) {
+        return vcs_command(cmd);
+    }
     let path = ["file_path", "notebook_path", "path"]
         .iter()
         .find_map(|k| ti.get(*k).and_then(Value::as_str))?;
@@ -427,6 +431,52 @@ pub fn guard(input: &Value, worktree: &Path) -> Option<String> {
         return Some(format!(
             "{path} is git metadata; agentvc commits your work for you when you stop."
         ));
+    }
+    None
+}
+
+/// Why a shell command that does agentvc's job must be refused: commits,
+/// new branches, pushes and pull requests made behind agentvc's back don't
+/// reach the person's stack.
+fn vcs_command(cmd: &str) -> Option<String> {
+    const STACK: &str = "agentvc does the version control for agents: to make a review (one PR of a stack), \
+call the commit_review tool (or run `agentvc agent commit <branch> -m <message>`); your last change is \
+committed for you when you stop, and the person opens the PRs after landing your work on their stack.";
+    for part in cmd.split(['\n', ';', '&', '|', '(', ')']) {
+        let words: Vec<&str> = part
+            .split_whitespace()
+            // Skip `VAR=value` prefixes and `command`/`exec` wrappers.
+            .skip_while(|w| w.contains('=') || *w == "command" || *w == "exec")
+            .collect();
+        let refused = match words.as_slice() {
+            ["git", rest @ ..] => {
+                // `git -C dir ...`, `git -c k=v ...`: the subcommand is after them.
+                let mut it = rest.iter();
+                let mut sub = None;
+                while let Some(w) = it.next() {
+                    if *w == "-C" || *w == "-c" {
+                        it.next();
+                    } else if !w.starts_with('-') {
+                        sub = Some(*w);
+                        break;
+                    }
+                }
+                let args: Vec<&str> = it.copied().collect();
+                match sub {
+                    Some("commit") | Some("push") => true,
+                    Some("checkout") => args.iter().any(|a| *a == "-b" || *a == "-B"),
+                    Some("switch") => args
+                        .iter()
+                        .any(|a| *a == "-c" || *a == "-C" || a.starts_with("--create")),
+                    _ => false,
+                }
+            }
+            ["gh", "pr", sub, ..] => matches!(*sub, "create" | "merge" | "edit" | "ready"),
+            _ => false,
+        };
+        if refused {
+            return Some(STACK.to_string());
+        }
     }
     None
 }
@@ -468,6 +518,36 @@ mod tests {
             guard(&json!({ "tool_input": { "command": "ls" } }), &wt),
             None
         );
+    }
+
+    #[test]
+    fn guard_sends_commits_branches_and_prs_through_agentvc() {
+        let wt = Path::new("/w");
+        let refused = |c: &str| guard(&json!({ "tool_input": { "command": c } }), wt).is_some();
+        // What an agent asked for a stack of PRs ran.
+        assert!(refused(
+            "git checkout -q -b cli-missing-input && git commit -qam \"gym CLI: x\""
+        ));
+        assert!(refused("source .venv/bin/activate; git checkout -b x"));
+        assert!(refused("git switch -c x"));
+        assert!(refused("git -C /w commit -m x"));
+        assert!(refused("GIT_EDITOR=true git commit --amend"));
+        assert!(refused("git push -u origin x"));
+        assert!(refused("gh pr create --base main"));
+        // Reading is fine.
+        for ok in [
+            "git status",
+            "git log --oneline -3; git branch -a | head -20",
+            "git diff HEAD",
+            "git checkout -- src/x.py",
+            "git fetch -q origin && git rev-parse HEAD origin/main",
+            "gh auth status",
+            "gh pr view 12",
+            "echo 'git commit' > notes.txt",
+            "python -m pytest -q",
+        ] {
+            assert!(!refused(ok), "{ok}");
+        }
     }
 
     #[test]

@@ -85,6 +85,16 @@ pub enum AgentCmd {
         #[arg(required = true, num_args = 1.., trailing_var_arg = true)]
         question: Vec<String>,
     },
+    /// Inside an agent: commit what changed since the last review as one
+    /// review on a new branch, stacked on the last one; work continues on
+    /// it (the MCP tool `commit_review`).
+    Commit {
+        /// The new branch's name.
+        branch: String,
+        /// The commit message: what this review does.
+        #[arg(short, long)]
+        message: String,
+    },
     /// What agents may do: each workspace's permission level, the Claude
     /// Code setup its agents inherit (settings, allowlists, MCP servers),
     /// the guard rails agentvc adds, and each open agent's mode.
@@ -259,6 +269,16 @@ pub fn run(cwd: &Path, cmd: AgentCmd) -> anyhow::Result<(Value, String)> {
         AgentCmd::Ask { question } => {
             let answer = agent::ask(&question.join(" "))?;
             (json!({ "answer": answer }), answer)
+        }
+        AgentCmd::Commit { branch, message } => {
+            let r = agent::commit_review(&branch, &message)?;
+            let text = format!(
+                "committed review {} on {} ({})",
+                r.stack.len().max(1),
+                r.branch,
+                &r.commit[..r.commit.len().min(10)]
+            );
+            (json!(r), text)
         }
         AgentCmd::Permissions => {
             let r = agent::permissions(cwd)?;
