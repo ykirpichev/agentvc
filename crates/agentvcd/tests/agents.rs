@@ -117,6 +117,8 @@ async fn start_follow_and_land_an_agent() {
         "from": "b1",
         "prompt": "Add c",
         "command": "echo adding; printf 'c\\n' > c.txt",
+        // Landed by hand below.
+        "auto_land": false,
     });
     // The hosted service may not start agents unless allowed.
     let (s, v) = send(&app, "POST", "/api/agents", Some(body.clone()), true).await;

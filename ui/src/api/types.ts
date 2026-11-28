@@ -748,7 +748,12 @@ export interface Agent {
   tests: { command: string; exit_code: number | null; passed: boolean; tail: string[]; duration_ms: number } | null
   result: { commit: string | null; files: number; insertions: number; deletions: number; paths: string[]; changes?: { path: string; kind: ChangeKind }[] } | null
   error: string | null
-  landed: { outcome: 'applied' | 'queued'; request_id: string; branch: string; at: number } | null
+  /** `automatic`: auto-land put it there when the agent finished. */
+  landed: { outcome: 'applied' | 'queued'; request_id: string; branch: string; at: number; automatic?: boolean } | null
+  /** Lands by itself when a turn ends with its checks passing. */
+  auto_land?: boolean
+  /** Why the last automatic landing did not happen (it waits for Land). */
+  land_error?: string
   messages: { from: 'you' | 'agent'; text: string; at: number }[]
   /** Resolve agents: the restack it resolves. */
   conflict?: HandOff
@@ -811,6 +816,8 @@ export interface StartAgent {
   check?: string
   runner?: AgentRunner
   permissions?: AgentPermissions
+  /** Land by itself when it finishes; unset: the workspace's setting. */
+  auto_land?: boolean
 }
 
 export type AgentRunner = 'claude' | 'codex' | 'cursor' | 'command'
@@ -826,6 +833,8 @@ export interface AgentSettings {
   /** Claude Code: run commands in its sandbox (writes only in the worktree). */
   sandbox?: boolean
   max?: number
+  /** Land an agent's work by itself when it finishes with checks passing (default true). */
+  auto_land?: boolean
   /** What a restack that conflicts does: an agent resolves it for review (default), or it stops for you. */
   conflicts?: AgentConflicts
 }

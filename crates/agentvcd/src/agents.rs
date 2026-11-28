@@ -193,6 +193,7 @@ struct StartBody {
     command: Option<String>,
     runner: Option<String>,
     permissions: Option<String>,
+    auto_land: Option<bool>,
 }
 
 #[derive(Serialize)]
@@ -227,6 +228,7 @@ async fn start(
         command: b.command,
         runner: b.runner,
         permissions: b.permissions,
+        auto_land: b.auto_land,
         exe: agentvc_exe(),
     };
     let a = blocking(move || agent::start(&dir, &req)).await?;

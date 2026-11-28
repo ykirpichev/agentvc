@@ -693,7 +693,8 @@ fn run_op(w: &mut Window, op: &Op, keep: bool) -> Result<Value> {
                     json!({ "branch": branch, "tip": tip, "base": base }),
                 ));
             }
-            if w.current_branch().as_deref() == Some(branch.as_str()) {
+            let checked_out = w.current_branch().as_deref() == Some(branch.as_str());
+            if checked_out {
                 w.repo
                     .git(&["merge", "--ff-only", "--quiet", commit], None)?;
             } else {
@@ -704,7 +705,22 @@ fn run_op(w: &mut Window, op: &Op, keep: bool) -> Result<Value> {
             }
             let mut scope = w.upstack(branch);
             scope.remove(branch);
-            restacked(w.restack(Some(&scope), keep)?)
+            match w.restack(Some(&scope), keep) {
+                Ok(r) => restacked(r),
+                Err(e) => {
+                    // The restack above failed with nothing changed: put the
+                    // branch back too, so the edit is all or nothing (#203).
+                    if checked_out {
+                        let _ = w.repo.git(&["reset", "--keep", "--quiet", &tip], None);
+                    } else {
+                        let _ = w.repo.git(
+                            &["update-ref", &format!("refs/heads/{branch}"), &tip, commit],
+                            None,
+                        );
+                    }
+                    Err(e)
+                }
+            }
         }
         Op::Resolve {
             branch,

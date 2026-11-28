@@ -7,6 +7,7 @@ import { useEffect, useRef, useState, type KeyboardEvent } from 'react'
 import { api } from '../api/client'
 import { useLive } from '../api/live'
 import type { Agent, CommentTarget, CommentThread } from '../api/types'
+import { canFollowUp } from '../core/agents'
 import { authorOf, who } from '../core/comments'
 import { plural, timeAgo } from '../lib/format'
 import { Icon } from './Icon'
@@ -256,7 +257,7 @@ export function ReviewBar({
       refresh()
     }
   }
-  const canAgent = !!agent && agent.state !== 'landed' && agent.state !== 'discarded'
+  const canAgent = !!agent && agent.state !== 'discarded' && (agent.state !== 'landed' || canFollowUp(agent))
   return (
     <div className={`creview ${drafts.length ? 'creview-drafts' : ''}`} role="region" aria-label="Review">
       <Icon name="comment" />
