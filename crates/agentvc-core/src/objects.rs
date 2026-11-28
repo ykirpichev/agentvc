@@ -509,7 +509,9 @@ impl ObjectStore {
     fn write_object(&self, kind: &str, data: &[u8]) -> Result<Oid> {
         let oid = hash_object(kind, data);
         let path = self.path_for(&oid);
-        if let Ok(m) = fs::metadata(&path) {
+        // An empty loose file is a write that never reached the disk (for
+        // example a full one, #217): write it again rather than trust it.
+        if let Some(m) = fs::metadata(&path).ok().filter(|m| m.len() > 0) {
             freshen(&path, &m);
             return Ok(oid);
         }
@@ -529,11 +531,19 @@ impl ObjectStore {
         enc.write_all(header.as_bytes()).at(&path)?;
         enc.write_all(data).at(&path)?;
         let compressed = enc.finish().at(&path)?;
-        // Write to a temp file then rename, so a crash never leaves a torn object.
-        let tmp = dir.join(format!(".tmp-{}", std::process::id()));
-        fs::write(&tmp, compressed).at(&tmp)?;
-        fs::rename(&tmp, &path).at(&path)?;
-        Ok(())
+        // Write to a temp file then rename, so a crash never leaves a torn
+        // object. The name is unique per write, so threads never share one.
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let tmp = dir.join(format!(".tmp-{}-{seq}", std::process::id()));
+        let written = fs::write(&tmp, compressed)
+            .at(&tmp)
+            .and_then(|()| fs::rename(&tmp, &path).at(&path));
+        if written.is_err() {
+            // ENOSPC and friends: leave no partial temp file behind.
+            let _ = fs::remove_file(&tmp);
+        }
+        written
     }
 
     /// Write an object as a loose file even if a copy exists (in a pack, or
@@ -549,6 +559,16 @@ impl ObjectStore {
     /// tree read from a git repository.
     pub fn write_raw(&self, kind: &str, data: &[u8]) -> Result<Oid> {
         self.write_object(kind, data)
+    }
+
+    /// Check that `oid` is a readable tree whose content hashes to its id.
+    /// Snapshots and check results are recorded only on trees that pass, so
+    /// a failed write (a full disk) never leaves a tree id with no object.
+    pub fn verify_tree(&self, oid: &Oid) -> Result<()> {
+        match self.verify(oid)?.as_str() {
+            "tree" => Ok(()),
+            _ => Err(Error::BadObject(oid.to_hex())),
+        }
     }
 
     /// True when the object is in the store.
@@ -732,5 +752,49 @@ mod tests {
         assert_eq!(back.len(), 2);
         assert_eq!(back[0].name, "a");
         assert_eq!(back[1].mode, Mode::Executable);
+    }
+
+    #[test]
+    fn empty_loose_file_is_rewritten_and_verify_tree_catches_corruption() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ObjectStore::new(dir.path());
+        let blob = store.write_blob(b"x").unwrap();
+        let mut entries = vec![TreeEntry {
+            name: "a".into(),
+            mode: Mode::File,
+            oid: blob,
+        }];
+        let tree = store.write_tree(&mut entries.clone()).unwrap();
+        store.verify_tree(&tree).unwrap();
+        assert!(store.verify_tree(&blob).is_err(), "a blob is not a tree");
+
+        // A write that never reached the disk left an empty file: the next
+        // write of the same tree replaces it instead of trusting it.
+        let path = store.loose_path(&tree);
+        fs::write(&path, b"").unwrap();
+        assert!(store.verify_tree(&tree).is_err());
+        assert_eq!(store.write_tree(&mut entries).unwrap(), tree);
+        store.verify_tree(&tree).unwrap();
+
+        // Garbage is reported, and an id with no object at all too.
+        fs::write(&path, b"not zlib").unwrap();
+        assert!(store.verify_tree(&tree).is_err());
+        let missing = Oid::from_hex(&"ab".repeat(20)).unwrap();
+        assert!(matches!(
+            store.verify_tree(&missing),
+            Err(Error::NotFound { .. })
+        ));
+        // No temp files are left behind.
+        let leftovers = fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .filter(|e| {
+                e.as_ref()
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".tmp-")
+            })
+            .count();
+        assert_eq!(leftovers, 0);
     }
 }

@@ -24,6 +24,7 @@ use rusqlite::{params, OptionalExtension};
 use serde::Serialize;
 
 use crate::error::{Error, Result};
+use crate::objects::Oid;
 use crate::run::{ENV_ATTEMPT, ENV_SPACE, ENV_VIEW};
 use crate::space::{now, Space, Status, SPACE_DIR};
 
@@ -421,7 +422,13 @@ impl Space {
     }
 
     /// An earlier result for this tree, command and name, from any attempt.
+    /// None when the tree's object is missing or corrupt: a result recorded
+    /// on a tree that was never written (#217) is not reused.
     fn cached_check(&self, tree: &str, command: &str, name: &str) -> Result<Option<Check>> {
+        let stored = Oid::from_hex(tree).and_then(|oid| self.objects().verify_tree(&oid));
+        if stored.is_err() {
+            return Ok(None);
+        }
         Ok(self
             .db
             .query_row(
@@ -704,6 +711,62 @@ mod tests {
             )
             .unwrap();
         assert!(!forced.cached && forced.check.reused_from.is_none());
+    }
+
+    #[test]
+    fn a_tree_without_its_object_is_never_recorded_or_cached() {
+        let (_d, space, a) = space();
+        let r = space.run_check(a, &opts("true")).unwrap();
+        let tree = r.check.tree.clone();
+        let snaps = |s: &Space| -> i64 {
+            s.db.query_row("SELECT count(*) FROM snapshots", [], |r| r.get(0))
+                .unwrap()
+        };
+        let before = snaps(&space);
+
+        // The tree's object is unreadable, as after a write on a full disk:
+        // the snapshot fails loudly and nothing is recorded (#217).
+        let path = space.objects().loose_path(&Oid::from_hex(&tree).unwrap());
+        fs::write(&path, b"torn").unwrap();
+        assert!(space.snapshot(a, "manual", None).is_err());
+        assert!(space.run_check(a, &opts("true")).is_err());
+        assert_eq!(snaps(&space), before);
+        // And the earlier result on that tree is not offered as cached.
+        assert!(space
+            .cached_check(&tree, "true", DEFAULT_NAME)
+            .unwrap()
+            .is_none());
+
+        // A result recorded on a tree id that has no object at all.
+        let missing = "ab".repeat(20);
+        space
+            .insert_check(NewCheck {
+                attempt_id: a,
+                snapshot_id: r.check.snapshot_id,
+                tree: &missing,
+                name: DEFAULT_NAME,
+                command: "true",
+                exit_code: 0,
+                duration_ms: 1,
+                tests: None,
+                log_excerpt: None,
+                reused_from: None,
+                actor: "agent:test",
+            })
+            .unwrap();
+        assert!(space
+            .cached_check(&missing, "true", DEFAULT_NAME)
+            .unwrap()
+            .is_none());
+
+        // Once the tree is written again, checks run and cache as before.
+        fs::remove_file(&path).unwrap();
+        let again = space.run_check(a, &opts("true")).unwrap();
+        assert!(again.cached && again.check.passed);
+        assert!(space
+            .cached_check(&tree, "true", DEFAULT_NAME)
+            .unwrap()
+            .is_some());
     }
 
     #[test]

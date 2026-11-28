@@ -14,6 +14,9 @@
 //!   If nothing changed, the last layer is reused as is.
 //! - A parent that is itself an overlay view starts from its own lower
 //!   chain, so forking a fork costs only what the parent changed.
+//! - Ignored paths (`.gitignore` rules, as snapshots apply them) are left
+//!   out of layers: build output like `target/` would otherwise be copied
+//!   into every layer and fill the disk. Overlay views start cold.
 //!
 //! Mounting, in order of preference:
 //!
@@ -521,12 +524,21 @@ impl Manifest {
 
     /// `lstat` every entry under `root` (skipping `.agentvc` and `.git` at the
     /// top), in parallel.
+    ///
+    /// Paths that `.gitignore` (or `.ignore`) rules exclude are skipped, the
+    /// same rules snapshot capture applies: build output such as `target/`
+    /// or `node_modules/` is never frozen into a layer (#217). A forked
+    /// overlay view starts without it and rebuilds; a parent's earlier
+    /// layers that still hold it get whiteouts.
     pub fn scan(root: &Path) -> Result<Manifest> {
         let taken_ns = now_ns();
         let found = std::sync::Mutex::new(Vec::new());
         let failure = std::sync::Mutex::new(None);
         ignore::WalkBuilder::new(root)
             .standard_filters(false)
+            .ignore(true)
+            .git_ignore(true)
+            .require_git(false)
             .follow_links(false)
             .filter_entry(|e| !(e.depth() == 1 && NOT_COPIED.iter().any(|n| e.file_name() == *n)))
             .build_parallel()
@@ -1481,6 +1493,59 @@ mod tests {
         assert!(!delta.join("gone/deep").exists());
     }
 
+    #[test]
+    fn ignored_build_output_stays_out_of_layers() {
+        let tmp = crate::testutil::tempdir();
+        let src = tmp.path().join("src");
+        fs::create_dir_all(src.join("target/debug")).unwrap();
+        fs::create_dir_all(src.join("web/node_modules/x")).unwrap();
+        fs::write(src.join(".gitignore"), "target/\n").unwrap();
+        fs::write(src.join("web/.gitignore"), "node_modules/\n").unwrap();
+        fs::write(src.join("main.rs"), "v1").unwrap();
+        fs::write(src.join("target/debug/app"), "bin").unwrap();
+        fs::write(src.join("web/node_modules/x/i.js"), "js").unwrap();
+        fs::write(src.join("web/app.js"), "app").unwrap();
+        age(&src);
+
+        let m = Manifest::scan(&src).unwrap();
+        let names: Vec<_> = m.entries.keys().map(|p| p.to_path_buf()).collect();
+        assert_eq!(
+            names,
+            [
+                ".gitignore",
+                "main.rs",
+                "web",
+                "web/.gitignore",
+                "web/app.js"
+            ]
+            .map(PathBuf::from)
+        );
+        let layer = tmp.path().join("L1");
+        let st = write_layer(&src, &m, None, &layer).unwrap();
+        assert_eq!(st.files, 4, "{st:?}");
+        assert!(!layer.join("target").exists());
+        assert!(!layer.join("web/node_modules").exists());
+
+        // A base layer frozen before ignored paths were left out still holds
+        // `target/`: the next delta hides it instead of carrying it on.
+        let mut old = m.clone();
+        old.entries.insert(
+            PathBuf::from("target"),
+            Stat {
+                kind: Kind::Dir,
+                mode: 0o755,
+                size: 0,
+                mtime_ns: 0,
+            },
+        );
+        let delta = tmp.path().join("L2");
+        let d = write_layer(&src, &m, Some(&old), &delta).unwrap();
+        assert_eq!((d.files, d.whiteouts), (0, 1), "{d:?}");
+        use std::os::unix::fs::FileTypeExt;
+        let w = fs::symlink_metadata(delta.join("target")).unwrap();
+        assert!(w.file_type().is_char_device());
+    }
+
     /// Unmounts the space's overlay views when a test ends, even on panic.
     struct Unmount<'a>(&'a Space);
     impl Drop for Unmount<'_> {
@@ -1537,7 +1602,10 @@ mod tests {
         assert_eq!((info.layers, info.reused), (1, false));
         let v = a.attempt.view_path.clone();
         assert!(is_mounted(&v));
-        assert_eq!(fs::read_to_string(v.join("target/cache")).unwrap(), "warm");
+        // Ignored build output is not frozen into the layer (#217).
+        assert!(!v.join("target").exists());
+        assert!(!space.layer_dir(info.layer).join("target").exists());
+        assert_eq!(info.freeze.files, 3, "{:?}", info.freeze);
         // Writes stay in the view.
         fs::write(v.join("main.rs"), "fn main() { a() }\n").unwrap();
         assert_eq!(
