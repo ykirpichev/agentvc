@@ -152,6 +152,9 @@ fn line(a: &Agent) -> String {
             Mode::Resolve => ", resolve clash",
         }
     );
+    if a.stalled {
+        t.push_str("\n      ! no output lately (agentvc.agents-stall-after)");
+    }
     if let Some(q) = &a.question {
         t.push_str(&format!("\n      ? {}", q.text));
     } else if let Some(s) = &a.last_step {

@@ -760,6 +760,8 @@ export interface Agent {
   /** Resolve agents: files still holding conflict markers when it stopped. */
   markers_left?: string[]
   stale: boolean
+  /** Running, but its runner has written nothing for `agentvc.agents-stall-after` (default 15m). */
+  stalled?: boolean
   /** Rank in Needs you, 1 most urgent; null when it does not need you. */
   urgency: number | null
   waiting_since: number | null

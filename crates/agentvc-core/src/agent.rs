@@ -65,6 +65,19 @@ use crate::workspace::{self, EditOutcome, Op, RequestStatus};
 /// workspaces; each workspace can set a lower `max` of its own.
 pub const DEFAULT_LIMIT: usize = 8;
 
+/// A running agent with no runner output for this long is marked
+/// `stalled` (it needs a look), unless `git config agentvc.agents-stall-after`
+/// says otherwise (`30s`, `15m`, `2h`; `0` turns it off).
+pub const DEFAULT_STALL_AFTER: i64 = 15 * 60;
+/// A turn that runs this long (time spent waiting on a person not counted)
+/// is stopped and the agent fails, unless `agentvc.agents-turn-timeout`
+/// says otherwise (`0` turns it off).
+pub const DEFAULT_TURN_TIMEOUT: i64 = 4 * 3600;
+/// Landed and discarded agents move to the archive this long after they
+/// finished, unless `agentvc.agents-archive-after` says otherwise (`0`
+/// keeps them). `agentvc agent show agN` still finds them.
+pub const DEFAULT_ARCHIVE_AFTER: i64 = 14 * 86400;
+
 /// Runners an agent can use.
 pub const RUNNERS: &[&str] = &["claude", "codex", "cursor", "command"];
 /// Permission levels for Claude Code agents, the default first.
@@ -143,6 +156,8 @@ const RECORD: &str = "agent.json";
 pub const AGENT_MARKER: &str = "agentvc-agent";
 const STEPS: &str = "steps.jsonl";
 const OUTPUT: &str = "output.log";
+/// The subdirectory of an agents root that archived agents move to.
+const ARCHIVE: &str = "archive";
 const LOCK_WAIT: Duration = Duration::from_secs(10);
 const POLL: Duration = Duration::from_millis(300);
 const TAIL_LINES: usize = 20;
@@ -451,6 +466,10 @@ pub struct Agent {
     /// Computed on read: the start branch moved since the agent started.
     #[serde(default)]
     pub stale: bool,
+    /// Computed on read: running, but its runner has written nothing for
+    /// `agentvc.agents-stall-after` (see [`DEFAULT_STALL_AFTER`]).
+    #[serde(default)]
+    pub stalled: bool,
     /// Computed on read: rank in the "Needs you" list (1 is most urgent),
     /// `None` when it does not need a person.
     #[serde(default)]
@@ -462,11 +481,12 @@ pub struct Agent {
 
 impl Agent {
     /// The rank in "Needs you": 1 blocked on a question or approval, 2
-    /// failed, 3 tests failing, 4 ready for review, 5 ready but stale.
+    /// failed or stalled, 3 tests failing, 4 ready for review, 5 ready but stale.
     pub fn compute_urgency(&self) -> Option<u8> {
         match self.state {
             AgentState::Asking | AgentState::NeedsApproval => Some(1),
             AgentState::Failed => Some(2),
+            AgentState::Running if self.stalled => Some(2),
             AgentState::TestsFailing => Some(3),
             AgentState::Ready | AgentState::Stopped if self.stale => Some(5),
             AgentState::Ready | AgentState::Stopped => Some(4),
@@ -699,9 +719,12 @@ pub fn agent_dir(cwd: &Path, id: &str) -> Result<PathBuf> {
         return Ok(own);
     }
     let w = Window::open(cwd)?;
-    space_roots(&w)
-        .into_iter()
+    let roots = space_roots(&w);
+    // Live agents first, then archived ones.
+    roots
+        .iter()
         .map(|r| r.join(format!("ag{n}")))
+        .chain(roots.iter().map(|r| r.join(ARCHIVE).join(format!("ag{n}"))))
         .find(|d| d.join(RECORD).exists())
         .ok_or_else(|| Error::NotFound {
             kind: "agent",
@@ -729,10 +752,11 @@ fn new_agent_dir(root: &Path, roots: &[PathBuf]) -> Result<(String, PathBuf)> {
             })
             .unwrap_or(0)
     };
+    // Archived agents keep their ids too.
     let mut n = roots
         .iter()
-        .map(|r| highest(r))
-        .chain([highest(root)])
+        .chain([&root.to_path_buf()])
+        .flat_map(|r| [highest(r), highest(&r.join(ARCHIVE))])
         .max()
         .unwrap_or(0);
     loop {
@@ -780,6 +804,32 @@ fn config(w: &Window, key: &str) -> Option<String> {
         .git(&["config", "--get", key], None)
         .ok()
         .filter(|s| !s.is_empty())
+}
+
+/// A length of time in seconds: `30s`, `15m`, `4h`, `14d`, or a bare
+/// number of minutes. `0` means off.
+fn parse_duration(v: &str) -> Option<i64> {
+    let v = v.trim();
+    let (num, unit) = match v.char_indices().find(|(_, c)| !c.is_ascii_digit()) {
+        Some((i, _)) => (&v[..i], v[i..].trim()),
+        None => (v, "m"),
+    };
+    let n: i64 = num.parse().ok()?;
+    let unit = match unit {
+        "s" => 1,
+        "m" => 60,
+        "h" => 3600,
+        "d" => 86400,
+        _ => return None,
+    };
+    n.checked_mul(unit)
+}
+
+/// The duration setting `key` of the repo of `w`, in seconds.
+fn duration_config(w: &Window, key: &str, default: i64) -> i64 {
+    config(w, key)
+        .and_then(|v| parse_duration(&v))
+        .unwrap_or(default)
 }
 
 // ---- starting ----------------------------------------------------------------
@@ -1282,6 +1332,7 @@ fn start_inner(
         conflict: conflict.cloned(),
         markers_left: Vec::new(),
         stale: false,
+        stalled: false,
         urgency: None,
         waiting_since: None,
     };
@@ -1476,6 +1527,7 @@ fn refresh(
     dir: &Path,
     mut a: Agent,
     here: &str,
+    stall_after: i64,
     tips: &mut dyn FnMut(&Agent) -> Option<String>,
 ) -> Agent {
     if a.state.is_active() && a.machine == here {
@@ -1509,6 +1561,17 @@ fn refresh(
             a.seconds += (now() - t).max(0);
         }
     }
+    // Quiet for too long while it runs (not while it waits on a person,
+    // and not while its check runs, which writes elsewhere).
+    let quiet_since = last_output(dir).max(a.turn_started_at.unwrap_or(0));
+    a.stalled = a.state == AgentState::Running
+        && stall_after > 0
+        && quiet_since > 0
+        && now() - quiet_since >= stall_after
+        && !a
+            .last_step
+            .as_deref()
+            .is_some_and(|s| s.starts_with("Checking"));
     if a.state.is_done() {
         if let Some(t) = tips(&a) {
             // A resolution is stale once its branch moved off the tip whose
@@ -1520,9 +1583,29 @@ fn refresh(
     a.urgency = a.compute_urgency();
     a.waiting_since = a.urgency.map(|_| match &a.question {
         Some(q) => q.asked_at,
+        None if a.stalled => quiet_since,
         None => a.finished_at.unwrap_or(a.updated_at),
     });
     a
+}
+
+/// When the runner of the agent in `dir` last wrote output (unix seconds),
+/// 0 when it never did.
+fn last_output(dir: &Path) -> i64 {
+    fs::metadata(dir.join(OUTPUT))
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |d| d.as_secs() as i64)
+}
+
+/// Move a closed agent's directory into its root's archive.
+fn archive(root: &Path, dir: &Path) -> bool {
+    let Some(name) = dir.file_name() else {
+        return false;
+    };
+    let to = root.join(ARCHIVE);
+    fs::create_dir_all(&to).is_ok() && fs::rename(dir, to.join(name)).is_ok()
 }
 
 /// What [`list`] returns.
@@ -1581,6 +1664,8 @@ pub fn list(cwd: &Path, all: bool) -> Result<AgentList> {
                     .is_some()
             })
     };
+    let stall_after = duration_config(&w, "agentvc.agents-stall-after", DEFAULT_STALL_AFTER);
+    let archive_after = duration_config(&w, "agentvc.agents-archive-after", DEFAULT_ARCHIVE_AFTER);
     let mut agents: Vec<Agent> = Vec::new();
     for root in &roots {
         let Ok(rd) = fs::read_dir(root) else { continue };
@@ -1588,6 +1673,15 @@ pub fn list(cwd: &Path, all: bool) -> Result<AgentList> {
             let dir = e.path();
             let Ok(a) = read_agent(&dir) else { continue };
             let a = settle_landing(&dir, a, &w);
+            // Long closed: out of the way, so listing stays cheap (#232).
+            if a.state.is_closed()
+                && archive_after > 0
+                && now() - a.finished_at.unwrap_or(a.updated_at) >= archive_after
+                && !follows_up(&a)
+                && archive(root, &dir)
+            {
+                continue;
+            }
             if !all && a.state.is_closed() && !follows_up(&a) {
                 continue;
             }
@@ -1596,7 +1690,7 @@ pub fn list(cwd: &Path, all: bool) -> Result<AgentList> {
             if agents.iter().any(|x| x.id == a.id) {
                 continue;
             }
-            agents.push(refresh(&dir, a, &here, &mut tips));
+            agents.push(refresh(&dir, a, &here, stall_after, &mut tips));
         }
     }
     agents.sort_by_key(|a| std::cmp::Reverse(parse_agent_id(&a.id).unwrap_or(0)));
@@ -1636,14 +1730,15 @@ pub struct AgentDetail {
 
 pub fn show(cwd: &Path, id: &str) -> Result<AgentDetail> {
     let dir = agent_dir(cwd, id)?;
-    let mut agent = list(cwd, true)?
+    let listed = list(cwd, true)?
         .agents
         .into_iter()
-        .find(|a| a.id == id.trim())
-        .ok_or_else(|| Error::NotFound {
-            kind: "agent",
-            id: id.to_string(),
-        })?;
+        .find(|a| a.id == id.trim());
+    // Not listed: archived (#232), shown as stored.
+    let mut agent = match listed {
+        Some(a) => a,
+        None => read_agent(&dir)?,
+    };
     // While it works, what it changed so far, uncommitted files included.
     if agent.state.is_active() && agent.worktree.is_dir() {
         agent.result = Some(changes_of(&agent, true));
@@ -2864,6 +2959,135 @@ fn run_check(dir: &Path, a: &Agent, command: &str) -> CheckResult {
 
 /// The background process behind one agent turn: wait for a slot, run the
 /// runner, then commit, check and record the outcome. `agentvc agent-worker`.
+/// Where this machine's agent slots are kept: one file per working agent,
+/// named `<worker pid>-<agent>`, under `$AGENTVC_HOME/agent-slots` (#232).
+fn machine_slots() -> Option<PathBuf> {
+    crate::checkouts::home().map(|h| h.join("agent-slots"))
+}
+
+/// The slot file name of the agent in `dir` (its worker is this process).
+fn slot_name(dir: &Path) -> String {
+    // FNV-1a of the directory: agents of different repos share ids.
+    let h = dir
+        .to_string_lossy()
+        .bytes()
+        .fold(0xcbf2_9ce4_8422_2325_u64, |h, b| {
+            (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
+        });
+    let id = dir.file_name().and_then(|n| n.to_str()).unwrap_or("ag");
+    format!("{}-{id}-{h:016x}", std::process::id())
+}
+
+/// Slots held on this machine by live workers, other than `mine`. Slots of
+/// workers that died are removed.
+fn machine_busy(slots: &Path, mine: &str) -> usize {
+    let Ok(rd) = fs::read_dir(slots) else {
+        return 0;
+    };
+    rd.flatten()
+        .filter(|e| {
+            let name = e.file_name();
+            let Some(name) = name.to_str() else {
+                return false;
+            };
+            let Some(pid) = name.split('-').next().and_then(|p| p.parse::<i64>().ok()) else {
+                return false;
+            };
+            if name == mine {
+                return false;
+            }
+            if !pid_alive(pid) {
+                let _ = fs::remove_file(e.path());
+                return false;
+            }
+            true
+        })
+        .count()
+}
+
+/// A slot this worker holds; let go when dropped.
+struct Slot(PathBuf);
+
+impl Slot {
+    fn take(slots: &Path, name: &str) -> Result<Slot> {
+        let path = slots.join(name);
+        fs::write(&path, b"").at(&path)?;
+        Ok(Slot(path))
+    }
+}
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
+}
+
+/// Stops a turn that has run for longer than its timeout. Time the agent
+/// spends waiting on a person does not count. Ends when dropped.
+struct Watchdog(Option<std::sync::Arc<std::sync::atomic::AtomicBool>>);
+
+impl Watchdog {
+    fn start(dir: &Path, pid: i64, timeout: i64) -> Watchdog {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        if timeout <= 0 {
+            return Watchdog(None);
+        }
+        let done = std::sync::Arc::new(AtomicBool::new(false));
+        let (flag, dir) = (done.clone(), dir.to_path_buf());
+        let limit = Duration::from_secs(timeout as u64);
+        std::thread::spawn(move || {
+            let tick = Duration::from_millis(250);
+            let mut ran = Duration::ZERO;
+            while !flag.load(Ordering::Relaxed) {
+                std::thread::sleep(tick);
+                let Ok(a) = read_agent(&dir) else { return };
+                if !a.state.is_active() || a.stop_requested {
+                    return;
+                }
+                if a.state == AgentState::Running {
+                    ran += tick;
+                }
+                if ran >= limit {
+                    let why = format!(
+                        "the turn ran for longer than {} and was stopped \
+                         (agentvc.agents-turn-timeout)",
+                        human_duration(timeout)
+                    );
+                    add_step(&dir, "line", &why);
+                    let _ = update(&dir, |a| {
+                        a.error = Some(why);
+                        Ok(())
+                    });
+                    if !flag.load(Ordering::Relaxed) {
+                        terminate(pid);
+                    }
+                    return;
+                }
+            }
+        });
+        Watchdog(Some(done))
+    }
+}
+
+impl Drop for Watchdog {
+    fn drop(&mut self) {
+        if let Some(f) = &self.0 {
+            f.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+}
+
+/// `90` → `1m 30s`, `7200` → `2h`.
+fn human_duration(secs: i64) -> String {
+    let (h, m, s) = (secs / 3600, secs % 3600 / 60, secs % 60);
+    [(h, "h"), (m, "m"), (s, "s")]
+        .iter()
+        .filter(|(n, _)| *n > 0)
+        .map(|(n, u)| format!("{n}{u}"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 pub fn work(dir: &Path, exe: &Path) -> Result<Agent> {
     let me = std::process::id() as i64;
     let a = update(dir, |a| {
@@ -2876,7 +3100,9 @@ pub fn work(dir: &Path, exe: &Path) -> Result<Agent> {
     let common = dir.parent().map(Path::to_path_buf).unwrap_or_default();
     let wt = Window::open(&a.worktree).ok();
     let max = wt.as_ref().map(limit).unwrap_or(DEFAULT_LIMIT);
-    let (a, began) = loop {
+    // The cap holds across every repo on this machine, not just this one.
+    let machine = machine_slots();
+    let (a, began, _slot) = loop {
         let cur = read_agent(dir)?;
         if cur.stop_requested {
             return update(dir, |a| {
@@ -2887,6 +3113,15 @@ pub fn work(dir: &Path, exe: &Path) -> Result<Agent> {
             });
         }
         let slots = lock_record(&common)?;
+        let machine_lock = match &machine {
+            Some(m) => {
+                fs::create_dir_all(m).at(m)?;
+                Some(lock_record(m)?)
+            }
+            None => None,
+        };
+        let mine = slot_name(dir);
+        let elsewhere = machine.as_deref().map_or(0, |m| machine_busy(m, &mine));
         let here = workspace::machine();
         let busy: Vec<Agent> = fs::read_dir(&common)
             .map(|rd| {
@@ -2907,7 +3142,11 @@ pub fn work(dir: &Path, exe: &Path) -> Result<Agent> {
             .as_ref()
             .and_then(|w| workspace_settings(w, &cur.workspace).max);
         let in_ws = busy.iter().filter(|o| o.workspace == cur.workspace).count();
-        if busy.len() < max && ws_max.is_none_or(|m| in_ws < m) {
+        if busy.len() < max && elsewhere < max && ws_max.is_none_or(|m| in_ws < m) {
+            let slot = match &machine {
+                Some(m) => Some(Slot::take(m, &mine)?),
+                None => None,
+            };
             let began = now();
             let a = update(dir, |a| {
                 a.state = AgentState::Running;
@@ -2917,9 +3156,11 @@ pub fn work(dir: &Path, exe: &Path) -> Result<Agent> {
                 a.error = None;
                 Ok(())
             })?;
+            drop(machine_lock);
             drop(slots);
-            break (a, began);
+            break (a, began, slot);
         }
+        drop(machine_lock);
         drop(slots);
         std::thread::sleep(Duration::from_secs(1));
     };
@@ -2960,6 +3201,10 @@ pub fn work(dir: &Path, exe: &Path) -> Result<Agent> {
         a.pending_reply = None;
         Ok(())
     })?;
+    let timeout = wt.as_ref().map_or(DEFAULT_TURN_TIMEOUT, |w| {
+        duration_config(w, "agentvc.agents-turn-timeout", DEFAULT_TURN_TIMEOUT)
+    });
+    let watchdog = Watchdog::start(dir, pid, timeout);
     let stream = a.runner != "command";
     if let Some(out) = child.stdout.take() {
         for line in BufReader::new(out).lines() {
@@ -2978,6 +3223,7 @@ pub fn work(dir: &Path, exe: &Path) -> Result<Agent> {
         }
     }
     let status = child.wait().at("runner")?;
+    drop(watchdog);
     let cur = read_agent(dir)?;
     // Discarded (or landed) while it ran: that is final, and its worktree
     // may be gone. Only let go of it.
@@ -3843,6 +4089,104 @@ mod tests {
         assert_eq!(r.state, AgentState::Discarded);
         assert!(r.error.is_none(), "{:?}", r.error);
         assert!(r.worker_pid.is_none() && r.child_pid.is_none());
+    }
+
+    #[test]
+    fn durations_parse() {
+        assert_eq!(parse_duration("30s"), Some(30));
+        assert_eq!(parse_duration("15m"), Some(900));
+        assert_eq!(parse_duration("15"), Some(900));
+        assert_eq!(parse_duration("4h"), Some(14400));
+        assert_eq!(parse_duration("14d"), Some(14 * 86400));
+        assert_eq!(parse_duration("0"), Some(0));
+        assert_eq!(parse_duration("soon"), None);
+        assert_eq!(parse_duration("5w"), None);
+        assert_eq!(human_duration(5400), "1h 30m");
+        assert_eq!(human_duration(2), "2s");
+    }
+
+    #[test]
+    fn a_quiet_runner_is_marked_stalled() {
+        let (_t, work) = repo();
+        git(&work, &["config", "agentvc.agents-stall-after", "1s"]);
+        let (_dir, id, h) = start_in_background(&work, req("Quiet", "echo up; sleep 60"), |a| {
+            a.state == AgentState::Running
+        });
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let a = loop {
+            let l = list(&work, false).unwrap();
+            let a = l.agents.into_iter().find(|a| a.id == id).unwrap();
+            if a.stalled || Instant::now() > deadline {
+                break a;
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        };
+        assert!(a.stalled, "{a:?}");
+        assert_eq!(a.urgency, Some(2));
+        assert!(a.waiting_since.is_some());
+        stop(&work, &id).unwrap();
+        let b = h.join().unwrap();
+        assert_eq!(b.state, AgentState::Stopped);
+        // Not running any more: not stalled.
+        let l = list(&work, false).unwrap();
+        assert!(!l.agents.iter().any(|a| a.stalled));
+    }
+
+    #[test]
+    fn a_turn_that_runs_too_long_is_stopped() {
+        let (_t, work) = repo();
+        git(&work, &["config", "agentvc.agents-turn-timeout", "1s"]);
+        let (_dir, _id, h) = start_in_background(&work, req("Endless", "sleep 60"), |_| true);
+        let t = Instant::now();
+        let b = h.join().unwrap();
+        assert_eq!(b.state, AgentState::Failed, "{b:?}");
+        let e = b.error.unwrap_or_default();
+        assert!(e.contains("agentvc.agents-turn-timeout"), "{e}");
+        assert!(t.elapsed() < Duration::from_secs(20), "{:?}", t.elapsed());
+    }
+
+    #[test]
+    fn closed_agents_move_to_the_archive_and_keep_their_ids() {
+        let (_t, work) = repo();
+        let (_dir, id, h) = start_in_background(&work, req("Old", "sleep 60"), |_| true);
+        discard(&work, &id).unwrap();
+        h.join().unwrap();
+        assert!(list(&work, true).unwrap().agents.iter().any(|a| a.id == id));
+        git(&work, &["config", "agentvc.agents-archive-after", "1s"]);
+        std::thread::sleep(Duration::from_millis(2100));
+        assert!(!list(&work, true).unwrap().agents.iter().any(|a| a.id == id));
+        let dir = agent_dir(&work, &id).unwrap();
+        assert!(
+            dir.parent().unwrap().ends_with(ARCHIVE),
+            "{}",
+            dir.display()
+        );
+        assert_eq!(show(&work, &id).unwrap().agent.state, AgentState::Discarded);
+        // A new agent does not reuse the archived one's id.
+        let root = dir.parent().unwrap().parent().unwrap();
+        let (next, _) = new_agent_dir(root, &[]).unwrap();
+        assert!(parse_agent_id(&next).unwrap() > parse_agent_id(&id).unwrap());
+    }
+
+    #[test]
+    fn machine_slots_count_live_workers_only() {
+        let t = tempfile::tempdir().unwrap();
+        let slots = t.path();
+        let me = std::process::id();
+        let mine = format!("{me}-ag1-0000000000000001");
+        let other = Slot::take(slots, &format!("{me}-ag2-0000000000000002")).unwrap();
+        // A worker that died long ago (pids this high are not handed out).
+        fs::write(slots.join("4194303999-ag3-0000000000000003"), b"").unwrap();
+        fs::write(slots.join("agent.lock"), b"").unwrap();
+        assert_eq!(machine_busy(slots, &mine), 1);
+        assert!(!slots.join("4194303999-ag3-0000000000000003").exists());
+        drop(other);
+        assert_eq!(machine_busy(slots, &mine), 0);
+        assert!(slot_name(Path::new("/r/agents/ag7")).starts_with(&format!("{me}-ag7-")));
+        assert_ne!(
+            slot_name(Path::new("/r/agents/ag7")),
+            slot_name(Path::new("/s/agents/ag7"))
+        );
     }
 
     #[cfg(unix)]

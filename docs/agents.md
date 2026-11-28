@@ -101,6 +101,14 @@ worker dies, the next read marks it `failed` and kills its runner, and a
 `discarded` are final: a worker that finishes after a discard leaves it
 discarded. The daemon watches open agents only.
 
+Watchdogs. An agent that runs with no output from its runner for
+`agentvc.agents-stall-after` (15 minutes) is flagged **stalled**: it stays
+`running`, but it shows in Needs you ("no output lately") so you can look
+at it or stop it. A runner that is busy in one long tool call (a build)
+writes nothing either, which is why it is only a flag. A turn that runs
+past `agentvc.agents-turn-timeout` (4 hours, not counting time it waits on
+you) is stopped like `stop` would and ends `failed`, saying why.
+
 ## Runners
 
 - **Claude Code** (default): `claude -p --output-format stream-json`, run in
@@ -194,12 +202,16 @@ Repo-wide defaults and the machine's cap:
 | --- | --- | --- |
 | `agentvc.agent-check` | none | check command run when an agent stops, e.g. `cargo test --workspace` |
 | `agentvc.agent-runner`, `-model`, `-permissions`, `-sandbox`, `-command`, `-auto-land` | | defaults for the workspace settings above |
-| `agentvc.agents-max` | 8 | safety cap: agents working at once on this machine across all workspaces; the rest wait as `queued` |
+| `agentvc.agents-max` | 8 | safety cap: agents working at once on this machine across all workspaces and repos (slots in `$AGENTVC_HOME/agent-slots`, default `~/.agentvc`); the rest wait as `queued` |
+| `agentvc.agents-stall-after` | `15m` | a `running` agent whose runner wrote nothing for this long is marked `stalled` and shows in Needs you; `0` turns it off |
+| `agentvc.agents-turn-timeout` | `4h` | a turn that runs longer (time waiting on you not counted) is stopped and the agent fails; `0` turns it off |
+| `agentvc.agents-archive-after` | `14d` | landed and discarded agents older than this move to `agents/archive/` (out of `ls --all`; `show agN` still finds them); `0` keeps them |
 | `agentvc.agent-worktrees` | `~/.agentvc/worktrees/<repo>-<hash>` | where agent worktrees go (never under `.git`: Claude Code refuses to edit there) |
 
 ## Where things live
 
-Each agent is a directory `<git-common-dir>/agentvc/agents/agN/` with
+Each agent is a directory `<git-common-dir>/agentvc/agents/agN/` (moved to
+`agents/archive/agN/` once archived) with
 `agent.json` (the record), `steps.jsonl`, `output.log` and `answers/`. The
 CLI, the daemon, the MCP server inside the agent and the agent's worker
 process all read and write the same files. Agent worktrees carry a marker
