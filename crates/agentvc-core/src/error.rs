@@ -26,6 +26,15 @@ pub enum Error {
     BadBranch(String),
     #[error("branch {0} already exists; pass --force to move it")]
     BranchExists(String),
+    /// The branch has work the export would drop: its head is not an
+    /// ancestor of the new commit and has not landed in the export's base
+    /// (#213). Same code as [`Error::BranchExists`].
+    #[error("branch {branch} already exists at {head} with work that is not in the export's base: {reason}; pass --force to move it anyway")]
+    BranchNotLanded {
+        branch: String,
+        head: String,
+        reason: String,
+    },
     #[error("branch {0} is checked out in the host repository; export to another branch")]
     BranchCheckedOut(String),
     #[error("branch {branch} is checked out and its working tree has changes that the export would overwrite; commit or stash them first: {stderr}")]
@@ -207,7 +216,7 @@ impl Error {
             Error::NotGitRepo(_) => "not_git_repo",
             Error::NotRepoRoot { .. } => "not_repo_root",
             Error::BadBranch(_) => "bad_branch",
-            Error::BranchExists(_) => "branch_exists",
+            Error::BranchExists(_) | Error::BranchNotLanded { .. } => "branch_exists",
             Error::BranchCheckedOut(_) => "branch_checked_out",
             Error::CheckoutDirty { .. } => "checkout_dirty",
             Error::PushNotAllowed { .. } => "push_not_allowed",

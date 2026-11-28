@@ -15,7 +15,7 @@ use serde_json::{json, Value};
 
 use crate::config;
 use crate::error::{Error, Result};
-use crate::export::{export, ExportOptions, ExportResult, HostRepo};
+use crate::export::{export, ExportOptions, ExportResult, HostRepo, MergedPr};
 use crate::space::{Attempt, Space, Status};
 
 /// Overrides the API base URL (GitHub Enterprise, tests).
@@ -926,6 +926,31 @@ pub fn open_pr(space: &Space, attempt_id: i64, opts: &PrOptions) -> Result<PrRes
         None,
     )?;
     let existing = open.as_array().and_then(|a| a.first()).cloned();
+    // No open PR: the one agentvc last opened from this branch may have
+    // merged (a cloud thread's own branch after a squash merge). Then the
+    // branch still points at its head, and the export continues it with a
+    // merge commit instead of a force push (#213). A merged PR is never
+    // updated: a new one is opened below.
+    let merged_pr = match (&existing, &previous) {
+        (None, Some(e)) => e
+            .pr_url
+            .as_deref()
+            .and_then(parse_pr_url)
+            .filter(|(r, _)| r.eq_ignore_ascii_case(&repo))
+            .and_then(|(_, n)| {
+                api.call("GET", &format!("/repos/{repo}/pulls/{n}"), None)
+                    .ok()
+            })
+            .filter(|v| v["merged"] == true || v["merged_at"].is_string())
+            .and_then(|v| {
+                Some(MergedPr {
+                    number: v["number"].as_u64()?,
+                    head: v["head"]["sha"].as_str()?.to_string(),
+                    merge_commit: v["merge_commit_sha"].as_str().map(str::to_string),
+                })
+            }),
+        _ => None,
+    };
     let (title, title_source) = pr_title(
         space,
         &attempt,
@@ -948,11 +973,14 @@ pub fn open_pr(space: &Space, attempt_id: i64, opts: &PrOptions) -> Result<PrRes
             verify: opts.verify,
             squash: opts.squash,
             stack: opts.stack,
+            merged_pr,
         },
     )?;
 
     let refspec = format!("+refs/heads/{branch}:refs/heads/{branch}");
-    let push_spec = if exp.replaced.is_some() {
+    // A continued branch fast-forwards, so it is pushed without force: if
+    // the remote branch moved meanwhile, the push is refused, not clobbered.
+    let push_spec = if exp.replaced.is_some() && exp.continued_from.is_none() {
         refspec.as_str()
     } else {
         &refspec[1..]
@@ -1363,6 +1391,7 @@ mod tests {
                 objects_copied: 0,
                 hooks: vec![],
                 story: Vec::new(),
+                continued_from: None,
             };
             pr_body(space, &space.attempt(id).unwrap(), &exp).unwrap()
         };
@@ -1449,6 +1478,7 @@ mod tests {
             objects_copied: 0,
             hooks: vec![],
             story: Vec::new(),
+            continued_from: None,
         };
         let body = pr_body(&space, &winner, &exp).unwrap();
 

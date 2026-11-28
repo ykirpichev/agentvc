@@ -2866,6 +2866,7 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
                 verify: verify_flag(verify, no_verify),
                 squash,
                 stack,
+                merged_pr: None,
             };
             let r = agentvc_core::export::export(&space, attempt_id(&attempt)?, &opts)?;
             Out {
@@ -2879,7 +2880,8 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
                         .as_ref()
                         .map(|p| format!(", parent {}", &p[..12]))
                         .unwrap_or_else(|| ", root commit".into())
-                ) + &story_commits_text(&r.story),
+                ) + &continued_text(&r)
+                    + &story_commits_text(&r.story),
                 json: json!({ "export": r }),
             }
         }
@@ -3150,13 +3152,14 @@ fn run(cli: Cli) -> anyhow::Result<Out> {
             });
             let mut out = Out {
                 text: format!(
-                    "{} PR #{}: {}\n{} -> {} ({}){}",
+                    "{} PR #{}: {}\n{} -> {} ({}){}{}",
                     if r.updated { "Updated" } else { "Opened" },
                     r.number,
                     r.url,
                     r.export.branch,
                     r.base,
                     &r.export.commit[..12],
+                    continued_text(&r.export),
                     if r.export.checkout_updated {
                         "\n(the branch is checked out here; the checkout moved to the new commit)"
                     } else {
@@ -4420,6 +4423,24 @@ fn render_story(st: &agentvc_core::story::Story) -> String {
         );
     }
     text.trim_end().to_string()
+}
+
+/// The line saying an export continued a landed branch head (#213).
+fn continued_text(r: &agentvc_core::ExportResult) -> String {
+    let Some(c) = &r.continued_from else {
+        return String::new();
+    };
+    let head = &c.head[..12.min(c.head.len())];
+    match c.pr {
+        Some(n) => format!(
+            "\n{} had merged PR #{n} (head {head}); continuing it with a merge commit (fast-forward)",
+            r.branch
+        ),
+        None => format!(
+            "\n{}'s head {head} is already in the base; continuing it with a merge commit (fast-forward)",
+            r.branch
+        ),
+    }
 }
 
 fn story_commits_text(commits: &[agentvc_core::export::StoryCommit]) -> String {
