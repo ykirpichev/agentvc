@@ -3468,6 +3468,89 @@ fn pr_continues_thread_branch_after_squash_merge() {
     assert_eq!(git(&remote, &["rev-parse", "claude/x"]), commit);
 }
 
+/// The agents cap holds across repos on one machine (#232): with
+/// `agentvc.agents-max` 1, an agent of a second repo waits in `queued`
+/// while the first repo's agent works, and starts once it stops.
+#[cfg(unix)]
+#[test]
+fn agent_cap_holds_across_repos_on_a_machine() {
+    let tmp = tempdir();
+    let home = tmp.path().join("home");
+    let repos: Vec<std::path::PathBuf> = ["r1", "r2"]
+        .iter()
+        .map(|r| {
+            let w = tmp.path().join(r);
+            fs::create_dir_all(&w).unwrap();
+            git(&w, &["init", "-q", "-b", "main"]);
+            fs::write(w.join("a.txt"), "1\n").unwrap();
+            git(&w, &["add", "-A"]);
+            git(&w, &["commit", "-q", "-m", "init"]);
+            git(&w, &["config", "agentvc.agents-max", "1"]);
+            let wts = tmp.path().join(format!("wts-{r}"));
+            git(
+                &w,
+                &["config", "agentvc.agent-worktrees", wts.to_str().unwrap()],
+            );
+            w
+        })
+        .collect();
+    let state = |w: &Path, id: &str| -> String {
+        let v = agentvc_home(&home, w, &["agent", "show", id]);
+        v["agent"]["state"].as_str().unwrap_or_default().to_string()
+    };
+    let wait_for = |w: &Path, id: &str, ok: &dyn Fn(&str) -> bool| -> String {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        loop {
+            let s = state(w, id);
+            if ok(&s) || std::time::Instant::now() > deadline {
+                return s;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+    };
+    let v = agentvc_home(
+        &home,
+        &repos[0],
+        &[
+            "agent",
+            "start",
+            "--command",
+            "sleep 30",
+            "--no-auto-land",
+            "hold",
+        ],
+    );
+    let first = v["agent"]["id"].as_str().unwrap().to_string();
+    assert_eq!(wait_for(&repos[0], &first, &|s| s == "running"), "running");
+
+    let v = agentvc_home(
+        &home,
+        &repos[1],
+        &[
+            "agent",
+            "start",
+            "--command",
+            "echo hi",
+            "--no-auto-land",
+            "wait",
+        ],
+    );
+    let second = v["agent"]["id"].as_str().unwrap().to_string();
+    std::thread::sleep(std::time::Duration::from_millis(2500));
+    assert_eq!(state(&repos[1], &second), "queued");
+
+    agentvc_home(&home, &repos[0], &["agent", "stop", &first]);
+    let s = wait_for(&repos[1], &second, &|s| s != "queued" && s != "running");
+    assert_eq!(s, "ready");
+    let left: Vec<_> = fs::read_dir(home.join("agent-slots"))
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n != "agent.lock")
+        .collect();
+    assert!(left.is_empty(), "{left:?}");
+}
+
 /// The restack bot (or another checkout) may push to the thread branch
 /// after this checkout's last `pr`, and GitHub then squash-merges that
 /// head. The next `pr` fetches the branch, continues the remote head rather

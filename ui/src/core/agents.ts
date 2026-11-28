@@ -18,9 +18,10 @@ const STATES: Record<AgentState, { label: string; tone: AgentTone }> = {
   discarded: { label: 'Discarded', tone: 'mute' },
 }
 
-/** The words and tone for an agent's state; a ready agent whose start moved says so. */
-export function agentState(a: Pick<Agent, 'state' | 'stale'>): { label: string; tone: AgentTone } {
+/** The words and tone for an agent's state; a ready agent whose start moved says so, and so does a running one that went quiet. */
+export function agentState(a: Pick<Agent, 'state' | 'stale'> & { stalled?: boolean }): { label: string; tone: AgentTone } {
   const s = STATES[a.state]
+  if (a.stalled && a.state === 'running') return { label: 'Working · no output lately', tone: 'bad' }
   if (a.stale && (a.state === 'ready' || a.state === 'stopped')) return { label: `${s.label} · branch moved`, tone: s.tone }
   return s
 }
