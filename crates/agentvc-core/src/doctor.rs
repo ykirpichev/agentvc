@@ -6,8 +6,9 @@
 //! `--repair` can fix it. Repairs never delete history: they remount or
 //! rewrite views from their latest snapshot, copy missing objects back from
 //! the host git repository, mark runs whose process is gone as finished
-//! (`ps` shows them as `lost`), and remove directories no attempt or layer
-//! refers to.
+//! (`ps` shows them as `lost`), remove directories no attempt or layer
+//! refers to, and put back a worktree's `stack.json` from its `.bak` when it
+//! no longer parses.
 
 use std::collections::HashSet;
 use std::fs;
@@ -67,6 +68,8 @@ pub struct Checked {
     pub snapshots: usize,
     pub objects: usize,
     pub runs: usize,
+    /// Worktrees whose `stack.json` was checked.
+    pub stacks: usize,
 }
 
 /// A repair: returns whether it fixed the problem.
@@ -121,6 +124,7 @@ pub fn doctor(space: &Space, opts: &DoctorOptions) -> Result<DoctorResult> {
     check_orphans(&mut r)?;
     check_runs(&mut r, &mut checked)?;
     check_git(&mut r, opts.offline)?;
+    check_stacks(&mut r, &mut checked);
 
     // Cap the noise: a broken store can have thousands of missing objects.
     let mut seen: std::collections::HashMap<&'static str, usize> = Default::default();
@@ -173,6 +177,63 @@ pub fn doctor(space: &Space, opts: &DoctorOptions) -> Result<DoctorResult> {
         repaired,
         checked,
     })
+}
+
+// ---- stacks -------------------------------------------------------------------
+
+/// The git dirs of the host repository's worktrees: the main one, then
+/// `<common>/worktrees/*`.
+fn worktree_git_dirs(space: &Space) -> Vec<PathBuf> {
+    let Ok(repo) = HostRepo::open(space.workdir()) else {
+        return Vec::new();
+    };
+    let Ok(common) = repo.git(&["rev-parse", "--git-common-dir"], None) else {
+        return Vec::new();
+    };
+    let common = repo.workdir.join(common.trim());
+    let mut dirs = vec![common.clone()];
+    if let Ok(rd) = fs::read_dir(common.join("worktrees")) {
+        let mut more: Vec<PathBuf> = rd.flatten().map(|e| e.path()).collect();
+        more.sort();
+        dirs.extend(more);
+    }
+    dirs
+}
+
+/// Every worktree's `stack.json` parses (#204); a bad one is restored from
+/// its `stack.json.bak` when that is good.
+fn check_stacks(r: &mut Report, checked: &mut Checked) {
+    use crate::stack::{check_state, restore_backup, StateHealth};
+    for git_dir in worktree_git_dirs(r.space) {
+        let health = check_state(&git_dir);
+        if health == StateHealth::Missing {
+            continue;
+        }
+        checked.stacks += 1;
+        let StateHealth::Bad { error, backup } = health else {
+            continue;
+        };
+        let file = git_dir.join("agentvc").join("stack.json");
+        let subject = file.display().to_string();
+        if backup {
+            let mut fix = |_: &Space| restore_backup(&git_dir);
+            r.add(
+                "bad_stack_state",
+                Severity::Error,
+                subject.clone(),
+                format!("{subject} is not valid ({error}); stack commands use stack.json.bak meanwhile, repair puts it back (the bad file is kept as stack.json.bad)"),
+                Some(&mut fix),
+            );
+        } else {
+            r.add(
+                "bad_stack_state",
+                Severity::Error,
+                subject.clone(),
+                format!("{subject} is not valid ({error}) and there is no usable stack.json.bak; fix or remove it, then `agentvc stack adopt` the branches again"),
+                None,
+            );
+        }
+    }
 }
 
 // ---- database ----------------------------------------------------------------
@@ -748,6 +809,63 @@ mod tests {
             },
         )
         .unwrap()
+    }
+
+    /// #204: doctor checks every worktree's `stack.json` and restores a
+    /// bad one from its `.bak`.
+    #[test]
+    fn a_bad_stack_state_is_reported_and_restored() {
+        let tmp = crate::testutil::tempdir();
+        let w = tmp.path();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(w)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}");
+        };
+        git(&["init", "-q", "-b", "main"]);
+        fs::write(w.join("main.rs"), "fn main() {}\n").unwrap();
+        let space = Space::init(w).unwrap();
+        let mut win = crate::stack::Window::open(w).unwrap();
+        win.state.trunk = "one".into();
+        win.save().unwrap();
+        win.state.trunk = "two".into();
+        win.save().unwrap();
+        let file = win.git_dir.join("agentvc").join("stack.json");
+        fs::write(&file, "{\"version\": 1, \"tru").unwrap();
+
+        let r = check(&space, false);
+        let f = r
+            .findings
+            .iter()
+            .find(|f| f.code == "bad_stack_state")
+            .expect("reported");
+        assert!(f.repairable && !f.repaired);
+        assert_eq!(r.checked.stacks, 1);
+        assert!(r.errors >= 1);
+
+        let r = check(&space, true);
+        assert!(r
+            .findings
+            .iter()
+            .any(|f| f.code == "bad_stack_state" && f.repaired));
+        let back = crate::stack::Window::open(w).unwrap();
+        assert_eq!(back.state.trunk, "one", "the previous good state");
+        assert!(!codes(&check(&space, false)).contains(&"bad_stack_state"));
+
+        // No backup: reported, not repairable.
+        fs::write(&file, "").unwrap();
+        fs::remove_file(win.git_dir.join("agentvc").join("stack.json.bak")).unwrap();
+        let r = check(&space, true);
+        let f = r
+            .findings
+            .iter()
+            .find(|f| f.code == "bad_stack_state")
+            .expect("reported");
+        assert!(!f.repairable && !f.repaired);
     }
 
     #[test]

@@ -492,32 +492,134 @@ pub(crate) fn state_path(git_dir: &Path) -> PathBuf {
     git_dir.join("agentvc").join("stack.json")
 }
 
+/// The previous good `stack.json`, kept by every save (#204).
+pub(crate) fn backup_path(git_dir: &Path) -> PathBuf {
+    git_dir.join("agentvc").join("stack.json.bak")
+}
+
+fn parse_state(text: &str) -> std::result::Result<State, serde_json::Error> {
+    serde_json::from_str(text)
+}
+
+fn read_backup(git_dir: &Path) -> Option<State> {
+    parse_state(&fs::read_to_string(backup_path(git_dir)).ok()?).ok()
+}
+
+/// The stack state of the worktree whose git dir is `git_dir`. A
+/// `stack.json` that does not parse (cut short by a crash or a full disk)
+/// falls back to `stack.json.bak` with a warning; `agentvc doctor --repair`
+/// puts the backup back.
 pub(crate) fn read_state(git_dir: &Path) -> Result<Option<State>> {
     let path = state_path(git_dir);
-    match fs::read_to_string(&path) {
-        Ok(s) => {
-            let state: State = serde_json::from_str(&s).map_err(|e| {
-                stack_err(
-                    "bad_stack_state",
-                    format!("{} is not valid: {e}", path.display()),
-                )
-            })?;
-            Ok(Some(state))
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(e).at(path),
+    let text = match fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e).at(path),
+    };
+    match parse_state(&text) {
+        Ok(state) => Ok(Some(state)),
+        Err(e) => match read_backup(git_dir) {
+            Some(state) => {
+                eprintln!(
+                    "agentvc: warning: {} is not valid ({e}); using the previous state from {} (`agentvc doctor --repair` restores it)",
+                    path.display(),
+                    backup_path(git_dir).display()
+                );
+                Ok(Some(state))
+            }
+            None => Err(stack_err(
+                "bad_stack_state",
+                format!(
+                    "{} is not valid: {e} (and there is no usable {})",
+                    path.display(),
+                    backup_path(git_dir).display()
+                ),
+            )),
+        },
     }
+}
+
+/// Write `text` to `path` so that a crash leaves either the old or the new
+/// contents: temp file, fsync, rename, fsync of the directory (Unix).
+pub(crate) fn write_durable(path: &Path, text: &str) -> Result<()> {
+    use std::io::Write;
+    let dir = path.parent().expect("has a parent");
+    fs::create_dir_all(dir).at(dir)?;
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("f");
+    let tmp = dir.join(format!("{name}.{}.tmp", std::process::id()));
+    let written = fs::File::create(&tmp)
+        .and_then(|mut f| {
+            f.write_all(text.as_bytes())?;
+            f.sync_all()
+        })
+        .and_then(|()| fs::rename(&tmp, path));
+    if let Err(e) = written {
+        let _ = fs::remove_file(&tmp);
+        return Err(e).at(path);
+    }
+    #[cfg(unix)]
+    if let Ok(d) = fs::File::open(dir) {
+        let _ = d.sync_all();
+    }
+    Ok(())
 }
 
 pub(crate) fn write_state(git_dir: &Path, state: &State) -> Result<()> {
     let path = state_path(git_dir);
-    let dir = path.parent().expect("has a parent");
-    fs::create_dir_all(dir).at(dir)?;
-    let tmp = dir.join(format!("stack.json.{}.tmp", std::process::id()));
-    let text = serde_json::to_string_pretty(state).expect("state serializes");
-    fs::write(&tmp, text + "\n").at(&tmp)?;
-    fs::rename(&tmp, &path).at(&path)?;
-    Ok(())
+    let text = serde_json::to_string_pretty(state).expect("state serializes") + "\n";
+    // Keep the state being replaced, if it is good, as the backup.
+    if let Ok(old) = fs::read_to_string(&path) {
+        if old != text && parse_state(&old).is_ok() {
+            write_durable(&backup_path(git_dir), &old)?;
+        }
+    }
+    write_durable(&path, &text)
+}
+
+/// What `agentvc doctor` finds in one worktree's `stack.json`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StateHealth {
+    /// No stack here.
+    Missing,
+    Ok,
+    /// Does not parse; `backup` says whether `stack.json.bak` does.
+    Bad {
+        error: String,
+        backup: bool,
+    },
+}
+
+/// Check the `stack.json` of the worktree whose git dir is `git_dir`.
+pub fn check_state(git_dir: &Path) -> StateHealth {
+    match fs::read_to_string(state_path(git_dir)) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => StateHealth::Missing,
+        Err(e) => StateHealth::Bad {
+            error: e.to_string(),
+            backup: read_backup(git_dir).is_some(),
+        },
+        Ok(t) => match parse_state(&t) {
+            Ok(_) => StateHealth::Ok,
+            Err(e) => StateHealth::Bad {
+                error: e.to_string(),
+                backup: read_backup(git_dir).is_some(),
+            },
+        },
+    }
+}
+
+/// Put `stack.json.bak` back as `stack.json` when `stack.json` is bad and
+/// the backup is good; the bad file is kept as `stack.json.bad`. Returns
+/// whether it restored anything.
+pub fn restore_backup(git_dir: &Path) -> Result<bool> {
+    if !matches!(check_state(git_dir), StateHealth::Bad { backup: true, .. }) {
+        return Ok(false);
+    }
+    let bak = backup_path(git_dir);
+    let text = fs::read_to_string(&bak).at(&bak)?;
+    let path = state_path(git_dir);
+    let _ = fs::copy(&path, path.with_extension("json.bad"));
+    write_durable(&path, &text)?;
+    Ok(true)
 }
 
 /// Markers around the stack list `submit` keeps in each PR body.
@@ -3966,6 +4068,58 @@ mod tests {
             String::from_utf8_lossy(&out.stderr)
         );
         String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// #204: every save keeps the previous good state in `stack.json.bak`;
+    /// a truncated `stack.json` falls back to it, and doctor's repair puts
+    /// it back.
+    #[test]
+    fn truncated_state_recovers_from_backup() {
+        let f = setup();
+        let mut w = Window::open(&f.w2).unwrap();
+        fs::write(f.w2.join("p.txt"), "p\n").unwrap();
+        w.create(Some("p"), Some("p"), true).unwrap();
+        let good = fs::read_to_string(state_path(&w.git_dir)).unwrap();
+        fs::write(f.w2.join("q.txt"), "q\n").unwrap();
+        w.create(Some("q"), Some("q"), true).unwrap();
+        assert_eq!(
+            fs::read_to_string(backup_path(&w.git_dir)).unwrap(),
+            good,
+            "the state before the last save is the backup"
+        );
+        // A crash or full disk cut the file short.
+        let full = fs::read_to_string(state_path(&w.git_dir)).unwrap();
+        fs::write(state_path(&w.git_dir), &full[..full.len() / 2]).unwrap();
+        assert!(matches!(
+            check_state(&w.git_dir),
+            StateHealth::Bad { backup: true, .. }
+        ));
+        let again = Window::open(&f.w2).unwrap();
+        let names: Vec<&str> = again
+            .state
+            .branches
+            .iter()
+            .map(|b| b.name.as_str())
+            .collect();
+        assert_eq!(names, ["p"]);
+        // Saving over a bad file must not replace the good backup with it.
+        again.save().unwrap();
+        assert_eq!(fs::read_to_string(backup_path(&w.git_dir)).unwrap(), good);
+
+        fs::write(state_path(&w.git_dir), "").unwrap();
+        assert!(restore_backup(&w.git_dir).unwrap());
+        assert_eq!(check_state(&w.git_dir), StateHealth::Ok);
+        assert!(state_path(&w.git_dir).with_extension("json.bad").exists());
+        assert!(!restore_backup(&w.git_dir).unwrap(), "nothing left to do");
+
+        // No usable backup: a clear error.
+        fs::write(state_path(&w.git_dir), "{").unwrap();
+        fs::write(backup_path(&w.git_dir), "").unwrap();
+        let e = match Window::open(&f.w2) {
+            Ok(_) => panic!("opened a bad state"),
+            Err(e) => e,
+        };
+        assert_eq!(e.code(), "bad_stack_state");
     }
 
     fn rev(dir: &Path, r: &str) -> String {

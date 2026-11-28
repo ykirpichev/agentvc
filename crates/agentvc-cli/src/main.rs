@@ -4281,8 +4281,12 @@ fn doctor_cmd(space: &Space, repair: bool, offline: bool) -> anyhow::Result<Out>
         text += &format!("{sev:<7}  {}  {}{tag}\n", f.code, f.message);
     }
     text += &format!(
-        "checked {} attempts, {} snapshots, {} objects, {} active runs: ",
-        r.checked.attempts, r.checked.snapshots, r.checked.objects, r.checked.runs
+        "checked {} attempts, {} snapshots, {} objects, {} active runs, {} stacks: ",
+        r.checked.attempts,
+        r.checked.snapshots,
+        r.checked.objects,
+        r.checked.runs,
+        r.checked.stacks
     );
     text += &match (r.errors, r.warnings, r.repaired) {
         (0, 0, 0) => "no problems".to_string(),

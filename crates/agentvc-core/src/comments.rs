@@ -28,7 +28,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -47,7 +47,6 @@ pub const STORE_VERSION: u32 = 1;
 pub const CONTEXT: usize = 3;
 /// The longest comment body accepted.
 pub const MAX_BODY: usize = 64 * 1024;
-const LOCK_STALE: Duration = Duration::from_secs(60);
 const LOCK_WAIT: Duration = Duration::from_secs(10);
 
 fn err(code: &'static str, message: impl Into<String>) -> Error {
@@ -369,45 +368,28 @@ fn store_path_for(w: &Window) -> PathBuf {
     w.common_dir.join("agentvc").join("comments.json")
 }
 
-struct Lock(PathBuf);
-
-impl Drop for Lock {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.0);
-    }
+/// Held while changing a comments file; an OS lock, released when the
+/// process dies and never taken over by age (#204).
+struct Lock {
+    _held: crate::filelock::FileLock,
 }
 
 fn lock(file: &Path) -> Result<Lock> {
     let dir = file.parent().expect("has a parent");
-    fs::create_dir_all(dir).at(dir)?;
     let path = dir.join("comments.lock");
-    let start = Instant::now();
-    loop {
-        match fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-        {
-            Ok(_) => return Ok(Lock(path)),
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                let stale = fs::metadata(&path)
-                    .and_then(|m| m.modified())
-                    .ok()
-                    .and_then(|t| t.elapsed().ok())
-                    .is_some_and(|age| age > LOCK_STALE);
-                if stale {
-                    let _ = fs::remove_file(&path);
-                    continue;
-                }
-                if start.elapsed() > LOCK_WAIT {
-                    return Err(err(
-                        "comments_locked",
-                        format!("{} is locked by another command; try again", path.display()),
-                    ));
-                }
-                std::thread::sleep(Duration::from_millis(20));
-            }
-            Err(e) => return Err(e).at(&path),
+    match crate::filelock::acquire(&path, LOCK_WAIT, Duration::from_millis(20))? {
+        Ok(l) => Ok(Lock { _held: l }),
+        Err(holder) => {
+            let by = holder
+                .map(|h| format!(" ({})", h.describe()))
+                .unwrap_or_default();
+            Err(err(
+                "comments_locked",
+                format!(
+                    "{} is locked by another command{by}; try again",
+                    path.display()
+                ),
+            ))
         }
     }
 }

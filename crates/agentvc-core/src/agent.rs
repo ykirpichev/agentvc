@@ -144,7 +144,6 @@ pub const AGENT_MARKER: &str = "agentvc-agent";
 const STEPS: &str = "steps.jsonl";
 const OUTPUT: &str = "output.log";
 const LOCK_WAIT: Duration = Duration::from_secs(10);
-const LOCK_STALE: Duration = Duration::from_secs(30);
 const POLL: Duration = Duration::from_millis(300);
 const TAIL_LINES: usize = 20;
 
@@ -570,43 +569,27 @@ fn write_agent(dir: &Path, a: &Agent) -> Result<()> {
     fs::rename(&tmp, dir.join(RECORD)).at(dir.join(RECORD))
 }
 
-struct RecordLock(PathBuf);
-
-impl Drop for RecordLock {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.0);
-    }
+/// Held while changing `agent.json`; an OS lock, so a killed command never
+/// leaves it behind and a slow one never loses it (#204).
+struct RecordLock {
+    _held: crate::filelock::FileLock,
 }
 
 fn lock_record(dir: &Path) -> Result<RecordLock> {
     let path = dir.join("agent.lock");
-    let start = Instant::now();
-    loop {
-        match fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-        {
-            Ok(_) => return Ok(RecordLock(path)),
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                let stale = fs::metadata(&path)
-                    .and_then(|m| m.modified())
-                    .ok()
-                    .and_then(|t| t.elapsed().ok())
-                    .is_some_and(|age| age > LOCK_STALE);
-                if stale {
-                    let _ = fs::remove_file(&path);
-                    continue;
-                }
-                if start.elapsed() > LOCK_WAIT {
-                    return Err(agent_err(
-                        "agent_locked",
-                        format!("{} is locked by another command; try again", path.display()),
-                    ));
-                }
-                std::thread::sleep(Duration::from_millis(20));
-            }
-            Err(e) => return Err(e).at(&path),
+    match crate::filelock::acquire(&path, LOCK_WAIT, Duration::from_millis(20))? {
+        Ok(l) => Ok(RecordLock { _held: l }),
+        Err(holder) => {
+            let by = holder
+                .map(|h| format!(" ({})", h.describe()))
+                .unwrap_or_default();
+            Err(agent_err(
+                "agent_locked",
+                format!(
+                    "{} is locked by another command{by}; try again",
+                    path.display()
+                ),
+            ))
         }
     }
 }
