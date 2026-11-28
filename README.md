@@ -26,8 +26,7 @@ curl -fsSL https://raw.githubusercontent.com/ykirpichev/agentvc/main/scripts/get
 # Claude Code and by-hand steps: docs/install.md
 
 cd ~/src/my-repo
-agentvcd                                   # review UI at http://localhost:7420; runs in the
-                                           # foreground, so the rest goes in a second terminal
+agentvcd start                             # review UI at http://localhost:7420, in the background
 agentvc stack create my-fix -am "Fix it"   # a branch on this workspace's stack
 agentvc stack submit                       # push and open one PR per branch
 agentvc agent start --from my-fix "Add tests for the fix"   # an agent on top of it

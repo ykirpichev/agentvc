@@ -36,7 +36,7 @@ new ~/src/mono-4 --clone` makes one (build folders seeded copy-on-write).
 ## 3. Open the control room
 
 ```sh
-cd ~/src/mono-1 && agentvcd            # http://localhost:7420
+cd ~/src/mono-1 && agentvcd start      # http://localhost:7420, in the background
 ```
 
 One daemon per machine is enough: the sidebar shows the **space** (your
@@ -85,7 +85,7 @@ once): the workspace's agent settings, or `agentvc workspace agents`.
 - [ ] `get.sh --vscode` (step 1) on each machine, `GITHUB_TOKEN` set
 - [ ] Each folder with a stack: `stack adopt`, `stack log --prs`, `stack submit`
 - [ ] `gt` alias removed in those folders
-- [ ] `agentvcd` running; every folder shows up in the browser and in Cursor
+- [ ] `agentvcd start` (check with `agentvcd status`); every folder shows up in the browser and in Cursor
 - [ ] First merge with `agentvc stack merge` (or Merge), then `stack sync`
       in the other folders
 - [ ] One agent started from a branch, reviewed and landed
