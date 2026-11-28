@@ -15,6 +15,7 @@ import { scrollToThread, useThreads } from '../core/comments'
 import { useToast } from '../components/Toaster'
 import { agentLink, agentState, agentsOn, CLAUDE_MODELS, DEFAULT_PERMISSIONS, needsYou, PERMISSION_WORDS, PERMISSIONS_LINK, resultWords, RUNNER_WORDS, settingsLine, TOOL_MODEL_HOME, working } from '../core/agents'
 import { branchLink, codeLink } from '../core/links'
+import { joinPath } from '../core/editor'
 import { duration, money, plural, timeAgo } from '../lib/format'
 import { useReview } from './reviewContext'
 import './agents.css'
@@ -824,6 +825,7 @@ export function AgentPage() {
                     path={f.path}
                     kind={f.kind}
                     codeRef={`agent:${a.id}`}
+                    localFile={a.state === 'landed' || a.state === 'discarded' ? undefined : joinPath(a.worktree, f.path)}
                     comments={{ target, threads, readOnly: !steer || a.state === 'landed' || a.state === 'discarded' }}
                   />
                 )}

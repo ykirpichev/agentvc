@@ -2,6 +2,7 @@ import { structuredPatch } from 'diff'
 import { Fragment, useState } from 'react'
 import { Link } from 'react-router'
 import { codeLink } from '../core/links'
+import { inEditor, openDiffInEditor, openFileInEditor } from '../core/editor'
 import { api } from '../api/client'
 import { useLive } from '../api/live'
 import type { ChangeKind, FileResponse, Ref } from '../api/types'
@@ -93,6 +94,7 @@ export function DiffView({
   kind,
   comments,
   codeRef,
+  localFile,
 }: {
   base: Ref
   head: Ref
@@ -101,6 +103,8 @@ export function DiffView({
   comments?: DiffComments
   /** A browse ref (`branch:w1/x`, `agent:ag3`) to offer "View file" in the Code tab. */
   codeRef?: string
+  /** The file on this machine (the checkout or agent worktree holding `head`), opened in the editor. */
+  localFile?: string
 }) {
   const key = `${base}..${head}:${path}`
   // Diff inside the loader so it runs once per fetch, not per render.
@@ -202,10 +206,29 @@ export function DiffView({
             <span className="del">−{result.removed}</span>
           </span>
         )}
-        {codeRef && kind !== 'removed' && (
-          <Link className="diff-view-file" to={codeLink(codeRef, path)} title="See the whole file in the Code tab">
-            View file
-          </Link>
+        {inEditor ? (
+          <>
+            <button type="button" className="linkish diff-view-file" onClick={() => openDiffInEditor(base, head, path)} title="Show this change in the editor's diff view">
+              Open diff
+            </button>
+            {kind !== 'removed' && (
+              <button
+                type="button"
+                className="linkish diff-view-file"
+                onClick={() => openFileInEditor(head, path, localFile)}
+                title={localFile ? `Open ${localFile} in the editor` : 'Open this version in the editor, read-only'}
+              >
+                Open file
+              </button>
+            )}
+          </>
+        ) : (
+          codeRef &&
+          kind !== 'removed' && (
+            <Link className="diff-view-file" to={codeLink(codeRef, path)} title="See the whole file in the Code tab">
+              View file
+            </Link>
+          )
         )}
       </header>
       {files.error && <ErrorNote error={files.error} />}

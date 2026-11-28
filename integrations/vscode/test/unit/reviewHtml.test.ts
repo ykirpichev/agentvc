@@ -1,5 +1,5 @@
 import * as assert from 'node:assert/strict'
-import { THEME_VARS, WEBVIEW_COMMANDS, frameHtml, offlineHtml, originOf } from '../../src/reviewHtml'
+import { THEME_VARS, WEBVIEW_COMMANDS, frameHtml, refLabel, safePath, safeRef, offlineHtml, originOf } from '../../src/reviewHtml'
 
 describe('reviewHtml', () => {
   it('frames the daemon UI with a CSP limited to its origin', () => {
@@ -63,5 +63,16 @@ describe('reviewHtml', () => {
 
   it('takes the origin of a forwarded URL', () => {
     assert.equal(originOf('https://abc-7420.app.github.dev/'), 'https://abc-7420.app.github.dev')
+  })
+
+  it('only lets the page open known refs and paths inside the repo', () => {
+    for (const r of ['a3', 's12', 'git:0d7c9cc367443d389e7eb638866dcd5d337fce13', 'main', 'branch:w1/feat-x', 'agent:ag2', 'workspace:wd06']) assert.equal(safeRef(r), r)
+    for (const r of ['', 'HEAD', 'git:main', 'branch:a b', 'x:y', 7, 'a3; rm']) assert.equal(safeRef(r), null)
+    assert.equal(safePath('src/a.ts'), 'src/a.ts')
+    for (const p of ['/etc/passwd', '../x', 'a/../../x', 'C:/x', 'a//b', 'a\\b', '', 3]) assert.equal(safePath(p), null)
+    assert.equal(refLabel('git:0d7c9cc367443d'), '0d7c9cc')
+    assert.equal(refLabel('branch:w1/feat-x'), 'feat-x')
+    assert.equal(refLabel('agent:ag2'), 'ag2')
+    assert.equal(refLabel('a3'), 'a3')
   })
 })
