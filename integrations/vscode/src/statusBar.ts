@@ -26,7 +26,7 @@ export class StatusBar implements vscode.Disposable {
       this.item.hide()
       return
     }
-    if (s === 'nocli' && folders.length) {
+    if ((s === 'nocli' || s === 'localonly') && folders.length) {
       this.current = undefined
       this.item.text = '$(cloud-download) agentvc'
       this.item.tooltip = 'agentvc is not installed here. Click to install it.'

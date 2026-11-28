@@ -88,6 +88,11 @@ export function offlineContent(o: { state: string; machine?: string; folder?: st
   switch (o.state) {
     case 'connecting':
       return { text: 'Connecting to agentvcd…', buttons: '' }
+    case 'localonly':
+      return {
+        text: `This window's folder is on ${esc(on)}, but this copy of the agentvc extension runs on your computer, so it cannot see the folder. Install agentvc and the extension on ${esc(on)}: the button runs <code>get.sh --vscode</code> in this window's terminal (which runs on ${esc(on)}). Then reload the window.`,
+        buttons: `<button data-cmd="agentvc.install">Install on ${esc(on)}</button> ${retry}`,
+      }
     case 'nocli':
       return {
         text: `agentvc is not installed on ${esc(on)}. Install puts <code>agentvc</code> and <code>agentvcd</code> in <code>~/.local/bin</code>, then sets up this folder.`,

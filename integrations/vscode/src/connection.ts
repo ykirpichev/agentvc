@@ -9,7 +9,7 @@ import * as path from 'node:path'
 import * as vscode from 'vscode'
 import WebSocket from 'ws'
 import { AgentvcError, CliBackend, DaemonBackend, cliRunner, type Backend } from './client'
-import { INSTALL_COMMAND, machineLabel, resolveBinary, resolveDaemon } from './setup'
+import { INSTALL_COMMAND, INSTALL_WITH_EXTENSION_COMMAND, machineLabel, remoteHost, resolveBinary, resolveDaemon } from './setup'
 import type { DaemonEvent } from './types'
 
 /**
@@ -17,7 +17,18 @@ import type { DaemonEvent } from './types'
  * on (the remote host in a Remote-SSH window). `nospace`: it is, but the
  * folder has no space yet.
  */
-export type ConnState = 'connecting' | 'connected' | 'cli' | 'offline' | 'nospace' | 'nocli'
+export type ConnState = 'connecting' | 'connected' | 'cli' | 'offline' | 'nospace' | 'nocli' | 'localonly'
+
+/**
+ * True when this copy of the extension runs on the local machine while the
+ * window's folder lives on a remote host (Remote-SSH, containers): it cannot
+ * see the folder's files or run agentvc there. Happens when the .vsix was
+ * installed only locally and the editor runs it on the UI side anyway.
+ */
+export function runsBesideRemoteWindow(): boolean {
+  const f = vscode.workspace.workspaceFolders?.[0]
+  return !!vscode.env.remoteName && !!f && f.uri.scheme !== 'file'
+}
 
 /** The directory holding `.agentvc` at or above `dir`. */
 export function findSpaceRoot(dir: string): string | undefined {
@@ -52,6 +63,9 @@ function config() {
 
 /** The machine the workspace (and this extension) runs on, as the panel names it. */
 export function machine(): string {
+  const f = vscode.workspace.workspaceFolders?.[0]
+  // A local copy in a remote window: name the remote host, not this one.
+  if (runsBesideRemoteWindow() && f) return machineLabel(vscode.env.remoteName, remoteHost(f.uri.authority))
   return machineLabel(vscode.env.remoteName, os.hostname())
 }
 
@@ -118,6 +132,12 @@ export class Connection implements vscode.Disposable {
   async connect(opts: { forceStart?: boolean } = {}): Promise<ConnState> {
     this.closeEvents()
     this.setState('connecting')
+    if (runsBesideRemoteWindow()) {
+      this.log.appendLine(`the window is remote (${vscode.env.remoteName}) but this extension runs locally`)
+      this._backend = undefined
+      this.setState('localonly')
+      return this._state
+    }
     const folders = vscode.workspace.workspaceFolders ?? []
     this._root = undefined
     for (const f of folders) {
@@ -192,6 +212,19 @@ export class Connection implements vscode.Disposable {
    * On success, sets the folder up when it has no space yet.
    */
   async install(): Promise<boolean> {
+    if (runsBesideRemoteWindow()) {
+      // The window's terminal opens on the remote host: install agentvc and
+      // this extension there, then the window must reload to run that copy.
+      const t = vscode.window.createTerminal({ name: 'Install agentvc on the remote host' })
+      t.show()
+      t.sendText(`${INSTALL_WITH_EXTENSION_COMMAND} && echo 'Done: run "Developer: Reload Window".'`)
+      const pick = await vscode.window.showInformationMessage(
+        'agentvc: installing agentvc and the extension on the remote host in the terminal. Reload the window when it finishes.',
+        'Reload Window',
+      )
+      if (pick) void vscode.commands.executeCommand('workbench.action.reloadWindow')
+      return false
+    }
     if (process.platform === 'win32') {
       void vscode.env.openExternal(vscode.Uri.parse('https://github.com/ykirpichev/agentvc/blob/main/docs/install.md'))
       return false
