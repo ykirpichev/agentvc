@@ -62,4 +62,24 @@ s1=$(start dates log-prefix "$(step 'Read src/log.ts')sleep 3600" "npm test" "Lo
 wait_state "$q1" asking; wait_state "$p1" needs_approval
 sleep 2
 $AV agent stop "$s1" >/dev/null 2>&1 || true
+
+# Review comments (docs/comments.md): threads in every state on csv-docs.
+cid() { sed -n 's/.*"id": *"\(c[0-9]*\)".*/\1/p' | head -1; }
+(
+  cd "$D/win-export"
+  # Outdated: its line changed in a later commit.
+  $AV comment add csv-docs --path README.md --line 3 "Say which delimiter and quoting we use." >/dev/null
+  sed -i.bak 's/^Export reports as JSON or CSV\.$/Export reports as JSON or CSV (comma-separated, quoted as in RFC 4180)./' README.md && rm -f README.md.bak
+  git commit -qam "Name the CSV dialect"
+  # Open, on the new line.
+  $AV comment add csv-docs --path README.md --line 3 "Link to docs/export.md once it exists." >/dev/null
+  # Addressed: the agent that worked on it answered and marked it done.
+  c=$($AV comment add csv-docs --path README.md --line 1 --json "Title case: Invoices." | cid)
+  $AV comment reply "$c" --author "agent:$f1" "Renamed the heading to **Invoices**." >/dev/null
+  $AV comment resolve "$c" --author "agent:$f1" >/dev/null
+  # A draft, so the review bar shows "1 comment not sent".
+  $AV comment add csv-docs --path README.md --line 3 --draft "Mention the JSON shape too." >/dev/null
+)
+# On an agent: a comment on its whole change.
+(cd "$D/win-dates" && $AV comment add "$r1" "Also reject year 0." >/dev/null)
 $AV agent ls
