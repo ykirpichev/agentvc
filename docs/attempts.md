@@ -140,7 +140,9 @@ lost and deletes orphans.
   mount over frozen layers of the parent. A parent is copied once into a base
   layer (`agentvc init` starts that in the background, `agentvc prepare aN`
   does it on demand); after that, forks write only what changed, so they take
-  tens of milliseconds. Mounted with `mount(2)` as root,
+  tens of milliseconds. Ignored paths (`target/`, `node_modules/`, anything
+  `.gitignore` excludes) are not frozen into layers, so an overlay view starts
+  without the parent's build output and rebuilds it. Mounted with `mount(2)` as root,
   `fuse-overlayfs` if installed, or else inside an unprivileged user
   namespace, where only agentvc processes (and what `agentvc run` starts) see
   the view. Views are remounted on demand after a reboot (`agentvc path aN`).

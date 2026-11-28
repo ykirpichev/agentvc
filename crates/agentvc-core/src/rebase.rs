@@ -922,6 +922,7 @@ pub(crate) fn insert_snapshot(
     trigger: &str,
     meta: Option<serde_json::Value>,
 ) -> Result<Snapshot> {
+    space.objects().verify_tree(&Oid::from_hex(tree)?)?;
     space.db.execute(
         "INSERT INTO snapshots (attempt_id, tree, trigger, meta, created_at)
          VALUES (?1, ?2, ?3, ?4, ?5)",

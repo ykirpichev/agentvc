@@ -711,8 +711,9 @@ impl Space {
     ///
     /// Forking from an attempt snapshots the parent first and then clones its
     /// whole view, ignored build and dependency directories included, so the
-    /// child starts warm. Forking from an older snapshot writes that tree out
-    /// instead.
+    /// child starts warm. The overlay backend is the exception: it leaves
+    /// ignored paths out of the layers it freezes (#217), so its views start
+    /// cold. Forking from an older snapshot writes that tree out instead.
     pub fn fork(&self, req: &ForkRequest) -> Result<ForkResult> {
         if let Some(t) = req.task_id {
             self.task(t)?;
@@ -1129,7 +1130,11 @@ impl Space {
                 status: attempt.status.to_string(),
             });
         }
-        let tree = self.capture_view(&attempt)?.to_hex();
+        let oid = self.capture_view(&attempt)?;
+        // Never record (or return as unchanged) a snapshot whose tree did not
+        // make it into the store, e.g. on a full disk (#217).
+        self.objects.verify_tree(&oid)?;
+        let tree = oid.to_hex();
         if !always {
             // A fresh fork compares against the snapshot it was forked from.
             if let Ok(last) = self.head_snapshot(attempt_id) {
@@ -1244,11 +1249,16 @@ mod tests {
         };
         let a = space.fork(&req).unwrap();
         let view = &a.attempt.view_path;
-        // Ignored build state is carried over.
-        assert_eq!(
-            fs::read_to_string(view.join("target/cache")).unwrap(),
-            "warm"
-        );
+        // Ignored build state is carried over, except into overlay layers,
+        // which leave it out (#217).
+        if a.backend == crate::view::Backend::Overlay {
+            assert!(!view.join("target").exists());
+        } else {
+            assert_eq!(
+                fs::read_to_string(view.join("target/cache")).unwrap(),
+                "warm"
+            );
+        }
         fs::write(view.join("main.rs"), "fn main() { fast() }\n").unwrap();
         let s = space.snapshot(a.attempt.id, "tool", None).unwrap();
         assert!(!s.unchanged);
