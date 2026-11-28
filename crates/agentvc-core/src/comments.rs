@@ -1205,6 +1205,9 @@ pub fn submit(
             agent: None,
         });
     }
+    // The agent may have finished its turn while the review was written:
+    // read it again, or the review would wait for a turn that never comes.
+    let agent = agent.map(|a| crate::agent::record(cwd, &a.id).unwrap_or(a));
     let Some(a) = agent else {
         return Ok(Submitted {
             review,

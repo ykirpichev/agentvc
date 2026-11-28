@@ -91,6 +91,15 @@ An agent is **stale** when its start branch moved after the agent started.
 It can still land as a new branch, and the stack's restack moves it on top.
 A revision of a branch that moved is refused with `branch_moved`.
 
+Processes. The runner and the check each run in their own process group,
+recorded as the agent's `child_pid`. `stop` sends the group SIGTERM, then
+SIGKILL if it is still there after 5 seconds (`AGENTVC_AGENT_GRACE_MS`), so a
+runner that ignores SIGTERM or a long check still stops. When an agent's
+worker dies, the next read marks it `failed` and kills its runner, and a
+`reply` never starts a second runner next to an old one. `landed` and
+`discarded` are final: a worker that finishes after a discard leaves it
+discarded. The daemon watches open agents only.
+
 ## Runners
 
 - **Claude Code** (default): `claude -p --output-format stream-json`, run in

@@ -4463,6 +4463,34 @@ fn story_commits_text(commits: &[agentvc_core::export::StoryCommit]) -> String {
 #[cfg(test)]
 mod tests {
     use super::short_command;
+    use clap::Parser;
+
+    #[test]
+    fn options_after_an_agent_prompt_are_options() {
+        // The command enum is large: parse on a thread with room for it.
+        std::thread::Builder::new()
+            .stack_size(16 << 20)
+            .spawn(parse_agent_start)
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    fn parse_agent_start() {
+        let cli = super::Cli::try_parse_from([
+            "agentvc", "agent", "start", "fix", "the", "bug", "--json",
+        ])
+        .unwrap();
+        assert!(cli.json);
+        let super::Cmd::Agent(super::agent_cmd::AgentCmd::Start { prompt, .. }) = cli.cmd else {
+            panic!("not agent start");
+        };
+        assert_eq!(prompt, ["fix", "the", "bug"]);
+        // `--` keeps a prompt that starts with a dash.
+        let cli = super::Cli::try_parse_from(["agentvc", "agent", "start", "--", "-x", "--json"])
+            .unwrap();
+        assert!(!cli.json);
+    }
 
     #[test]
     fn short_command_cuts_long_prompts() {
