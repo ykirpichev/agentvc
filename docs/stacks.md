@@ -96,8 +96,8 @@ Without `--resolve` or `--keep-conflicts` the command line still fails with
 | `stack log [--all] [--prs]` | This window's branches with commits, PRs, `needs restack`; `--all` adds other windows read-only; `--prs` fetches each PR's checks and review first |
 | `stack create [name] [-m msg] [-a] [-i]` | Branch on the current one (or the trunk), commit staged work; name from the message if omitted. `--insert` puts it between the current branch and its children |
 | `stack modify [-a] [-m msg] [-c]` | Amend (or `-c` add a commit), restack the branches above |
-| `stack restack [--branch B] [--keep-conflicts \| --resolve]` | Replay branches onto their parents' tips |
-| `stack sync [--no-fetch] [--keep-merged]` | Fetch trunk, drop merged branches, restack |
+| `stack restack [--branch B] [--keep-conflicts \| --resolve]` | Replay branches onto their parents' tips. A commit already in the parent is dropped; one that would turn empty only because conflict resolution took the parent's side (say an indentation-only change) stops with `conflict` instead |
+| `stack sync [--no-fetch] [--keep-merged]` | Fetch trunk, drop merged branches, restack. A branch counts as merged only if its tip is in the trunk and it had commits of its own (an empty branch fast-forwarded to trunk is kept), its commits replay onto the trunk as no change without any conflict, or its PR is merged. Before deleting one, its tip is kept as `refs/agentvc/trash/<branch>`: `git branch <branch> refs/agentvc/trash/<branch>` brings it back |
 | `stack adopt B [--parent P] [--no-chain]` | Track existing branches: B and the untracked branches below it; parents from Graphite's `refs/branch-metadata` or git history |
 | `stack submit [--branch B \| --all] [--draft] [--force] [--no-pr]` | Push with a lease; one PR per branch with its parent as base; the stack listed in every PR body; new PRs get the `agentvc:no-restack` label |
 | `stack merge [--branch B] [--method squash\|merge\|rebase] [--dry-run]` | Merge the PRs on GitHub from the bottom up to B (default: current); stops at the first that isn't ready |
