@@ -2533,3 +2533,203 @@ fn tool_worktrees_nest_under_their_folder_and_prune_keeps_work() {
     let l = agentvc_home(&home, &repo, &["workspace", "ls"]);
     assert_eq!(l["workspaces"].as_array().unwrap().len(), 4, "{l}");
 }
+
+/// A repo with `main` pushed to origin and a clone `a` (#202).
+fn undo_repo(tmp: &Path) -> std::path::PathBuf {
+    git(
+        tmp,
+        &["init", "--quiet", "--bare", "-b", "main", "origin.git"],
+    );
+    let a = tmp.join("a");
+    git(tmp, &["clone", "--quiet", "origin.git", "a"]);
+    fs::write(a.join("README"), "hi\n").unwrap();
+    git(&a, &["add", "-A"]);
+    git(&a, &["commit", "--quiet", "-m", "init"]);
+    git(&a, &["push", "--quiet", "origin", "HEAD:main"]);
+    git(&a, &["fetch", "--quiet"]);
+    a
+}
+
+#[test]
+fn stack_undo_never_takes_a_branch_back_from_another_window() {
+    let tmp = tempdir();
+    let home = tmp.path().join("home");
+    let a = undo_repo(tmp.path());
+    let c = tmp.path().join("c");
+    git(
+        &a,
+        &[
+            "worktree",
+            "add",
+            "--quiet",
+            "--detach",
+            c.to_str().unwrap(),
+        ],
+    );
+    let r = agentvc_home(&home, &a, &["stack", "create", "x", "-m", "x"]);
+    assert_eq!(r["ok"], true, "{r}");
+    let r = agentvc_home(&home, &a, &["stack", "give", "x", "--to", "../c"]);
+    assert_eq!(r["ok"], true, "{r}");
+    git(&a, &["switch", "--quiet", "--detach"]);
+    let r = agentvc_home(&home, &c, &["stack", "checkout", "x"]);
+    assert_eq!(r["ok"], true, "{r}");
+    let tip = git(&a, &["rev-parse", "x"]);
+
+    // The give is the newest step, and x is checked out over there.
+    let r = agentvc_home(&home, &a, &["stack", "undo"]);
+    assert_eq!(r["error"]["code"], "undo_owned_elsewhere", "{r}");
+    // Reaching past it to the create is refused too.
+    let r = agentvc_home(&home, &a, &["stack", "undo", "1"]);
+    assert_eq!(r["error"]["code"], "undo_not_newest", "{r}");
+    assert_eq!(r["error"]["later"][0]["command"], "give x --to ../c");
+    assert_eq!(git(&a, &["rev-parse", "x"]), tip);
+    assert_eq!(git(&c, &["branch", "--show-current"]), "x");
+    let l = agentvc_home(&home, &c, &["stack", "log"]);
+    assert_eq!(l["branches"][0]["name"], "x", "{l}");
+    assert_eq!(l["branches"][0]["tip"], tip.as_str(), "{l}");
+
+    // Once c lets go of the checkout, undo takes x back, and redo gives it
+    // again.
+    git(&c, &["switch", "--quiet", "--detach"]);
+    let r = agentvc_home(&home, &a, &["stack", "undo"]);
+    assert_eq!(r["ok"], true, "{r}");
+    let l = agentvc_home(&home, &c, &["stack", "log"]);
+    assert_eq!(l["branches"].as_array().unwrap().len(), 0, "{l}");
+    let l = agentvc_home(&home, &a, &["stack", "log"]);
+    assert_eq!(l["branches"][0]["name"], "x", "{l}");
+    let entry = r["entry"].as_u64().unwrap().to_string();
+    let r = agentvc_home(&home, &a, &["stack", "undo", &entry]);
+    assert_eq!(r["ok"], true, "{r}");
+    let l = agentvc_home(&home, &c, &["stack", "log"]);
+    assert_eq!(l["branches"][0]["name"], "x", "{l}");
+    assert_eq!(git(&a, &["rev-parse", "x"]), tip);
+}
+
+#[test]
+fn stack_undo_of_an_older_step_is_refused_while_later_ones_stand() {
+    let tmp = tempdir();
+    let home = tmp.path().join("home");
+    let a = undo_repo(tmp.path());
+    fs::write(a.join("a1.txt"), "1\n").unwrap();
+    let r = agentvc_home(&home, &a, &["stack", "create", "a1", "-a", "-m", "a1"]);
+    assert_eq!(r["ok"], true, "{r}");
+    fs::write(a.join("a1.txt"), "2\n").unwrap();
+    let r = agentvc_home(&home, &a, &["stack", "modify", "-a"]);
+    assert_eq!(r["ok"], true, "{r}");
+    git(&a, &["branch", "other", "origin/main"]);
+    let r = agentvc_home(&home, &a, &["stack", "adopt", "other"]);
+    assert_eq!(r["ok"], true, "{r}");
+    let r = agentvc_home(&home, &a, &["stack", "create", "b1", "-m", "b1"]);
+    assert_eq!(r["ok"], true, "{r}");
+    let before = agentvc_home(&home, &a, &["stack", "log"]);
+    let head = git(&a, &["branch", "--show-current"]);
+
+    let r = agentvc_home(&home, &a, &["stack", "undo", "2"]);
+    assert_eq!(r["error"]["code"], "undo_not_newest", "{r}");
+    let later: Vec<u64> = r["error"]["later"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x["id"].as_u64().unwrap())
+        .collect();
+    assert_eq!(later, vec![4, 3], "{r}");
+    let msg = r["error"]["message"].as_str().unwrap();
+    assert!(
+        msg.contains("create b1") && msg.contains("adopt other"),
+        "{msg}"
+    );
+    // Nothing changed.
+    assert_eq!(agentvc_home(&home, &a, &["stack", "log"]), before);
+    assert_eq!(git(&a, &["branch", "--show-current"]), head);
+
+    // Walking back one at a time still works.
+    for _ in 0..3 {
+        let r = agentvc_home(&home, &a, &["stack", "undo"]);
+        assert_eq!(r["ok"], true, "{r}");
+    }
+    assert_eq!(git(&a, &["show", "a1:a1.txt"]), "1");
+    // Undoing the adopt only stopped tracking the branch.
+    assert_eq!(
+        git(&a, &["rev-parse", "other"]),
+        git(&a, &["rev-parse", "origin/main"])
+    );
+}
+
+#[test]
+fn stack_undo_of_a_commit_keeps_the_work_in_the_worktree() {
+    let tmp = tempdir();
+    let home = tmp.path().join("home");
+    let a = undo_repo(tmp.path());
+    fs::write(a.join("work.txt"), "work\n").unwrap();
+    let r = agentvc_home(&home, &a, &["stack", "create", "-a", "-m", "work"]);
+    assert_eq!(r["ok"], true, "{r}");
+    fs::write(a.join("work.txt"), "more work\n").unwrap();
+    let r = agentvc_home(&home, &a, &["stack", "modify", "-a"]);
+    assert_eq!(r["ok"], true, "{r}");
+
+    // Undoing the modify leaves its change uncommitted on the first commit.
+    let r = agentvc_home(&home, &a, &["stack", "undo"]);
+    assert_eq!(r["ok"], true, "{r}");
+    assert_eq!(git(&a, &["show", "work:work.txt"]), "work");
+    assert_eq!(
+        fs::read_to_string(a.join("work.txt")).unwrap(),
+        "more work\n"
+    );
+    assert_eq!(git(&a, &["status", "--porcelain"]), "M  work.txt");
+
+    // Undoing the create: the branch goes, the file stays, as a change.
+    let r = agentvc_home(&home, &a, &["stack", "undo"]);
+    assert_eq!(r["ok"], true, "{r}");
+    assert!(git(&a, &["branch", "--list", "work"]).is_empty());
+    assert_eq!(
+        fs::read_to_string(a.join("work.txt")).unwrap(),
+        "more work\n"
+    );
+    assert_eq!(git(&a, &["status", "--porcelain"]), "A  work.txt");
+
+    // Redo commits it again, and the worktree is clean.
+    let id = r["entry"].as_u64().unwrap().to_string();
+    let r = agentvc_home(&home, &a, &["stack", "undo", &id]);
+    assert_eq!(r["ok"], true, "{r}");
+    assert_eq!(git(&a, &["branch", "--show-current"]), "work");
+    assert_eq!(git(&a, &["show", "work:work.txt"]), "work");
+    assert_eq!(git(&a, &["status", "--porcelain"]), "M  work.txt");
+}
+
+#[test]
+fn stack_undo_reverses_a_restack_finished_with_continue() {
+    let tmp = tempdir();
+    let home = tmp.path().join("home");
+    let a = undo_repo(tmp.path());
+    fs::write(a.join("f.txt"), "low\n").unwrap();
+    let r = agentvc_home(&home, &a, &["stack", "create", "low", "-a", "-m", "low"]);
+    assert_eq!(r["ok"], true, "{r}");
+    fs::write(a.join("f.txt"), "high\n").unwrap();
+    let r = agentvc_home(&home, &a, &["stack", "create", "high", "-a", "-m", "high"]);
+    assert_eq!(r["ok"], true, "{r}");
+    let low = git(&a, &["rev-parse", "low"]);
+    let high = git(&a, &["rev-parse", "high"]);
+    // Change low under high so restacking high conflicts.
+    git(&a, &["switch", "--quiet", "low"]);
+    fs::write(a.join("f.txt"), "low 2\n").unwrap();
+    git(&a, &["commit", "--quiet", "-am", "low 2"]);
+    let low2 = git(&a, &["rev-parse", "low"]);
+    let r = agentvc_home(&home, &a, &["stack", "restack", "--keep-conflicts"]);
+    assert_eq!(r["conflict"]["branch"], "high", "{r}");
+    fs::write(a.join("f.txt"), "resolved\n").unwrap();
+    git(&a, &["add", "f.txt"]);
+    let r = agentvc_home(&home, &a, &["stack", "continue"]);
+    assert_eq!(r["ok"], true, "{r}");
+    assert_ne!(git(&a, &["rev-parse", "high"]), high);
+
+    let rows = agentvc_home(&home, &a, &["stack", "undo", "--list"]);
+    assert_eq!(
+        rows["entries"][0]["command"], "restack --keep-conflicts + continue",
+        "{rows}"
+    );
+    let r = agentvc_home(&home, &a, &["stack", "undo"]);
+    assert_eq!(r["ok"], true, "{r}");
+    assert_eq!(git(&a, &["rev-parse", "high"]), high);
+    assert_eq!(git(&a, &["rev-parse", "low"]), low2);
+    assert_ne!(low, low2);
+}

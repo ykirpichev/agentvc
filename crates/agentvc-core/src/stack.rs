@@ -506,7 +506,7 @@ pub(crate) fn read_state(git_dir: &Path) -> Result<Option<State>> {
     }
 }
 
-fn write_state(git_dir: &Path, state: &State) -> Result<()> {
+pub(crate) fn write_state(git_dir: &Path, state: &State) -> Result<()> {
     let path = state_path(git_dir);
     let dir = path.parent().expect("has a parent");
     fs::create_dir_all(dir).at(dir)?;
@@ -814,7 +814,7 @@ impl Window {
     }
 
     /// Worktree directory -> checked-out branch, for the other worktrees.
-    fn checkouts_elsewhere(&self) -> HashMap<String, PathBuf> {
+    pub(crate) fn checkouts_elsewhere(&self) -> HashMap<String, PathBuf> {
         let mut map = HashMap::new();
         let Ok(out) = self.repo.git(&["worktree", "list", "--porcelain"], None) else {
             return map;

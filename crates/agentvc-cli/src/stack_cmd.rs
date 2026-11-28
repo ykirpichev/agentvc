@@ -282,7 +282,9 @@ pub enum StackCmd {
     /// back to its old parent.
     Abort,
     /// Undo this window's latest stack command (repeat to walk back), or
-    /// command ID; undoing an undo redoes it. `--list` shows the log.
+    /// command ID while no later command stands; undoing an undo redoes it.
+    /// A command that committed worktree changes leaves them staged.
+    /// `--list` shows the log.
     Undo {
         id: Option<u64>,
         #[arg(long)]
@@ -646,17 +648,29 @@ pub fn run(cwd: &Path, cmd: StackCmd) -> anyhow::Result<(Value, String)> {
             | StackCmd::Top
             | StackCmd::Bottom
     );
-    let begun = undoable.then(|| stackundo::begin(cwd)).flatten();
+    // `give` records itself (with what it handed over); `continue` and
+    // `abort` fold into the command that stopped on the conflict.
+    let resume = matches!(cmd, StackCmd::Continue | StackCmd::Abort);
+    let begun = (undoable || resume)
+        .then(|| stackundo::begin(cwd))
+        .flatten();
     let out = dispatch(cwd, cmd);
     if undoable {
-        let label: Vec<String> = std::env::args()
-            .skip_while(|a| a != "stack")
-            .skip(1)
-            .filter(|a| a != "--json")
-            .collect();
-        stackundo::finish(cwd, &label.join(" "), begun);
+        stackundo::finish(cwd, &undo_label(), begun);
+    } else if resume {
+        stackundo::finish_resume(cwd, &undo_label(), begun);
     }
     out
+}
+
+/// The command line as `stack undo --list` shows it.
+fn undo_label() -> String {
+    let label: Vec<String> = std::env::args()
+        .skip_while(|a| a != "stack")
+        .skip(1)
+        .filter(|a| a != "--json")
+        .collect();
+    label.join(" ")
 }
 
 fn dispatch(cwd: &Path, cmd: StackCmd) -> anyhow::Result<(Value, String)> {
@@ -911,7 +925,15 @@ fn dispatch(cwd: &Path, cmd: StackCmd) -> anyhow::Result<(Value, String)> {
             let _their_lock = (other.git_dir != w.git_dir)
                 .then(|| workspace::lock(&other.git_dir))
                 .transpose()?;
-            let moved = w.give(&branch, &to)?;
+            let begun = stackundo::begin(cwd);
+            let res = w.give(&branch, &to);
+            let transfer = res.as_ref().ok().map(|m| stackundo::Transfer {
+                window: other.git_dir.clone(),
+                branches: m.clone(),
+                outgoing: true,
+            });
+            stackundo::finish_with(cwd, &undo_label(), begun, transfer);
+            let moved = res?;
             (
                 json!({ "moved": moved, "to": to }),
                 format!("gave {} to {}", moved.join(", "), to.display()),
